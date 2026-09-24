@@ -3,6 +3,7 @@
 import hashlib
 import json
 
+import chess
 import numpy as np
 import pytest
 from data_fakes import synthetic_lines
@@ -113,6 +114,19 @@ def test_pv_monotonicity_counts_roots_whose_alternatives_never_beat_pv1():
     roots["alt_cp"][1, :2] = [60, 10]  # PV 2 beats PV 1
     roots["alt_cp"][2, :2] = [20, 30]  # PV 3 beats PV 2
     assert verify.monotone_counts(roots) == (3, 1)
+
+
+@pytest.mark.parametrize(
+    ("fen", "valid", "impossible"),
+    [
+        (chess.STARTING_FEN, True, False),
+        ("7K/PPPPPPPP/PPPPPPPP/8/8/8/8/7k w - - 0 1", True, True),  # 16 pawns: composed, still playable
+        ("4k3/8/8/8/8/8/8/4K2R w K - 0 1", True, False),
+        ("4k3/8/8/8/8/8/4q3/4K3 b - - 0 1", False, False),  # White is in check with Black to move
+    ],
+)
+def test_impossible_material_is_counted_apart_from_invalid_positions(fen, valid, impossible):
+    assert verify.classify(chess.Board(fen)) == (valid, impossible)
 
 
 def test_the_valprobe_children_found_in_train_are_counted(pack_dir, tmp_path):

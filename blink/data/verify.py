@@ -4,8 +4,10 @@ Checked on every train record (roots and children): sha256 against the manifest,
 no hit in the blocklist or in val, test_iid, test_grouped (roots and children), no child equal to a train
 root, no duplicate child. Checked on a random sample (1% by default): the fen_hash is the board's hash,
 the best and alternative moves are legal, the position is valid for python-chess, and no record belongs
-to a held-out group. Measured: PV monotonicity (side-to-move win% never rises from PV 1 down; a sign flip
-drives it to about 50%), split fractions, shard sizes and each root shard's mean win%.
+to a held-out group. Composed positions with more pawns or pieces than a game can reach (the analysis
+board allows them) are playable, so they count as impossible_material, not as invalid.
+Measured: PV monotonicity (side-to-move win% never rises from PV 1 down; a sign flip drives it to about
+50%), split fractions, shard sizes and each root shard's mean win%.
 When valprobe.npz exists, the share of its children that are also train positions is reported.
 """
 
@@ -15,6 +17,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import chess
 import numpy as np
 
 from blink.board import encode, moves
@@ -29,6 +32,12 @@ MONOTONE_MIN_PCT = 99.9
 SHARD_SIZE_DEV_PCT = 2.0
 MEAN_WIN_DEV_PT = 0.5
 TIE = 1e-12
+MATERIAL_ONLY = (
+    chess.STATUS_TOO_MANY_WHITE_PAWNS
+    | chess.STATUS_TOO_MANY_BLACK_PAWNS
+    | chess.STATUS_TOO_MANY_WHITE_PIECES
+    | chess.STATUS_TOO_MANY_BLACK_PIECES
+)
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,7 @@ COUNTS = (
     "alts",
     "legal_alts",
     "valid",
+    "impossible_material",
     "multi_pv",
     "monotone",
 )
@@ -126,6 +136,18 @@ def _read_checked(path: Path, entry: dict, dtype: np.dtype, tally: _Tally) -> np
     return np.frombuffer(data, dtype=dtype)
 
 
+def classify(board: chess.Board) -> tuple[bool, bool]:
+    """(valid apart from material counts, has more pawns or pieces than a game can reach)."""
+    status = board.status()
+    return status & ~MATERIAL_ONLY == chess.STATUS_VALID, bool(status & MATERIAL_ONLY)
+
+
+def _tally_position(board: chess.Board, tally: "_Tally") -> None:
+    valid, impossible = classify(board)
+    tally.add("valid", valid)
+    tally.add("impossible_material", impossible)
+
+
 def _sample_roots(recs: np.ndarray, tally: _Tally) -> None:
     for rec in recs:
         board = children.codes_to_board(encode.unpack(rec["board"]))
@@ -134,12 +156,12 @@ def _sample_roots(recs: np.ndarray, tally: _Tally) -> None:
         alts = [int(m) for m in rec["alt_move"] if int(m) != NO_MOVE]
         tally.add("alts", len(alts))
         tally.add("legal_alts", sum(bool(legal[m]) for m in alts))
-        tally.add("valid", board.is_valid())
+        _tally_position(board, tally)
 
 
 def _sample_children(recs: np.ndarray, tally: _Tally) -> None:
     for rec in recs:
-        tally.add("valid", children.codes_to_board(encode.unpack(rec["board"])).is_valid())
+        _tally_position(children.codes_to_board(encode.unpack(rec["board"])), tally)
 
 
 def _sample(recs: np.ndarray, kind: str, bucket: int, cfg: VerifyConfig, salt: int, tally: _Tally) -> None:
