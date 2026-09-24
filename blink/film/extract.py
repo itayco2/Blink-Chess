@@ -3,7 +3,10 @@
 The position is a Lichess band puzzle after its setup move (the solver to move, the solution is the
 next move of the line). The band puzzles are in the leakage blocklist, so the pack never let the
 position, its colour mirror or any later position of its line into training; extract re-checks that
-against the blocklist file and refuses a position the blocklist does not hold.
+against the blocklist file and refuses a position the blocklist does not hold. It then proves the file
+is the run's own blocklist: the run's config.json names its pack (data.dir, or --pack), whose manifest
+must record the same blocklist sha256 and hash to the frames' WORLD. A run trained on raw data, on a
+pack built without a blocklist (the P1 skeleton) or on an older blocklist is refused.
 
 Frames come from runs/NAME/film/frame_<step>.pt (plan P7: step 0, 19 geometric EMA steps, the
 shipped weights), sorted numerically and required to share one WORLD. A run saved before film
@@ -122,6 +125,53 @@ def never_in_training(position: FilmPosition, blocklist_path: Path) -> dict:
         "position_blocked": position_blocked,
         "line_blocked": line_blocked,
     }
+
+
+def _pack_manifest_path(run_dir: Path, pack_dir: Path | None) -> Path:
+    config_path = Path(run_dir) / "config.json"
+    if not config_path.is_file():
+        raise FilmError(
+            f"{run_dir} has no config.json: the pack it trained on is unknown, so its blocklist is too"
+        )
+    data = json.loads(config_path.read_text(encoding="utf-8")).get("data") or {}
+    if data.get("source") != "shards":
+        raise FilmError(
+            f"{Path(run_dir).name} trained on {data.get('source')!r} data, not a pack built with a "
+            "blocklist: nothing proves the film position was kept out of its training"
+        )
+    folder = pack_dir if pack_dir is not None else data.get("dir")
+    if not folder:
+        raise FilmError(f"{Path(run_dir).name}'s config.json names no pack directory; pass --pack DIR")
+    manifest = Path(folder) / "manifest.json"
+    if not manifest.is_file():
+        raise FilmError(f"the run's pack manifest {manifest} is missing; pass --pack DIR if the pack moved")
+    return manifest
+
+
+def pack_provenance(run_dir: Path, world: str, blocklist_sha256: str, pack_dir: Path | None = None) -> dict:
+    """Proof that the run's own pack was built with this blocklist: its manifest names the same sha256,
+    and the manifest's WORLD (commands.train_data.pack_world, which hashes the blocklist in) is the
+    frames' world, so the manifest read here is the one the frames were trained on."""
+    from blink.commands.train_data import pack_world
+
+    path = _pack_manifest_path(run_dir, pack_dir)
+    raw = path.read_bytes()
+    manifest = json.loads(raw.decode("utf-8"))
+    entry = manifest.get("blocklist")
+    pack_sha = entry.get("sha256") if isinstance(entry, dict) else None
+    if not pack_sha:
+        raise FilmError(
+            f"the pack {path.parent} was built without a blocklist: the position may be in training"
+        )
+    if pack_sha != blocklist_sha256:
+        raise FilmError(
+            f"--blocklist (sha256 {blocklist_sha256[:12]}) is not the blocklist the pack {path.parent} was "
+            f"built with (sha256 {pack_sha[:12]})"
+        )
+    pack = pack_world(raw, manifest)
+    if pack != world:
+        raise FilmError(f"the manifest {path} is world {pack}, but the frames were trained in world {world}")
+    return {"pack_manifest": str(path), "pack_blocklist_sha256": pack_sha, "pack_world": pack}
 
 
 # ------------------------------------------------------------------------------------------ frames
@@ -320,11 +370,14 @@ def extract(
     expect: int | None = FILM_FRAMES,
     device: str = "cpu",
     milestones: Sequence[tuple[str, float]] = (),
+    pack_dir: Path | None = None,
 ) -> dict:
     proof = never_in_training(position, blocklist_path)
     frames, worlds = _measured_frames(Path(run_dir), chess.Board(position.fen), device)
     if len(worlds) != 1:
         raise FilmError(f"the frames come from {len(worlds)} worlds: {sorted(worlds)}")
+    world = next(iter(worlds))
+    proof |= pack_provenance(Path(run_dir), world, proof["blocklist_sha256"], pack_dir)
     measured = len(frames)
     if pad_to:
         frames = pad_frames(frames, pad_to)
@@ -340,7 +393,7 @@ def extract(
     return {
         "format": FORMAT,
         "run": Path(run_dir).name,
-        "world": worlds.pop(),
+        "world": world,
         "position": asdict(position),
         "never_in_training": proof,
         "frames": frames,

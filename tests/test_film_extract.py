@@ -1,5 +1,6 @@
 """film.json: every frame of a run, run once on one never-seen puzzle position (plan P11)."""
 
+import hashlib
 import json
 
 import chess
@@ -47,10 +48,30 @@ def _film_run(tmp_path, steps, world=WORLD, name="run"):
     for step in steps:
         kind = "init" if step == 0 else "ema"
         film.save_frame(run, step, kind, _weights(step), world, config_to_dict(TINY), samples=step * 8)
+    _config(run, tmp_path / "pack")
     return run
 
 
+def _config(run, pack_dir, **extra):
+    """config.json as the trainer writes it: data.dir names the pack the run trained on."""
+    run.mkdir(parents=True, exist_ok=True)
+    record = {"config": {"batch_size": 8}, "data": {"source": "shards", "dir": str(pack_dir)}, **extra}
+    (run / "config.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def _pack(pack_dir, blocklist_sha, world=WORLD):
+    """A pack manifest that records its blocklist's sha256 and its WORLD."""
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    entry = (
+        None if blocklist_sha is None else {"path": "blocklist.npy", "sha256": blocklist_sha, "entries": 3}
+    )
+    (pack_dir / "manifest.json").write_text(
+        json.dumps({"world": world, "blocklist": entry}), encoding="utf-8"
+    )
+
+
 def _blocklist(tmp_path, position: extract.FilmPosition, blocked: bool = True):
+    """The blocklist file, and the pack (tmp_path/pack) built with it."""
     board = chess.Board(position.setup_fen)
     hashes = {encode.position_hash(board)}
     for uci in position.line:
@@ -60,6 +81,7 @@ def _blocklist(tmp_path, position: extract.FilmPosition, blocked: bool = True):
         hashes = {h ^ 1 for h in hashes}
     path = tmp_path / "blocklist.npy"
     blocklist.save(hashes, path)
+    _pack(tmp_path / "pack", hashlib.sha256(path.read_bytes()).hexdigest())
     return path
 
 
@@ -174,7 +196,6 @@ def test_gpu_hours_per_frame_come_from_the_run_telemetry(tmp_path):
     run = _film_run(tmp_path, [0, 250, 500])
     rows = [{"step": 250, "samples_per_s": 250 * 8 / 36.0}, {"step": 500, "samples_per_s": 250 * 8 / 72.0}]
     (run / "metrics.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-    (run / "config.json").write_text(json.dumps({"config": {"batch_size": 8}}), encoding="utf-8")
     position = _position(tmp_path)
     frames = extract.extract(run, position, _blocklist(tmp_path, position), expect=None)["frames"]
     assert [f["gpu_hours"] for f in frames] == pytest.approx([0.0, 0.01, 0.03])
@@ -267,3 +288,56 @@ def test_gpu_hours_of_a_branched_run_start_at_its_branch_step(tmp_path):
     }
     (run / "config.json").write_text(json.dumps(config), encoding="utf-8")
     assert extract.gpu_hours_by_step(run) == [(500, pytest.approx(0.01))]
+
+
+def test_the_proof_ties_the_blocklist_to_the_pack_the_run_trained_on(tmp_path):
+    run = _film_run(tmp_path, [0, 250])
+    position = _position(tmp_path)
+    proof = extract.extract(run, position, _blocklist(tmp_path, position), expect=None)["never_in_training"]
+    assert proof["pack_blocklist_sha256"] == proof["blocklist_sha256"]
+    assert proof["pack_world"] == WORLD and proof["pack_manifest"].endswith("manifest.json")
+
+
+def test_a_run_whose_pack_had_no_blocklist_is_refused(tmp_path):
+    """The P1 skeleton pack has blocklist null: nothing kept the film position out of its training."""
+    run = _film_run(tmp_path, [0, 250])
+    position = _position(tmp_path)
+    path = _blocklist(tmp_path, position)
+    _pack(tmp_path / "pack", None)
+    with pytest.raises(extract.FilmError, match="without a blocklist"):
+        extract.extract(run, position, path, expect=None)
+
+
+def test_a_blocklist_other_than_the_packs_is_refused(tmp_path):
+    run = _film_run(tmp_path, [0, 250])
+    position = _position(tmp_path)
+    path = _blocklist(tmp_path, position)
+    _pack(tmp_path / "pack", "0" * 64)  # the pack was built with an older blocklist
+    with pytest.raises(extract.FilmError, match="not the blocklist"):
+        extract.extract(run, position, path, expect=None)
+
+
+def test_a_manifest_from_another_world_is_refused(tmp_path):
+    run = _film_run(tmp_path, [0, 250])
+    position = _position(tmp_path)
+    path = _blocklist(tmp_path, position)
+    _pack(tmp_path / "pack", hashlib.sha256(path.read_bytes()).hexdigest(), world="ffffffffffff")
+    with pytest.raises(extract.FilmError, match="world"):
+        extract.extract(run, position, path, expect=None)
+
+
+def test_a_run_that_names_no_pack_is_refused_unless_one_is_given(tmp_path):
+    run = _film_run(tmp_path, [0, 250])
+    position = _position(tmp_path)
+    path = _blocklist(tmp_path, position)
+    _config(run, tmp_path / "moved")
+    with pytest.raises(extract.FilmError, match="--pack"):
+        extract.extract(run, position, path, expect=None)
+    proof = extract.extract(run, position, path, expect=None, pack_dir=tmp_path / "pack")["never_in_training"]
+    assert proof["pack_blocklist_sha256"] == proof["blocklist_sha256"]
+    (run / "config.json").unlink()
+    with pytest.raises(extract.FilmError, match="config.json"):
+        extract.extract(run, position, path, expect=None)
+    (run / "config.json").write_text(json.dumps({"data": {"source": "raw"}}), encoding="utf-8")
+    with pytest.raises(extract.FilmError, match="raw"):
+        extract.extract(run, position, path, expect=None)

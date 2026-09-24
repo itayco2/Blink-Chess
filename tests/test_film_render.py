@@ -30,6 +30,12 @@ ROW = {
 }
 
 
+PROOF = {
+    "position_blocked": True, "line_blocked": True, "blocklist_sha256": "ab" * 32,
+    "pack_blocklist_sha256": "ab" * 32, "pack_world": "w",
+}  # fmt: skip
+
+
 def _film(n_frames: int = 3) -> dict:
     """A small film.json made by hand: the policy drifts towards the solution, the value sharpens."""
     position = extract.position_from_row(ROW)
@@ -49,7 +55,7 @@ def _film(n_frames: int = 3) -> dict:
         )  # fmt: skip
     return {
         "format": 1, "run": "demo", "world": "w", "position": asdict(position),
-        "never_in_training": {"position_blocked": True}, "frames": frames, "measured_frames": n_frames,
+        "never_in_training": PROOF, "frames": frames, "measured_frames": n_frames,
         "note": "",
     }  # fmt: skip
 
@@ -124,6 +130,37 @@ def test_the_mode_defaults_to_the_shipped_mode_and_is_refused_without_one(tmp_pa
     assert render.resolve_mode("policy", tmp_path / "empty") == "policy"
     with pytest.raises(extract.FilmError, match="--mode"):
         render.resolve_mode(None, tmp_path / "empty")
+
+
+def test_once_a_mode_ships_the_film_cannot_burn_in_the_other_modes_hook(tmp_path):
+    """results.json ships value: --mode policy would put 'never searches' on a film of a value model."""
+    results = write_bundle(tmp_path / "results")
+    with pytest.raises(extract.FilmError, match="ships 'value'"):
+        render.resolve_mode("policy", results)
+    assert render.resolve_mode("value", results) == "value"
+
+
+def test_a_render_before_any_mode_ships_is_marked_a_preview(tmp_path):
+    film_path = extract.write_film(_film(), tmp_path / "film.json")
+    _, payload, meta = render.prepare(film_path, "en", "policy", tmp_path / "empty")
+    assert meta == {"mode": "policy", "preview": True} and payload["hook"] == claims.hook("en", "policy")
+    _, _, meta = render.prepare(film_path, "en", None, write_bundle(tmp_path / "results"))
+    assert meta == {"mode": "value", "preview": False}
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        {},
+        {**PROOF, "position_blocked": False},
+        {**PROOF, "pack_blocklist_sha256": "cd" * 32},
+        {k: v for k, v in PROOF.items() if k != "pack_blocklist_sha256"},
+    ],
+)
+def test_a_film_without_a_full_never_in_training_proof_gets_no_end_card(proof):
+    film = {**_film(), "never_in_training": proof}
+    with pytest.raises(extract.FilmError, match="never in"):
+        render.build_payload(film, "en", "value", None)
 
 
 def test_ffmpeg_is_told_to_write_no_encoder_tag_and_no_x264_version_sei(tmp_path):
@@ -205,6 +242,7 @@ def test_a_short_render_in_edge_seeks_frames_and_encodes_them_without_page_error
     assert report["probe"]["encoder_tags"] == [] and not report["probe"]["has_x264"]
     sidecar = json.loads((tmp_path / "film-en.json").read_text(encoding="utf-8"))
     assert sidecar["hook"] == claims.hook("en", "value") and sidecar["mode"] == "value"
+    assert sidecar["preview"] is False
 
 
 def test_a_failed_capture_leaves_no_partial_film_behind(tmp_path):

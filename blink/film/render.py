@@ -10,6 +10,11 @@ as PNG into ffmpeg: libx264, yuv420p, crf 18, +faststart, with -map_metadata -1,
 string is written. ffmpeg 8.1.1 still tags the video stream "Lavc libx264" under +bitexact (it drops
 only the version), so the stream's encoder tag is also set empty, which removes it.
 
+The hook follows the shipped mode in results.json; --mode may choose one only before a mode ships, and
+the render report (the sidecar) then says "preview": true. A film.json without extract's proof that the
+position was blocked in the run's own pack blocklist is refused, so the end card's "never in its
+training data" always has one.
+
 Timeline: a 3 s hook (claims.HOOK_EN or HOOK_HE for the shipped mode), then each of the 21 frames
 as a 0.3 s morph and a 0.5 s hold, then a 3 s end card (the Lichess rating with its date, "this
 position was never in its training data", the repo URL as plain text): 22.8 s at 30 fps.
@@ -122,12 +127,28 @@ def frame_count(n_frames: int, fps: int) -> int:
 
 
 def resolve_mode(mode: str | None, results_dir: Path) -> str:
-    if mode:
-        return mode
+    """The shipped mode; --mode only for a preview render made before results.json names one."""
     shipped = claims.shipped_mode(results_dir)
-    if shipped is None:
+    if shipped is not None and mode and mode != shipped:
+        raise extract.FilmError(
+            f"results.json ships {shipped!r}: the film's hook follows it, so --mode {mode} is refused"
+        )
+    if shipped is not None:
+        return shipped
+    if not mode:
         raise extract.FilmError(f"{results_dir} names no shipped mode yet: pass --mode policy|value")
-    return shipped
+    return mode
+
+
+def require_proof(film: dict) -> None:
+    """The end card says 'never in its training data' only for a film.json that carries extract's proof."""
+    proof = film.get("never_in_training") or {}
+    sha = proof.get("blocklist_sha256")
+    if proof.get("position_blocked") is not True or not sha or sha != proof.get("pack_blocklist_sha256"):
+        raise extract.FilmError(
+            "film.json does not prove the position was never in training (blocked in the run's own "
+            "pack blocklist): re-run blink film extract"
+        )
 
 
 def read_lichess(results_dir: Path) -> rs.LichessSnapshot | None:
@@ -152,6 +173,7 @@ def _note(lang: str, film: dict) -> str:
 
 
 def build_payload(film: dict, lang: str, mode: str, lichess: rs.LichessSnapshot | None) -> dict:
+    require_proof(film)
     text = TEXTS[lang]
     return {
         "lang": lang,
@@ -324,6 +346,14 @@ def check_probe(info: dict, fps: int, full: bool = True) -> list[str]:
 # ------------------------------------------------------------------------------------------ render
 
 
+def prepare(film_path: Path, lang: str, mode: str | None, results_dir: Path) -> tuple[dict, dict, dict]:
+    """(film, payload, {"mode", "preview"}): a preview is a render made before any mode ships."""
+    film = extract.read_film(film_path)
+    chosen = resolve_mode(mode, results_dir)
+    payload = build_payload(film, lang, chosen, read_lichess(results_dir))
+    return film, payload, {"mode": chosen, "preview": claims.shipped_mode(results_dir) is None}
+
+
 def render(
     film_path: Path,
     out: Path,
@@ -333,9 +363,7 @@ def render(
     results_dir: Path = claims.RESULTS_DIR,
     max_seconds: float | None = None,
 ) -> dict:
-    film = extract.read_film(film_path)
-    mode = resolve_mode(mode, results_dir)
-    payload = build_payload(film, lang, mode, read_lichess(results_dir))
+    film, payload, meta = prepare(film_path, lang, mode, results_dir)
     total = frame_count(len(film["frames"]), fps)
     frames = min(total, round(max_seconds * fps)) if max_seconds else total
     with open_page(payload) as session:
@@ -344,7 +372,7 @@ def render(
     info = probe(out)
     problems = check_probe(info, fps, full=max_seconds is None) + page_errors
     report = {
-        "out": str(out), "lang": lang, "mode": mode, "hook": payload["hook"], "run": film["run"],
+        "out": str(out), "lang": lang, **meta, "hook": payload["hook"], "run": film["run"],
         "fps": fps, "frames": written, "film_frames": len(film["frames"]),
         "measured_frames": film.get("measured_frames"), "probe": info, "page_errors": page_errors,
         "problems": problems,

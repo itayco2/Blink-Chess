@@ -78,7 +78,11 @@ def _rendered_hooks(lang: str) -> set[str]:
     from blink import paths
 
     sidecar = paths.home() / "film" / FILM_RUN / f"film-{lang}.json"
-    return {json.loads(sidecar.read_text(encoding="utf-8"))["hook"]} if sidecar.is_file() else set()
+    if not sidecar.is_file():
+        return set()
+    report = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert not report.get("preview"), f"{sidecar} is a preview render, made before a mode shipped"
+    return {report["hook"]}
 
 
 def _words(text: str) -> list[str]:

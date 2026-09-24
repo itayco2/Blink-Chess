@@ -157,7 +157,13 @@ def cmd_film_extract(args: argparse.Namespace) -> int:
     position = extract.film_position(Path(args.bands), args.puzzle)
     rungs = [extract.parse_milestone(text) for text in args.milestone]
     film = extract.extract(
-        run_dir, position, Path(args.blocklist), pad_to=args.pad_to, device=args.device, milestones=rungs
+        run_dir,
+        position,
+        Path(args.blocklist),
+        pad_to=args.pad_to,
+        device=args.device,
+        milestones=rungs,
+        pack_dir=Path(args.pack) if args.pack else None,
     )
     out = extract.write_film(film, Path(args.out) if args.out else _film_dir(args.run) / "film.json")
     total = len(film["frames"])
@@ -196,6 +202,7 @@ def _register_film(sub: argparse._SubParsersAction) -> None:
     extract.add_argument("--puzzle", required=True, help="the PuzzleId Itay picked at G9")
     extract.add_argument("--bands", default=bands)
     extract.add_argument("--blocklist", default=str(paths.home() / "data" / "blocklist_v1.npy"))
+    extract.add_argument("--pack", help="the run's pack directory, if it moved since config.json was written")
     extract.add_argument(
         "--pad-to", type=int, default=None, help=f"interpolate up to N frames (the film: {FILM_FRAMES})"
     )
@@ -213,7 +220,7 @@ def _register_film(sub: argparse._SubParsersAction) -> None:
     render.add_argument("--film", help="film.json (default: BLINK_HOME/film/<run>/film.json)")
     render.add_argument("--out")
     render.add_argument(
-        "--mode", choices=("policy", "value"), help="the hook's mode (default: the shipped mode)"
+        "--mode", choices=("policy", "value"), help="a preview's hook mode, only before a mode ships"
     )
     render.add_argument("--results", default=str(RESULTS_DIR))
     render.set_defaults(func=_film_errors(cmd_film_render))
