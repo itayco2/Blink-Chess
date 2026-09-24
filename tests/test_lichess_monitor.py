@@ -1,5 +1,6 @@
 """The bot's stop rule: time losses > 2% or aborts > 1% over the last 50 games (plan P9 operations)."""
 
+import dataclasses
 import json
 
 import pytest
@@ -128,12 +129,19 @@ def test_check_reads_the_last_50_games_of_every_kind_from_the_public_api(tmp_pat
 
 
 def a_pgn(
-    game_id: str, termination: str, white: str = "BlinkBot", black: str = "OtherBot", second: int = 0
+    game_id: str,
+    termination: str,
+    white: str = "BlinkBot",
+    black: str = "OtherBot",
+    second: int = 0,
+    moves: str = "",
+    result: str = "*",
 ) -> str:
     return (
         f'[Event "Rated Blitz game"]\n[Site "https://lichess.org/{game_id}"]\n'
-        f'[White "{white}"]\n[Black "{black}"]\n[Result "*"]\n[BlackTitle "BOT"]\n'
-        f'[UTCDate "2026.09.24"]\n[UTCTime "12:00:{second:02d}"]\n[Termination "{termination}"]\n\n*\n\n'
+        f'[White "{white}"]\n[Black "{black}"]\n[Result "{result}"]\n[BlackTitle "BOT"]\n'
+        f'[UTCDate "2026.09.24"]\n[UTCTime "12:00:{second:02d}"]\n[Termination "{termination}"]\n\n'
+        f"{moves} {result}\n\n"
     )
 
 
@@ -217,3 +225,62 @@ def test_the_check_command_with_stop_pauses_the_bot_when_the_rule_fires(monkeypa
     record = json.loads((tmp_path / "lichess" / "pause.json").read_text(encoding="utf-8"))
     assert record["reason"].startswith("stop rule: aborts 1/50")
     assert (tmp_path / "lichess" / "PAUSED").exists()
+
+
+# ---------------------------------------------------------------- whose abort it was
+# lichess-bot aborts a game itself when the opponent makes no move within abort_time, and lila writes
+# the same Termination "Abandoned" for it, so an abort counts against the bot only when the bot was
+# the side to move. For a noStart game lila names the side that did move as the winner.
+
+
+def test_an_opponent_who_never_moved_is_a_no_show_not_the_bots_abort(tmp_path):
+    (tmp_path / "BlinkBot vs SomeHuman - noshow01.pgn").write_text(
+        a_pgn("noshow01", "Abandoned", black="SomeHuman", moves="1. e4"), encoding="utf-8"
+    )
+    verdict = monitor.stop_rule([*clean(49), *monitor.aborted_from_pgns(tmp_path, "BlinkBot")])
+    assert (verdict.games, verdict.aborts, verdict.opponent_aborts) == (50, 0, 1)
+    assert not verdict.stop
+
+
+@pytest.mark.parametrize(
+    ("white", "black", "moves"),
+    [("BlinkBot", "OtherBot", ""), ("OtherBot", "BlinkBot", "1. e4")],
+)
+def test_an_abort_with_the_bot_to_move_counts_against_the_bot(tmp_path, white, black, moves):
+    (tmp_path / "a.pgn").write_text(
+        a_pgn("ab0rt009", "Abandoned", white, black, moves=moves), encoding="utf-8"
+    )
+    verdict = monitor.stop_rule([*clean(49), *monitor.aborted_from_pgns(tmp_path, "BlinkBot")])
+    assert (verdict.aborts, verdict.opponent_aborts) == (1, 0)
+    assert verdict.stop and verdict.offenses == ("ab0rt009",)
+
+
+def test_a_nostart_the_bot_won_is_the_opponents_no_show(tmp_path):
+    records = [a_record(i) for i in range(49)] + [a_record(49, "noStart", "white")]  # the bot is white
+    verdict = monitor.check(FakeApi(records), "BlinkBot", pgn_dir=tmp_path / "no-pgns-yet")
+    assert (verdict.aborts, verdict.opponent_aborts, verdict.stop) == (0, 1, False)
+
+
+def test_opponent_no_shows_are_reported_but_not_counted():
+    no_show = dataclasses.replace(a_game(49), status="aborted", result="draw", plies=1)
+    line = monitor.format_verdict("BlinkBot", monitor.stop_rule([*clean(49), no_show]))
+    assert line.startswith("ok BlinkBot") and "1 opponent no-shows (not counted)" in line
+
+
+def test_the_bots_own_pgns_give_every_game_it_finished_with_time_forfeits_read_from_the_result(tmp_path):
+    games = {
+        "normal01": a_pgn("normal01", "Normal", moves="1. e4 e5", result="1-0", second=1),
+        "flag0001": a_pgn("flag0001", "Time forfeit", moves="1. e4 e5", result="0-1", second=2),
+        "flag0002": a_pgn("flag0002", "Time forfeit", "OtherBot", "BlinkBot", 3, "1. e4 e5", "1-0"),
+        "flag0003": a_pgn("flag0003", "Time forfeit", moves="1. e4 e5", result="1-0", second=4),
+        "live0001": a_pgn("live0001", "Unterminated", moves="1. e4", second=5),
+    }
+    for game_id, text in games.items():
+        (tmp_path / f"{game_id}.pgn").write_text(text, encoding="utf-8")
+    found = sorted(monitor.games_from_pgns(tmp_path, "BlinkBot"), key=lambda g: g.created_at)
+    assert [(g.id, g.status, g.result, g.time_loss) for g in found] == [
+        ("normal01", "normal", "win", False),
+        ("flag0001", "outoftime", "loss", True),
+        ("flag0002", "outoftime", "loss", True),
+        ("flag0003", "outoftime", "win", False),
+    ]
