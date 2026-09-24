@@ -9,7 +9,7 @@ import pytest
 
 from blink.data import loader
 from blink.data.loader import ShardLoader
-from blink.data.record import ROOT_DTYPE
+from blink.data.record import CHILD_DTYPE, ROOT_DTYPE
 
 SIZES = (37, 50, 0, 23, 64)
 
@@ -178,3 +178,25 @@ def test_a_read_error_in_the_prefetch_thread_reaches_the_consumer(shards, monkey
 
 def test_num_records_counts_every_shard(shards):
     assert ShardLoader(shards, batch_size=16, seed=1).num_records == sum(SIZES)
+
+
+def test_the_loader_streams_child_records_when_given_the_child_dtype(tmp_path):
+    paths = []
+    for i, size in enumerate((30, 45)):
+        recs = np.zeros(size, dtype=CHILD_DTYPE)
+        recs["fen_hash"] = np.arange(size, dtype=np.uint64) + 1000 * i
+        path = tmp_path / f"train_c{i:03d}.bin"
+        recs.tofile(path)
+        paths.append(path)
+    child_loader = ShardLoader(paths, batch_size=5, seed=2, loop=False, dtype=CHILD_DTYPE)
+    batches = list(child_loader)
+    assert child_loader.num_records == 75
+    assert all(batch.dtype == CHILD_DTYPE and len(batch) == 5 for batch in batches)
+    assert sorted(_ids(batches)) == list(range(30)) + list(range(1000, 1045))
+
+
+def test_a_child_shard_read_with_the_root_dtype_is_refused_by_size(tmp_path):
+    path = tmp_path / "train_c000.bin"
+    np.zeros(16, dtype=CHILD_DTYPE).tofile(path)  # 704 B: not a whole number of 68 B roots
+    with pytest.raises(ValueError, match="68 B records"):
+        ShardLoader([path], batch_size=4, seed=0)

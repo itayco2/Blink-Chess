@@ -1,4 +1,6 @@
-"""ShardLoader: batches of root records from shard files, read the way a spinning disk likes.
+"""ShardLoader: batches of records from shard files, read the way a spinning disk likes.
+
+Roots by default; `dtype=CHILD_DTYPE` streams the child shards of the v1 pack the same way.
 
 Each epoch visits the shards in an order drawn from (seed, epoch). Each shard is read front to back in
 one sequential pass, permuted in RAM with a stream of its own, and cut into batches; a record left
@@ -30,8 +32,8 @@ def _open(path: Path):
     return open(path, "rb", buffering=0)  # noqa: SIM115 - the caller closes it
 
 
-def read_shard(path: Path, size: int) -> np.ndarray:
-    """The whole shard in one front-to-back pass of sequential readinto calls, as root records."""
+def read_shard(path: Path, size: int, dtype: np.dtype = ROOT_DTYPE) -> np.ndarray:
+    """The whole shard in one front-to-back pass of sequential readinto calls, as `dtype` records."""
     raw = np.empty(size, dtype=np.uint8)
     view = memoryview(raw)
     got = 0
@@ -41,7 +43,7 @@ def read_shard(path: Path, size: int) -> np.ndarray:
             if not n:
                 raise OSError(f"{path}: ended after {got:,} of {size:,} bytes")
             got += n
-    return raw.view(ROOT_DTYPE)
+    return raw.view(dtype)
 
 
 class _Step(NamedTuple):
@@ -69,7 +71,7 @@ def _offer(out: queue.Queue, item: object, stop: threading.Event) -> bool:
 
 
 class ShardLoader:
-    """Iterable of ROOT_DTYPE arrays of exactly batch_size records."""
+    """Iterable of `dtype` arrays (ROOT_DTYPE unless given) of exactly batch_size records."""
 
     def __init__(
         self,
@@ -78,6 +80,7 @@ class ShardLoader:
         seed: int,
         loop: bool = True,
         start_batch: int = 0,
+        dtype: np.dtype = ROOT_DTYPE,
     ) -> None:
         if not paths:
             raise ValueError("ShardLoader got no shard paths")
@@ -91,17 +94,18 @@ class ShardLoader:
         self.seed = seed
         self.loop = loop
         self.start_batch = start_batch
-        self.sizes = tuple(self._records_in(p) for p in self.paths)
+        self.dtype = np.dtype(dtype)
+        self.sizes = tuple(self._records_in(p, self.dtype) for p in self.paths)
         self.num_records = sum(self.sizes)
         if self.num_records == 0:
             raise ValueError(f"the {len(self.paths)} shards hold no records")
 
     @staticmethod
-    def _records_in(path: Path) -> int:
+    def _records_in(path: Path, dtype: np.dtype) -> int:
         size = os.path.getsize(path)
-        if size % ROOT_DTYPE.itemsize:
-            raise ValueError(f"{path}: {size:,} B is not a whole number of {ROOT_DTYPE.itemsize} B records")
-        return size // ROOT_DTYPE.itemsize
+        if size % dtype.itemsize:
+            raise ValueError(f"{path}: {size:,} B is not a whole number of {dtype.itemsize} B records")
+        return size // dtype.itemsize
 
     def shard_order(self, epoch: int) -> np.ndarray:
         return np.random.default_rng([self.seed, ORDER_STREAM, epoch]).permutation(len(self.paths))
@@ -123,7 +127,8 @@ class ShardLoader:
             epoch += 1
 
     def _load(self, step: _Step) -> np.ndarray:
-        records = read_shard(self.paths[step.shard], self.sizes[step.shard] * ROOT_DTYPE.itemsize)
+        size = self.sizes[step.shard] * self.dtype.itemsize
+        records = read_shard(self.paths[step.shard], size, self.dtype)
         return self._shuffle(records, step)[step.skip :]
 
     def _prefetch(self, out: queue.Queue, stop: threading.Event) -> None:
@@ -152,12 +157,12 @@ class ShardLoader:
 
     def __iter__(self) -> Iterator[np.ndarray]:
         with contextlib.closing(self._shards()) as shards:  # stops the thread however iteration ends
-            yield from _cut(shards, self.batch_size)
+            yield from _cut(shards, self.batch_size, self.dtype)
 
 
-def _cut(shards: Iterator[np.ndarray], size: int) -> Iterator[np.ndarray]:
+def _cut(shards: Iterator[np.ndarray], size: int, dtype: np.dtype) -> Iterator[np.ndarray]:
     """Consecutive `size`-record slices of the concatenated shards; a final partial slice is dropped."""
-    carry = np.empty(0, dtype=ROOT_DTYPE)
+    carry = np.empty(0, dtype=dtype)
     for records in shards:
         if len(carry):
             need = size - len(carry)
