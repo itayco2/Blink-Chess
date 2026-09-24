@@ -226,3 +226,13 @@ def test_blink_film_pick_then_extract_writes_candidates_and_a_padded_film(tmp_pa
     written = extract.read_film(tmp_path / "film" / "demo" / "film.json")
     assert len(written["frames"]) == 21 and written["measured_frames"] == 3
     assert "21 frames (3 measured, 18 interpolated)" in capsys.readouterr().out
+
+
+def test_the_checkpoint_at_the_planned_last_step_is_labelled_the_final_weights(tmp_path):
+    run = tmp_path / "runs" / "skel"
+    run.mkdir(parents=True)
+    for step in (500, TINY.steps):
+        state = {"step": step, "model": _weights(step), "ema": _weights(step), "world": WORLD}
+        checkpoint.save_checkpoint(run, step, {**state, "config": config_to_dict(TINY)})
+    kinds = [extract.load_frame(s, "cpu")[1]["kind"] for s in extract.frame_sources(run)]
+    assert kinds == ["init", "ema", "final"]

@@ -136,3 +136,14 @@ def test_blink_report_claims_prints_the_claim_or_exits_1_naming_what_is_missing(
     (tmp_path / "compute.json").unlink()
     assert cli.main(["report", "claims", "--results", str(tmp_path)]) == 1
     assert "compute.json" in capsys.readouterr().err
+
+
+def test_a_shipped_mode_outside_policy_and_value_is_refused(tmp_path):
+    rows = tuple(
+        replace(r, agent="Blink-M (both)") if r.agent == "Blink-M (value)" else r for r in strength_rows()
+    )
+    write_bundle(
+        tmp_path, results_obj=results(strength=rows, shipped=replace(results().shipped, mode="both"))
+    )
+    with pytest.raises(claims.ClaimRefused, match="both"):
+        claims.fill_claim(tmp_path)

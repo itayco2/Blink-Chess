@@ -205,3 +205,33 @@ def test_a_short_render_in_edge_seeks_frames_and_encodes_them_without_page_error
     assert report["probe"]["encoder_tags"] == [] and not report["probe"]["has_x264"]
     sidecar = json.loads((tmp_path / "film-en.json").read_text(encoding="utf-8"))
     assert sidecar["hook"] == claims.hook("en", "value") and sidecar["mode"] == "value"
+
+
+def test_a_failed_capture_leaves_no_partial_film_behind(tmp_path):
+    if not _have_ffmpeg():
+        pytest.skip("ffmpeg is not on PATH")
+
+    def frames():
+        yield _png(64, 80, (1, 2, 3))
+        raise RuntimeError("the browser crashed")
+
+    with pytest.raises(RuntimeError, match="crashed"):
+        render.encode(frames(), tmp_path / "film.mp4", 30)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_ffmpeg_failure_is_a_film_error_with_its_message(tmp_path):
+    if not _have_ffmpeg():
+        pytest.skip("ffmpeg is not on PATH")
+    with pytest.raises(extract.FilmError, match="ffmpeg exited"):
+        render.encode(iter([b"not a png"] * 3), tmp_path / "film.mp4", 30)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_blink_film_render_reports_a_film_error_as_exit_1(tmp_path, capsys):
+    from blink import cli
+
+    film_path = extract.write_film(_film(), tmp_path / "film.json")
+    args = ["film", "render", "--lang", "en", "--film", str(film_path), "--results", str(tmp_path / "none")]
+    assert cli.main(args) == 1
+    assert "--mode" in capsys.readouterr().err

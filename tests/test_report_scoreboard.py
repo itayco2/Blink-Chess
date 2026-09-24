@@ -214,3 +214,21 @@ def test_a_prose_number_is_measured_when_it_rounds_scales_or_percents_a_results_
     assert sb.is_measured("0.41", values)  # kendall_tau_b 0.412, rounded
     assert not sb.is_measured("81.0%", values)
     assert not sb.is_measured("2895", values)  # paper text is not a measurement
+
+
+def test_markers_must_each_sit_on_their_own_line(tmp_path):
+    path = tmp_path / "README.md"
+    path.write_text(f"# T\n{sb.START}{sb.END}\n", encoding="utf-8")
+    assert "own line" in sb.check_readme(path, "x\n")[0]
+    path.write_text(f"# T\n{sb.END}\n{sb.START}\n", encoding="utf-8")
+    assert "own line" in sb.check_readme(path, "x\n")[0]
+
+
+def test_a_results_file_off_its_schema_is_a_scoreboard_error(tmp_path):
+    folder = write_bundle(tmp_path / "a")
+    (folder / "nosearch.json").write_text('{"games": 1}', encoding="utf-8")
+    with pytest.raises(sb.ScoreboardError, match="nosearch.json lacks"):
+        sb.load_bundle(folder)
+    (folder / "results.json").write_text('{"schema_version": 7}', encoding="utf-8")
+    with pytest.raises(sb.ScoreboardError, match="schema"):
+        sb.load_bundle(folder)

@@ -4,6 +4,7 @@ These pass on the work-in-progress README and turn strict once results/results.j
 evaluation writes it, the tests that need it skip and say so. The placeholder scan is strict today.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -32,6 +33,7 @@ PLACEHOLDERS = re.compile(
     r"\b(TODO|TBD|FIXME|XXX|PLACEHOLDER|UNVERIFIED)\b|lorem ipsum|(?<![\w_])__(?![\w_])"
 )
 FIRST_WORDS = 200
+FILM_RUN = "long"  # the flagship run whose film is published (skeleton demo films are not checked)
 LINK_TEXTS = ("Play", "Lichess", "How it learned")
 PF_ROW = re.compile(r"\bPF(\d{2})\b")
 PENDING = "results/results.json does not exist yet; this contract turns strict once the evaluation writes it"
@@ -71,6 +73,14 @@ def _readme() -> str:
     return README.read_text(encoding="utf-8")
 
 
+def _rendered_hooks(lang: str) -> set[str]:
+    """The hook the published film burned in, from render's sidecar film-<lang>.json (empty if not rendered here)."""
+    from blink import paths
+
+    sidecar = paths.home() / "film" / FILM_RUN / f"film-{lang}.json"
+    return {json.loads(sidecar.read_text(encoding="utf-8"))["hook"]} if sidecar.is_file() else set()
+
+
 def _words(text: str) -> list[str]:
     return re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL).split()
 
@@ -85,6 +95,7 @@ def test_the_first_200_words_hold_the_headline_links_and_caveat():
     _strict()
     head = " ".join(_words(_readme())[:FIRST_WORDS])
     bundle = sb.load_bundle(RESULTS_DIR)
+    assert bundle.results.shipped is not None, "results.json names no shipped model"
     assert claims.hook("en", bundle.results.shipped.mode) in head
     for label in LINK_TEXTS:
         assert re.search(r"\[[^\]]*" + re.escape(label) + r"[^\]]*\]\(", head), f"no {label!r} link"
@@ -161,6 +172,7 @@ def test_hook_en_is_identical_in_readme_film_en_and_bot_bio():
     assert _readme().splitlines()[0] == f"# {hook}"
     mode = sb.load_bundle(RESULTS_DIR).results.shipped.mode
     assert render.hook_for("en", mode) == hook
+    assert _rendered_hooks("en") <= {hook}
     assert BOT_BIO.is_file(), f"{BOT_BIO.relative_to(REPO_ROOT)} (the bot bio draft) is missing"
     assert BOT_BIO.read_text(encoding="utf-8").splitlines()[0] == hook
 
@@ -175,4 +187,5 @@ def test_hook_he_is_identical_in_film_he_and_post_draft():
     hook = claims.HOOK_HE
     mode = sb.load_bundle(RESULTS_DIR).results.shipped.mode
     assert render.hook_for("he", mode) == hook
+    assert _rendered_hooks("he") <= {hook}
     assert POST_DRAFT.read_text(encoding="utf-8").splitlines()[0] == hook

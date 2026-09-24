@@ -54,7 +54,10 @@ def read_metrics(path: Path) -> list[dict]:
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(row, dict) and isinstance(row.get("step"), int) and row.get("samples_per_s", 0) > 0:
+        if not isinstance(row, dict) or not isinstance(row.get("step"), int):
+            continue
+        rate = row.get("samples_per_s")
+        if isinstance(rate, int | float) and rate > 0:
             by_step[row["step"]] = row
     return [by_step[step] for step in sorted(by_step)]
 
@@ -92,8 +95,10 @@ def _power_samples(path: Path) -> list[tuple[datetime, float]]:
     if not rows:
         return []
     header = [cell.strip().lower() for cell in rows[0]]
-    t_col = next(i for i, name in enumerate(header) if name.startswith("timestamp"))
-    p_col = next(i for i, name in enumerate(header) if name.startswith("power.draw"))
+    t_col = next((i for i, name in enumerate(header) if name.startswith("timestamp")), None)
+    p_col = next((i for i, name in enumerate(header) if name.startswith("power.draw")), None)
+    if t_col is None or p_col is None:
+        return []  # not a timestamp,power.draw log
     samples = []
     for row in rows[1:]:
         if len(row) <= max(t_col, p_col):
@@ -138,10 +143,13 @@ def run_compute(run_dir: Path) -> RunCompute | Skipped:
         return Skipped(run_dir.name, f"trained on {config.get('device')}, not the GPU")
     if not metrics_path.is_file():
         return Skipped(run_dir.name, "no metrics.jsonl")
+    batch_size = config.get("config", {}).get("batch_size")
+    if not batch_size:
+        return Skipped(run_dir.name, "config.json has no config.batch_size")
     rows = read_metrics(metrics_path)
     if not rows:
         return Skipped(run_dir.name, "metrics.jsonl has no complete rows")
-    spans = windows(rows, int(config["config"]["batch_size"]))
+    spans = windows(rows, int(batch_size))
     kwh, source = _kwh(run_dir, spans)
     return RunCompute(run_dir.name, rows[-1]["step"], sum(s for s, _ in spans) / 3600, kwh, source)
 

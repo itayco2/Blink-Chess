@@ -6,7 +6,9 @@
 """
 
 import argparse
+import functools
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from blink import paths
@@ -107,6 +109,22 @@ def _film_dir(run: str) -> Path:
     return paths.home() / "film" / run
 
 
+def _film_errors(func: Callable[[argparse.Namespace], int]) -> Callable[[argparse.Namespace], int]:
+    """A FilmError (a leak, mixed worlds, a missing puzzle, ffmpeg failing) is a message and exit 1."""
+
+    @functools.wraps(func)
+    def run(args: argparse.Namespace) -> int:
+        from blink.film.extract import FilmError
+
+        try:
+            return func(args)
+        except FilmError as exc:
+            print(f"film: {exc}", file=sys.stderr)
+            return 1
+
+    return run
+
+
 def cmd_film_pick(args: argparse.Namespace) -> int:
     from blink.film import extract, pick
 
@@ -155,7 +173,7 @@ def _register_film(sub: argparse._SubParsersAction) -> None:
     pick.add_argument("--candidates", type=int, default=200)
     pick.add_argument("--bands", default=bands)
     pick.add_argument("--device", default="cpu")
-    pick.set_defaults(func=cmd_film_pick)
+    pick.set_defaults(func=_film_errors(cmd_film_pick))
 
     extract = fsub.add_parser("extract", help="per-frame predictions on one position -> film.json")
     extract.add_argument("--run", required=True)
@@ -167,7 +185,7 @@ def _register_film(sub: argparse._SubParsersAction) -> None:
     )
     extract.add_argument("--device", default="cpu")
     extract.add_argument("--out")
-    extract.set_defaults(func=cmd_film_extract)
+    extract.set_defaults(func=_film_errors(cmd_film_extract))
 
     render = fsub.add_parser("render", help="film.json -> a 1080x1350 4:5 mp4 (Edge + ffmpeg)")
     render.add_argument("--lang", choices=("en", "he"), required=True)
@@ -179,7 +197,7 @@ def _register_film(sub: argparse._SubParsersAction) -> None:
         "--mode", choices=("policy", "value"), help="the hook's mode (default: the shipped mode)"
     )
     render.add_argument("--results", default=str(RESULTS_DIR))
-    render.set_defaults(func=cmd_film_render)
+    render.set_defaults(func=_film_errors(cmd_film_render))
 
 
 def register(sub: argparse._SubParsersAction) -> None:

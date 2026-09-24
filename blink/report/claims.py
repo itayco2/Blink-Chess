@@ -158,6 +158,8 @@ def fill_claim(results_dir: Path | None = None) -> str:
     row = sb.shipped_row(bundle.results)
     if shipped is None or row is None:
         raise ClaimRefused("results.json names no shipped model with a strength row")
+    if shipped.mode not in MODES:
+        raise ClaimRefused(f"results.json ships mode {shipped.mode!r}; the claim knows {MODES}")
     blanks = {"mode_clause": MODE_CLAUSES[shipped.mode]}
     blanks |= _strength_blanks(row, missing)
     blanks |= _compute_blanks(bundle.compute, missing)

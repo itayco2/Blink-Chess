@@ -19,6 +19,7 @@ from blink.report import results_schema as rs
 
 START = "<!-- scoreboard:start -->"
 END = "<!-- scoreboard:end -->"
+NEWLINE = "\n"
 ANCHOR_FLOOR = 1320
 DASH = "-"
 TABLE1_HEADING = "### Table 1: strength"
@@ -48,17 +49,33 @@ def _read(folder: Path, name: str, hint: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def load_bundle(folder: Path) -> Bundle:
-    """results.json, nosearch.json and compute.json are required; lichess.json appears at G12."""
+NOSEARCH_KEYS = ("decisions", "games", "max_rows", "histogram", "violations")
+
+
+def _parse(folder: Path) -> Bundle:
     results = rs.from_json(_read(folder, "results.json", "written by the evaluation suite, P8"))
     nosearch = json.loads(_read(folder, "nosearch.json", "run: uv run blink audit no-search"))
     _read(folder, "compute.json", "run: uv run blink report compute")
     compute = compute_mod.read_compute(Path(folder) / "compute.json")
     lichess_path = Path(folder) / "lichess.json"
-    lichess = (
-        rs.lichess_from_json(lichess_path.read_text(encoding="utf-8")) if lichess_path.is_file() else None
-    )
+    lichess = None
+    if lichess_path.is_file():
+        lichess = rs.lichess_from_json(lichess_path.read_text(encoding="utf-8"))
     return Bundle(results, lichess, nosearch, compute)
+
+
+def load_bundle(folder: Path) -> Bundle:
+    """results.json, nosearch.json and compute.json are required; lichess.json appears at G12."""
+    try:
+        bundle = _parse(Path(folder))
+    except ScoreboardError:
+        raise
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ScoreboardError(f"{folder}: a results file does not match its schema: {exc}") from exc
+    missing = [key for key in NOSEARCH_KEYS if key not in bundle.nosearch]
+    if missing:
+        raise ScoreboardError(f"nosearch.json lacks {missing} (rerun: uv run blink audit no-search)")
+    return bundle
 
 
 def shipped_row(results: rs.Results) -> rs.StrengthRow | None:
@@ -305,11 +322,11 @@ def _span(text: str) -> tuple[int, int]:
     """Start and end offsets of the block between the markers; ScoreboardError unless each appears once."""
     if text.count(START) != 1 or text.count(END) != 1:
         raise ScoreboardError(f"the README needs exactly one {START} and one {END} marker")
-    begin = text.index(START) + len(START) + 1
+    begin = text.index(START) + len(START)
     end = text.index(END)
-    if end < begin - 1:
-        raise ScoreboardError("the scoreboard end marker comes before the start marker")
-    return begin, end
+    if text[begin : begin + 1] != NEWLINE or end <= begin or text[end - 1] != NEWLINE:
+        raise ScoreboardError(f"{START} and {END} must each sit on their own line, start first")
+    return begin + 1, end
 
 
 def write_readme(path: Path, block: str) -> None:

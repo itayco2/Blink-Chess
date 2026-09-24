@@ -142,3 +142,13 @@ def test_blink_report_compute_writes_results_compute_json(tmp_path, capsys):
     assert code == 0
     assert compute.read_compute(out)["flagship"] == "long"
     assert "GPU-h" in capsys.readouterr().out
+
+
+def test_an_unusable_power_log_or_config_is_skipped_not_fatal(tmp_path):
+    run = _run(tmp_path, "a", _rows(), nvsmi="index, memory.used [MiB]\n0, 100 MiB\n")
+    assert compute.run_compute(run).kwh is None
+    other = tmp_path / "b"
+    other.mkdir()
+    (other / "config.json").write_text(json.dumps({"device": "cuda", "config": {}}), encoding="utf-8")
+    (other / "metrics.jsonl").write_text('{"step": 1, "samples_per_s": null}\n', encoding="utf-8")
+    assert "batch_size" in compute.run_compute(other).reason

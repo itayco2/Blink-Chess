@@ -15,6 +15,7 @@ as a 0.3 s morph and a 0.5 s hold, then a 3 s end card (the Lichess rating with 
 position was never in its training data", the repo URL as plain text): 22.8 s at 30 fps.
 """
 
+import contextlib
 import json
 import os
 import shutil
@@ -201,6 +202,7 @@ def _router(blobs: dict[str, bytes], session: PageSession):
 @contextmanager
 def open_page(payload: dict) -> Iterator[PageSession]:
     """The film page loaded in headless Edge at 1080x1350, fonts and data ready."""
+    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
@@ -211,10 +213,13 @@ def open_page(payload: dict) -> Iterator[PageSession]:
             page.on("pageerror", lambda exc: session.errors.append(f"page error: {exc}"))
             page.on("console", lambda msg: session.errors.append(msg.text) if msg.type == "error" else None)
             page.route("**/*", _router(_files(payload), session))
-            page.goto(ORIGIN + "film.html")
-            page.wait_for_function(
-                "window.__ready === true || !!window.__filmError", timeout=READY_TIMEOUT_MS
-            )
+            try:
+                page.goto(ORIGIN + "film.html")
+                page.wait_for_function(
+                    "window.__ready === true || !!window.__filmError", timeout=READY_TIMEOUT_MS
+                )
+            except PlaywrightError as exc:
+                raise extract.FilmError(f"the film page never became ready: {exc}; {session.errors}") from exc
             failure = page.evaluate("window.__filmError || null")
             if failure:
                 raise extract.FilmError(f"the film page failed to start: {failure}")
@@ -245,21 +250,34 @@ def ffmpeg_command(out: Path, fps: int) -> list[str]:
     ]  # fmt: skip
 
 
+def _feed(proc: subprocess.Popen, frames: Iterable[bytes]) -> int:
+    count = 0
+    for png in frames:
+        try:
+            proc.stdin.write(png)
+        except OSError:
+            break  # ffmpeg exited early; its stderr says why
+        count += 1
+    return count
+
+
 def encode(frames: Iterable[bytes], out: Path, fps: int) -> int:
-    """Pipe PNG frames into ffmpeg; the mp4 appears at `out` only when ffmpeg succeeds."""
+    """Pipe PNG frames into ffmpeg; `out` appears only when every frame is in and ffmpeg succeeds."""
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.stem + ".partial.mp4")
     proc = subprocess.Popen(ffmpeg_command(tmp, fps), stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    count = 0
     try:
-        for png in frames:
-            proc.stdin.write(png)
-            count += 1
-    finally:
+        count = _feed(proc, frames)
+    except BaseException:
+        proc.kill()  # the capture failed: no half film is left behind
+        proc.wait()
+        tmp.unlink(missing_ok=True)
+        raise
+    with contextlib.suppress(OSError):
         proc.stdin.close()
-        errors = proc.stderr.read().decode("utf-8", errors="replace")
-        code = proc.wait()
+    errors = proc.stderr.read().decode("utf-8", errors="replace")
+    code = proc.wait()
     if code != 0:
         tmp.unlink(missing_ok=True)
         raise extract.FilmError(f"ffmpeg exited {code}: {errors.strip()[-800:]}")

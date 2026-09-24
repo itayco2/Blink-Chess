@@ -164,6 +164,8 @@ def load_frame(source: FrameSource, device: str = "cpu"):
         model.load_state_dict(state[source.weights])
         samples = state.get("samples", source.step * cfg.batch_size)
     kind = state.get("kind", source.kind) if source.origin == "film" else source.kind
+    if source.origin == "checkpoint" and source.step == cfg.steps:
+        kind = "final"  # the EMA weights at the run's planned last step: what the run would ship
     meta = {"world": state["world"], "kind": kind, "samples": int(samples)}
     return TorchEvaluator(model, device), meta
 
@@ -195,7 +197,9 @@ def gpu_hours_by_step(run_dir: Path) -> list[tuple[int, float]]:
     metrics, config = Path(run_dir) / "metrics.jsonl", Path(run_dir) / "config.json"
     if not metrics.is_file() or not config.is_file():
         return []
-    batch = json.loads(config.read_text(encoding="utf-8"))["config"]["batch_size"]
+    batch = json.loads(config.read_text(encoding="utf-8")).get("config", {}).get("batch_size")
+    if not batch:
+        return []
     rows = compute.read_metrics(metrics)
     cumulative = np.cumsum([seconds for seconds, _ in compute.windows(rows, batch)]) / 3600
     return [(row["step"], float(hours)) for row, hours in zip(rows, cumulative, strict=True)]
