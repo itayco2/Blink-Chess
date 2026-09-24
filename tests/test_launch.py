@@ -94,6 +94,30 @@ def test_launch_parses_the_pid_and_names_wmi_failures(tmp_path):
         launch.launch(plan, runner=no_powershell, find_children=lambda pid: [])
 
 
+def test_a_powershell_failure_in_bytes_that_are_not_utf8_is_still_a_launch_error(tmp_path):
+    plan = launch.plan_launch("probe", ["heartbeat-probe", "--out", str(tmp_path / "hb.json")], home=tmp_path)
+    emit = (
+        "import sys; sys.stdout.buffer.write(b'\\x82 partial'); "
+        "sys.stderr.buffer.write(b'Zugriff verweigert \\x82\\xff'); sys.exit(1)"
+    )
+
+    def mangled_powershell(argv, **kwargs):  # the real subprocess.run, with launch's own keywords
+        return subprocess.run([sys.executable, "-c", emit], **kwargs)
+
+    with pytest.raises(launch.LaunchError, match="Zugriff verweigert"):
+        launch.launch(plan, runner=mangled_powershell, find_children=lambda pid: [])
+
+
+def test_a_powershell_failure_with_no_output_at_all_is_a_launch_error(tmp_path):
+    plan = launch.plan_launch("probe", ["heartbeat-probe", "--out", str(tmp_path / "hb.json")], home=tmp_path)
+
+    def silent(argv, **_):
+        return subprocess.CompletedProcess(argv, 1, stdout=None, stderr=None)
+
+    with pytest.raises(launch.LaunchError, match="exit code 1, no output"):
+        launch.launch(plan, runner=silent, find_children=lambda pid: [])
+
+
 def test_ps_rows_show_each_blink_process_with_its_heartbeat(tmp_path):
     beat = tmp_path / "runs" / "long" / "heartbeat.json"
     beat.parent.mkdir(parents=True)

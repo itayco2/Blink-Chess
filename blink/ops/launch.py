@@ -187,6 +187,12 @@ def _alive(pid: Any, create_time: Any) -> bool:
         return False
 
 
+def _failure_text(done: subprocess.CompletedProcess) -> str:
+    """What PowerShell said on failure: stderr, else stdout, else the exit code alone."""
+    said = (done.stderr or "").strip() or (done.stdout or "").strip()
+    return said[:300] if said else f"exit code {done.returncode}, no output"
+
+
 def launch(
     plan: LaunchPlan,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
@@ -196,20 +202,21 @@ def launch(
     plan.out.parent.mkdir(parents=True, exist_ok=True)
     _refuse_if_alive(plan)
     try:
+        # PowerShell writes a redirected stream in the console code page, not UTF-8. A strict decode
+        # fails in subprocess's reader thread and silently turns that stream into None (PF39).
         done = runner(
             powershell_argv(plan.script),
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="backslashreplace",
             timeout=POWERSHELL_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise LaunchError(f"could not run {POWERSHELL}: {exc}") from exc
     fields = (done.stdout or "").split()
     if done.returncode != 0 or len(fields) < 2 or not all(f.isdigit() for f in fields[-2:]):
-        raise LaunchError(
-            f"PowerShell could not create the process: {(done.stderr or done.stdout).strip()[:300]}"
-        )
+        raise LaunchError(f"PowerShell could not create the process: {_failure_text(done)}")
     code, pid = int(fields[-2]), int(fields[-1])
     if code != 0:
         raise LaunchError(f"Win32_Process.Create returned {code} ({WMI_ERRORS.get(code, 'unknown code')})")
