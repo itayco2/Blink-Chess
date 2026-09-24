@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    name: ubuntu (CPU torch, full suite, coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Install (torch comes from the CPU index on Linux)
+        run: uv sync --locked
+      - name: Lint
+        run: uv run --no-sync ruff check . && uv run --no-sync ruff format --check .
+      - name: Tests with coverage
+        run: uv run --no-sync pytest -q --cov=blink --cov-report=term-missing:skip-covered --cov-fail-under=80
+
+  windows:
+    name: windows (torch-free tier)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Install without torch
+        run: uv sync --locked --no-group train --no-group compile
+      - name: Tests (torch-dependent modules are skipped by tests/conftest.py)
+        run: uv run --no-sync pytest -q

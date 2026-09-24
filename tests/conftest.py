@@ -1,12 +1,27 @@
 """Shared test setup: marker-based skips so one suite runs on the GPU box and on torch-free CI."""
 
 import importlib.util
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+_TORCH_IMPORT = re.compile(
+    r"^(import torch|from torch|from blink\.(model|train)|import blink\.(model|train))", re.MULTILINE
+)
+
+
+def pytest_ignore_collect(collection_path: Path, config) -> bool | None:
+    """On the torch-free CI leg, skip modules that import torch (or the model and train areas) at the top."""
+    if collection_path.suffix != ".py" or _torch_available():
+        return None
+    try:
+        text = collection_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return True if _TORCH_IMPORT.search(text) else None
 
 
 def _torch_available() -> bool:
