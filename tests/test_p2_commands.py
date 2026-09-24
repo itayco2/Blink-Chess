@@ -1,6 +1,7 @@
 """The P2 data commands from the command line: bigpack, rebalance, valprobe, mateset, verify, stats."""
 
 import json
+import shutil
 
 import numpy as np
 import pytest
@@ -124,6 +125,23 @@ def test_a_changed_source_during_resume_exits_2_and_says_stop_and_ask(
         handle.write(b"x")
     assert cli.main(bigpack_argv(moved, out, blocklist, "--salt", "0", "--resume")) == 2
     assert "stop and ask" in capsys.readouterr().err
+
+
+def test_a_resume_whose_buckets_were_deleted_exits_2_with_a_message(
+    tmp_path, source, blocklist, capsys, monkeypatch
+):
+    out = tmp_path / "v1"
+
+    def crash(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(bigpack, "pack_bucket", crash)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(bigpack_argv(source, out, blocklist, "--salt", "0"))
+    monkeypatch.undo()
+    shutil.rmtree(out / bigpack.BUCKET_DIR)
+    assert cli.main(bigpack_argv(source, out, blocklist, "--salt", "0", "--resume")) == 2
+    assert "--overwrite" in capsys.readouterr().err
 
 
 def test_rebalance_writes_the_manifest_block_and_keeps_the_games_histogram(tmp_path, packed, capsys):

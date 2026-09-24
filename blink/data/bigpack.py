@@ -430,6 +430,11 @@ def _complete(cfg: BigPackConfig, manifest: dict) -> dict:
 
 def run_pass2(cfg: BigPackConfig, manifest: dict, blocked: np.ndarray) -> dict:
     folder = cfg.out / BUCKET_DIR
+    if not (folder / EVAL_HASHES).is_file():
+        raise FileNotFoundError(
+            f"{folder / EVAL_HASHES} is gone, so the unfinished pass 2 in {cfg.out} cannot resume; "
+            "pass --overwrite to pack again"
+        )
     eval_hashes = np.load(folder / EVAL_HASHES)
     for bucket in range(cfg.buckets):
         names = (f"train_r{bucket:03d}.bin", f"train_c{bucket:03d}.bin")

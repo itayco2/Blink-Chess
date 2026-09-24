@@ -215,7 +215,7 @@ def _cmd_bigpack(args: argparse.Namespace) -> int:
 
     try:
         manifest = bigpack.bigpack(_bigpack_config(args))
-    except (Refused, FileExistsError, ValueError, bigpack.SourceChanged) as exc:
+    except (Refused, FileExistsError, FileNotFoundError, ValueError, bigpack.SourceChanged) as exc:
         print(f"blink data bigpack: {exc}", file=sys.stderr)
         return 2
     print(_bigpack_summary(manifest))
