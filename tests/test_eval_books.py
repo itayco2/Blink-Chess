@@ -87,3 +87,7 @@ def test_the_real_slices_hold_10000_and_24700_openings_with_their_recorded_hashe
         data = (books.books_dir() / f"{name}.pgn").read_bytes()
         assert hashlib.sha256(data).hexdigest() == manifest[name]["sha256"]
     assert manifest["overlap_move_sequences"] == 0
+    around_the_cut = books.read_openings(books.books_dir() / books.BOOK_NAME, 10_000, 2)
+    last_dev = books.read_openings(books.books_dir() / "dev.pgn", 10_000, 1)[0]
+    first_final = books.read_openings(books.books_dir() / "final.pgn", 1, 1)[0]
+    assert (last_dev.moves, first_final.moves) == (around_the_cut[0].moves, around_the_cut[1].moves)
