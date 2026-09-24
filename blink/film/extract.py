@@ -20,6 +20,7 @@ GPU-hours the run had used by then (cumulative metrics.jsonl windows, as in resu
 import csv
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -234,6 +235,36 @@ def _measured_frames(run_dir: Path, board: chess.Board, device: str) -> tuple[li
     return frames, worlds
 
 
+# ------------------------------------------------------------------------------------------ milestones
+
+
+def parse_milestone(text: str) -> tuple[str, float]:
+    """'passed the MLP=0.21' -> ('passed the MLP', 0.21): a ladder rung's label and its top-1."""
+    label, sep, value = text.rpartition("=")
+    try:
+        top1 = float(value)
+    except ValueError:
+        top1 = None
+    if not sep or not label.strip() or top1 is None:
+        raise FilmError(f"a milestone is LABEL=TOP1 (for example 'passed the MLP=0.21'), got {text!r}")
+    return label.strip(), top1
+
+
+def find_milestones(run_dir: Path, rungs: Sequence[tuple[str, float]]) -> list[dict]:
+    """The first eval step whose EMA top-1 (else raw top-1) reaches each rung, in step order."""
+    path = Path(run_dir) / "evals.jsonl"
+    if not rungs or not path.is_file():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = sorted((r for r in rows if "step" in r), key=lambda r: r["step"])
+    found = []
+    for label, top1 in rungs:
+        step = next((r["step"] for r in rows if r.get("ema_top1", r.get("top1", -1.0)) >= top1), None)
+        if step is not None:
+            found.append({"label": label, "step": step})
+    return sorted(found, key=lambda m: (m["step"], m["label"]))
+
+
 # ------------------------------------------------------------------------------------------ padding
 
 
@@ -281,6 +312,7 @@ def extract(
     pad_to: int | None = None,
     expect: int | None = FILM_FRAMES,
     device: str = "cpu",
+    milestones: Sequence[tuple[str, float]] = (),
 ) -> dict:
     proof = never_in_training(position, blocklist_path)
     frames, worlds = _measured_frames(Path(run_dir), chess.Board(position.fen), device)
@@ -306,6 +338,7 @@ def extract(
         "never_in_training": proof,
         "frames": frames,
         "measured_frames": measured,
+        "milestones": find_milestones(Path(run_dir), milestones),
         "note": note,
     }
 

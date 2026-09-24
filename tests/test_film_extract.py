@@ -236,3 +236,20 @@ def test_the_checkpoint_at_the_planned_last_step_is_labelled_the_final_weights(t
         checkpoint.save_checkpoint(run, step, {**state, "config": config_to_dict(TINY)})
     kinds = [extract.load_frame(s, "cpu")[1]["kind"] for s in extract.frame_sources(run)]
     assert kinds == ["init", "ema", "final"]
+
+
+def test_milestones_mark_the_first_eval_step_whose_ema_top1_passes_each_rung(tmp_path):
+    run = _film_run(tmp_path, [0, 250, 500])
+    rows = [{"step": 0, "ema_top1": 0.05}, {"step": 250, "ema_top1": 0.21}, {"step": 500, "ema_top1": 0.30}]
+    (run / "evals.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    rungs = [("passed the MLP", 0.2), ("passed a random mover", 0.03), ("never reached", 0.9)]
+    assert extract.find_milestones(run, rungs) == [
+        {"label": "passed a random mover", "step": 0},
+        {"label": "passed the MLP", "step": 250},
+    ]
+    position = _position(tmp_path)
+    film_json = extract.extract(run, position, _blocklist(tmp_path, position), expect=None, milestones=rungs)
+    assert [m["step"] for m in film_json["milestones"]] == [0, 250]
+    with pytest.raises(extract.FilmError, match="LABEL=TOP1"):
+        extract.parse_milestone("no equals sign")
+    assert extract.parse_milestone("passed the MLP=0.21") == ("passed the MLP", 0.21)

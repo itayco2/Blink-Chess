@@ -142,7 +142,10 @@ def cmd_film_extract(args: argparse.Namespace) -> int:
 
     run_dir = paths.home() / "runs" / args.run
     position = extract.film_position(Path(args.bands), args.puzzle)
-    film = extract.extract(run_dir, position, Path(args.blocklist), pad_to=args.pad_to, device=args.device)
+    rungs = [extract.parse_milestone(text) for text in args.milestone]
+    film = extract.extract(
+        run_dir, position, Path(args.blocklist), pad_to=args.pad_to, device=args.device, milestones=rungs
+    )
     out = extract.write_film(film, Path(args.out) if args.out else _film_dir(args.run) / "film.json")
     total = len(film["frames"])
     real = sum(not f["interpolated"] for f in film["frames"])
@@ -184,6 +187,9 @@ def _register_film(sub: argparse._SubParsersAction) -> None:
         "--pad-to", type=int, default=None, help=f"interpolate up to N frames (the film: {FILM_FRAMES})"
     )
     extract.add_argument("--device", default="cpu")
+    extract.add_argument(
+        "--milestone", action="append", default=[], help="LABEL=TOP1, a ladder rung to flash when passed"
+    )
     extract.add_argument("--out")
     extract.set_defaults(func=_film_errors(cmd_film_extract))
 
