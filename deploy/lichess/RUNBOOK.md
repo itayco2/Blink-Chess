@@ -84,6 +84,12 @@ Both switch off every lookup lichess-bot could make for the engine (polyglot boo
 the default `uci_options` (blink-uci declares none), and set `abort_time: 30` explicitly (the code
 default for a missing key is 20).
 
+lichess-bot starts one `blink-uci` per game with the same flags, and the rated bot can run two games
+at once, so the decision log path holds `{process}`: each engine writes its own file,
+`D:\blink\lichess\decisions\<UTC start>-<PID>.jsonl` (casual: `D:\blink\lichess\decisions-casual\`),
+one per game. `check-config` refuses a single shared log file whenever `challenge.concurrency` is
+above 1.
+
 ```powershell
 # G5, during P7: the casual config only, with the preview model
 uv run blink lichess config --only casual --model <preview selector> --mode <mode>

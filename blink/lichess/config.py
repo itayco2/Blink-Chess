@@ -15,8 +15,10 @@ LICHESS_BOT_TOKEN, which only Itay's start-bot.ps1 sets.
 
 `problems()` is the one check behind check-config, the generator and the tests: every lookup off
 (config_check), abort_time 30, concurrency under challenge, only UCI options blink-uci declares,
-engine options blink-uci accepts, the plan's rated or casual settings, and (rated only) the shipped
-sha and mode. The casual smoke runs the preview model during P7, so it is exempt from the ship check.
+engine options blink-uci accepts, a decision log per engine process when games run at once (lichess-bot
+starts one blink-uci per game with the same flags), the plan's rated or casual settings, and (rated
+only) the shipped sha and mode. The casual smoke runs the preview model during P7, so it is exempt
+from the ship check.
 """
 
 import contextlib
@@ -235,6 +237,21 @@ def _engine_flag_problems(config: Mapping) -> list[str]:
     return found
 
 
+def _log_problems(config: Mapping) -> list[str]:
+    """lichess-bot starts one blink-uci per game with the same flags: games at once need per-process logs."""
+    from blink import uci
+
+    concurrency = _section(config, "challenge").get("concurrency")
+    log = _section(config, "engine", "engine_options").get("log")
+    running_at_once = isinstance(concurrency, int) and not isinstance(concurrency, bool) and concurrency > 1
+    if not running_at_once or log is None or uci.PROCESS_FIELD in str(log):
+        return []
+    return [
+        f"engine.engine_options.log must contain {uci.PROCESS_FIELD} when challenge.concurrency is "
+        f"{concurrency}: engines running at once would append to one file ({log})"
+    ]
+
+
 def sha_match(one: str | None, other: str | None) -> bool:
     """Two sha256 hex strings, either of which may be a prefix (7 digits or more), name the same file."""
     if not one or not other:
@@ -280,6 +297,7 @@ def problems(
     found += _rule_problems(config, RULES[kind])
     found += _uci_option_problems(config, declared)
     found += _engine_flag_problems(config)
+    found += _log_problems(config)
     if kind == "rated":
         found += _ship_problems(config, shipped, weights_sha)
     return found

@@ -10,10 +10,15 @@ where nodes is the number of positions the network scored for this move (1 in po
 value mode, 0 when a mate in one was played by rule R2). fastchess writes that count into every PGN
 (`-pgnout nodes=true`), which is how `blink audit no-search` proves compliance from the games alone.
 Castling is always printed as the king's two-square move (e1g1).
+
+`--log` appends one JSON line per decision. `{process}` in its path becomes this process's UTC start
+time and PID (`20261008T120000Z-4242`): lichess-bot starts one blink-uci per game with the same static
+flags, so at concurrency 2 two engines run at once, and each needs a file of its own.
 """
 
 import argparse
 import math
+import os
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -32,6 +37,16 @@ ENGINE_NAME = "Blink"
 AUTHOR = "Itay Cohen"
 WARMUP_DECISIONS = 5  # timed decisions after one cold call; their max stands in for the p99 (R5)
 WIN_FLOOR = 1e-6
+PROCESS_FIELD = "{process}"  # in --log: this process's UTC start time and PID
+
+
+def log_path(raw: Path, pid: int, now: float) -> Path:
+    """`raw` with PROCESS_FIELD replaced: a PID is unique among live engines, the start time over days."""
+    text = str(raw)
+    if PROCESS_FIELD not in text:
+        return Path(raw)
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))
+    return Path(text.replace(PROCESS_FIELD, f"{stamp}-{pid}"))
 
 
 def win_to_cp(win: float) -> int:
@@ -159,7 +174,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random", action="store_true", help="a random-logit network, for harness tests")
     parser.add_argument("--seed", type=int, default=0, help="seed of the random-logit network")
     parser.add_argument("--epsilon", type=float, default=rules.DEFAULT_EPSILON, help="R4 tie window")
-    parser.add_argument("--log", type=Path, help="append one JSON line per decision to this file")
+    parser.add_argument(
+        "--log",
+        type=Path,
+        help=f"append one JSON line per decision to this file; {PROCESS_FIELD} in it becomes this "
+        "process's UTC start time and PID",
+    )
     parser.add_argument("--name", default=None, help="the name sent in `id name`")
     return parser
 
@@ -175,7 +195,7 @@ def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout:
     except factory.ModelUnavailable as exc:
         print(f"blink-uci: {exc}", file=sys.stderr)
         return 2
-    sink = factory.JsonlSink(args.log) if args.log else None
+    sink = factory.JsonlSink(log_path(args.log, os.getpid(), time.time())) if args.log else None
 
     def make() -> Agent:
         if is_deepmind:  # DeepMind's released play logic: L rows per move, no Blink mode

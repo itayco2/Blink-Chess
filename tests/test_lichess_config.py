@@ -4,6 +4,10 @@ import copy
 import hashlib
 import importlib
 import json
+import os
+import re
+import subprocess
+import sys
 import tomllib
 from pathlib import Path, PurePosixPath
 
@@ -334,3 +338,67 @@ def test_engine_options_that_are_not_a_mapping_are_named(tmp_path):
         "engine.engine_options must be a mapping" in p
         for p in botconfig.problems(config, "rated", frozenset())
     )
+
+
+# ---------------------------------------------------------------- one decision log per engine process
+# lichess-bot starts one blink-uci per game and passes every engine the same static flags, so at
+# challenge.concurrency 2 two engines run at once; a shared --log file would take appends from both.
+
+DECISION_SCRIPT = "".join(
+    ["uci\n", "isready\n", "ucinewgame\n"]
+    + [f"position startpos{tail}\ngo movetime 50\n" for tail in ("", " moves e2e4", " moves e2e4 e7e5")]
+    + ["quit\n"]
+)
+
+
+def test_every_bot_config_gives_each_engine_process_its_own_decision_log(tmp_path):
+    for config in all_configs(tmp_path):
+        log = config["engine"]["engine_options"]["log"]
+        assert uci.PROCESS_FIELD in log, log
+
+
+@pytest.mark.parametrize("kind", ["rated", "casual"])
+def test_a_decision_log_shared_by_games_running_at_once_is_named(tmp_path, kind):
+    config = copy.deepcopy(generate(tmp_path)[kind])
+    config["engine"]["engine_options"]["log"] = "D:/blink/lichess/decisions.jsonl"
+    config["challenge"]["concurrency"] = 2
+    found = botconfig.problems(config, kind, frozenset())
+    assert any(p.startswith("engine.engine_options.log") and uci.PROCESS_FIELD in p for p in found), found
+
+
+def test_one_game_at_a_time_may_keep_a_single_decision_log(tmp_path):
+    config = copy.deepcopy(generate(tmp_path)["casual"])
+    config["engine"]["engine_options"]["log"] = "D:/blink/lichess/casual-decisions.jsonl"
+    assert botconfig.problems(config, "casual", frozenset()) == []
+
+
+def test_the_process_field_in_the_log_path_becomes_the_utc_start_time_and_the_pid():
+    folder = Path("D:/blink/lichess/decisions")
+    expanded = uci.log_path(folder / f"{uci.PROCESS_FIELD}.jsonl", pid=4242, now=0.0)
+    assert expanded == folder / "19700101T000000Z-4242.jsonl"
+    assert uci.log_path(folder / "one.jsonl", pid=4242, now=0.0) == folder / "one.jsonl"
+
+
+def test_two_engines_started_at_once_from_the_rated_flags_write_two_whole_logs(tmp_path):
+    options = {**load_template()["engine"]["engine_options"], "device": "cpu"}
+    options["log"] = str(tmp_path / "decisions" / PurePosixPath(options["log"]).name)
+    command = [sys.executable, "-m", "blink.uci", *lichess_bot_flags(options), "--random"]
+    pipes = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    engines = [
+        subprocess.Popen(command, **pipes, text=True, encoding="utf-8", cwd=ROOT, env=env) for _ in range(2)
+    ]
+    for engine in engines:  # both engines get their game before either is read, as two live games do
+        engine.stdin.write(DECISION_SCRIPT)
+        engine.stdin.close()
+    outputs = [engine.communicate(timeout=180) for engine in engines]
+    for engine, (out, err) in zip(engines, outputs, strict=True):
+        assert engine.returncode == 0, err
+        assert out.count("bestmove") == 3
+    logs = sorted((tmp_path / "decisions").iterdir())
+    # the PID is the interpreter's own, which a Windows venv launcher or console script runs as a child
+    assert len(logs) == 2 and len({path.stem.rsplit("-", 1)[1] for path in logs}) == 2
+    assert all(re.fullmatch(r"\d{8}T\d{6}Z-\d+\.jsonl", path.name) for path in logs), logs
+    for path in logs:
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        assert [(r["game"], r["ply"]) for r in records] == [("g1", 0), ("g1", 1), ("g1", 2)]
