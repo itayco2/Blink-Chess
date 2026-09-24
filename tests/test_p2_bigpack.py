@@ -258,6 +258,17 @@ def test_a_complete_pack_is_kept_unless_overwrite_is_given(tmp_path, source):
     assert again["frames"] == 3 and first["frames"] == 2
 
 
+def test_a_directory_holding_another_pack_format_is_refused_even_with_resume(tmp_path, source):
+    out = tmp_path / "skeleton"
+    out.mkdir()
+    (out / "manifest.json").write_text(json.dumps({"format": "blink-pack-v1"}), encoding="utf-8")
+    (out / "train_000.bin").write_bytes(b"")
+    for extra in ({}, {"resume": True}):
+        with pytest.raises(FileExistsError, match="blink-pack-v1"):
+            bigpack.bigpack(config(source, out, **extra))
+    assert (out / "train_000.bin").exists()
+
+
 def test_limit_frames_reads_only_that_many_frames(tmp_path, source, packed):
     got = bigpack.bigpack(config(source, tmp_path / "v1", limit_frames=1))
     whole = bigpack.read_manifest(packed[0])

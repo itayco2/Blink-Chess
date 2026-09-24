@@ -511,6 +511,11 @@ def bigpack(cfg: BigPackConfig) -> dict:
     identity = source_identity(cfg.source)
     blocked, blocklist_entry = pack.load_blocklist(cfg.blocklist)
     manifest = read_manifest(cfg.out) if (cfg.out / MANIFEST).is_file() else None
+    if manifest is not None and manifest.get("format") != FORMAT and not cfg.overwrite:
+        raise FileExistsError(
+            f"{cfg.out} holds a {manifest.get('format')!r} pack, not {FORMAT!r}; choose another --out "
+            "(or --overwrite to delete it)"
+        )
     if manifest is not None and not cfg.overwrite:
         if not cfg.resume:
             raise FileExistsError(
