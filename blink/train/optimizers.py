@@ -5,13 +5,18 @@ meant for the hidden layers of a network; the input embedding, the output layer,
 biases belong on a standard optimizer (Keller Jordan's Muon post and torch's own docstring). In
 BlinkNet the hidden matrices are the Linear weights inside `trunk.blocks`, four per block:
 
-    trunk.blocks.<i>.attn.qkv.weight   [3d, d]   one fused matrix, orthogonalised as one
+    trunk.blocks.<i>.attn.qkv.weight   [3d, d]   Q, K and V fused, orthogonalised as three [d, d]
     trunk.blocks.<i>.attn.out.weight   [d, d]
     trunk.blocks.<i>.ffn_in.weight     [2d, d]
     trunk.blocks.<i>.ffn_out.weight    [d, 2d]
 
-That is 4,194,304 of S's 5,048,448 parameters (83%). Everything else stays on AdamW with today's
-settings (betas, decay on matrices only, fused on CUDA), for these reasons:
+That is 4,194,304 of S's 5,048,448 parameters (83%). The same post finds Muon works better on Q, K and
+V separately than together; orthogonalised as one [3d, d] matrix, the three would share one update
+budget split by the size of their gradients. BlockwiseMuon below gives each its own orthogonal update
+without splitting the Linear, so the model, its state_dict keys and Recipe D stay exactly as they are.
+
+Everything else stays on AdamW with today's settings (betas, decay on matrices only, fused on CUDA),
+for these reasons:
 
 - trunk.token_embedding and trunk.square_embedding are the input embeddings: lookup tables whose
   rows are separate vectors, not a linear map, so orthogonalising their update has no meaning.
@@ -30,17 +35,21 @@ owns decay at the recipe's weight_decay (0.1) exactly as they did under AdamW. I
 torch's default 0.95 with Nesterov (Keller Jordan's settings); beta1 stays AdamW's.
 """
 
-from collections.abc import Sequence
+from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 from torch import nn
+from torch.optim.optimizer import ParamsT
 
 from blink.model.config import TrainConfig
 
 HIDDEN_SCOPE = "trunk.blocks."  # every nn.Linear weight under here goes to Muon
 MUON_PARTS = ("muon", "adamw")
+ROW_BLOCKS = "row_blocks"  # Muon param-group key: orthogonalise each matrix as this many row blocks
+QKV_SUFFIX = ".attn.qkv.weight"
+QKV_BLOCKS = 3  # Attention reads qkv(x) as [3, heads, head_dim]: rows [0, d) Q, [d, 2d) K, [2d, 3d) V
 
 
 def build_adamw(params: Sequence[nn.Parameter], cfg: TrainConfig, device_type: str) -> torch.optim.AdamW:
@@ -89,6 +98,42 @@ def split_parameters(model: nn.Module) -> ParameterSplit:
     )
 
 
+class BlockwiseMuon(torch.optim.Muon):
+    """torch.optim.Muon that can orthogonalise a fused projection one block of rows at a time.
+
+    A param group with row_blocks = k hands torch's own Muon step each of its matrices as k equal
+    blocks of rows. The blocks are views, so the step writes through to the parameter and its one
+    momentum buffer, and Newton-Schulz and the adjust_lr_fn scale see [rows / k, cols] matrices:
+    the same arithmetic as torch.optim.Muon on k separate parameters. A group without the key is
+    torch.optim.Muon unchanged. Both are pinned bitwise against torch.optim.Muon in the tests,
+    because this leans on Muon's private _init_group.
+    """
+
+    def __init__(self, params: ParamsT, **settings: Any) -> None:
+        super().__init__(params, **settings)
+        for group in self.param_groups:
+            blocks = group.get(ROW_BLOCKS, 1)
+            for p in group["params"]:
+                if not isinstance(blocks, int) or blocks < 1 or p.shape[0] % blocks:
+                    raise ValueError(
+                        f"cannot split a {tuple(p.shape)} matrix into {blocks!r} equal row blocks"
+                    )
+
+    def _init_group(
+        self,
+        group: MutableMapping[str, Any],
+        params_with_grad: list[torch.Tensor],
+        grads: list[torch.Tensor],
+        muon_momentum_bufs: list[torch.Tensor],
+    ) -> bool:
+        whole: tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]] = ([], [], [])
+        has_complex = super()._init_group(group, *whole)
+        blocks = group.get(ROW_BLOCKS, 1)
+        for tensors, out in zip(whole, (params_with_grad, grads, muon_momentum_bufs), strict=True):
+            out.extend(block for tensor in tensors for block in tensor.chunk(blocks))
+        return has_complex
+
+
 @dataclass(frozen=True)
 class MuonAdamW:
     """Muon and AdamW stepped as one optimizer, with the interface the trainer uses.
@@ -131,7 +176,8 @@ class MuonAdamW:
         muon, adamw = _owned(self.muon), _owned(self.adamw)
         adjust = self.muon.param_groups[0]["adjust_lr_fn"]
         return (
-            f"optimizer: Muon ({adjust}) on {len(muon)} hidden matrices ({_size(muon):,} parameters), "
+            f"optimizer: Muon ({adjust}) on {len(muon)} hidden matrices ({_size(muon):,} parameters; "
+            f"each fused QKV weight as Q, K and V separately), "
             f"AdamW on {len(adamw)} others ({_size(adamw):,})"
         )
 
@@ -144,17 +190,25 @@ def _size(params: Sequence[nn.Parameter]) -> int:
     return sum(p.numel() for p in params)
 
 
+def muon_groups(model: nn.Module, split: ParameterSplit) -> list[dict[str, Any]]:
+    """Muon's param groups: every fused QKV weight as its Q, K and V blocks, the other matrices whole."""
+    params = dict(model.named_parameters())
+    qkv = [params[name] for name in split.muon if name.endswith(QKV_SUFFIX)]
+    whole = [params[name] for name in split.muon if not name.endswith(QKV_SUFFIX)]
+    groups = ({"params": qkv, ROW_BLOCKS: QKV_BLOCKS}, {"params": whole, ROW_BLOCKS: 1})
+    return [group for group in groups if group["params"]]
+
+
 def build_muon_adamw(model: nn.Module, cfg: TrainConfig, device_type: str) -> MuonAdamW:
     split = split_parameters(model)
     owned = set(split.muon)
-    named = list(model.named_parameters())
-    muon = torch.optim.Muon(
-        [p for name, p in named if name in owned],
+    muon = BlockwiseMuon(
+        muon_groups(model, split),
         lr=cfg.peak_lr,
         weight_decay=cfg.weight_decay,
         adjust_lr_fn=cfg.muon_adjust_lr_fn,
     )
-    adamw = build_adamw([p for name, p in named if name not in owned], cfg, device_type)
+    adamw = build_adamw([p for name, p in model.named_parameters() if name not in owned], cfg, device_type)
     return MuonAdamW(muon, adamw)
 
 

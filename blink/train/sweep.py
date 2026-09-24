@@ -4,6 +4,8 @@ Ablations. Each arm is a TOML file of overrides on the recipe (configs/ablations
 table for the sweep plus [model] and [train] overrides). Arms run one after another, each through
 `blink supervise`, for a fixed wall-clock budget: its steps are the hours times the size's measured
 samples/s (bench.json) over the batch size, so the WSD schedule's own 20% cooldown ends the arm.
+An arm whose change costs time per step (a10's Muon) names its own bench.json row ([arm] bench_size),
+which then plans its steps and polices its throughput; a15 runs at the slowest rate of its winners.
 The sweep is resumable: ablations.json records every arm, and a rerun skips finished arms and
 resumes the one that was running. Judging, after every arm has cooled down:
 - D and sigma are the mean and sample standard deviation of arms a01-a03 (Recipe D, seeds 1-3);
@@ -56,6 +58,7 @@ class Arm:
     combine: bool = False  # a15: run the adopted arms together
     guard: str | None = None  # a08: a metric that must not fall more than 2 pt
     combined_from: tuple[str, ...] = ()
+    bench_size: str | None = None  # its own bench.json throughput row; None: the plan's size
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,7 @@ def load_arm(path: Path) -> Arm:
         peak_lr_scale=float(meta.get("peak_lr_scale", 1.0)),
         combine=bool(meta.get("combine", False)),
         guard=meta.get("guard"),
+        bench_size=None if meta.get("bench_size") is None else str(meta["bench_size"]),
     )
 
 
@@ -356,7 +360,43 @@ def _judge(plan: AblationPlan, arms_state: Mapping[str, Mapping]) -> tuple[dict 
     return floor, decisions
 
 
-def _plan_arm(plan: AblationPlan, arm: Arm, rate: float, arms_state, slip: bool, log: Log):
+def arm_compile_mode(plan: AblationPlan, arm: Arm) -> str:
+    """The compile mode an arm trains in: the recipe's (with base) under the arm's own overrides."""
+    tables = read_tables(plan.recipe)
+    return compile_mode({"train": {**tables["train"], **arm.overrides.get("train", {})}})
+
+
+def own_bench_rates(plan: AblationPlan, rate_of: Callable[[str, str], float]) -> dict[str, float]:
+    """samples/s by arm name for every arm that names its own bench row, from rate_of(size, mode)."""
+    rates = {}
+    for arm in plan.arms:
+        if arm.bench_size is None:
+            continue
+        try:
+            rates[arm.name] = rate_of(arm.bench_size, arm_compile_mode(plan, arm))
+        except ValueError as exc:
+            raise ValueError(
+                f"arm {arm.name} is planned at its own bench row {arm.bench_size}: {exc}"
+            ) from exc
+    return rates
+
+
+def arm_rate(arm: Arm, rate: float, rates: Mapping[str, float]) -> float:
+    """The samples/s that plans an arm's steps and polices its throughput.
+
+    Its own bench row's when it has one, else the plan size's. Planned at D's rate, an arm that is
+    slower per step (a10's Muon) would run past its hours and trip the throughput stop rule before
+    its cooldown. A combined arm takes the slowest rate among the winners it combines: an estimate
+    for a mix no bench row measured, erring towards finishing early rather than overrunning.
+    """
+    if arm.combine:
+        return min([rate, *(rates[name] for name in arm.combined_from if name in rates)])
+    return rates.get(arm.name, rate)
+
+
+def _plan_arm(
+    plan: AblationPlan, arm: Arm, rate: float, arm_rates: Mapping[str, float], arms_state, slip: bool
+):
     """(entry, request) for one arm; request is None when the arm does not run, and entry says why."""
     if slip and arm.name in plan.slip_cut:
         return {"name": arm.name, "status": "not tested: cut by the slip rule"}, None
@@ -367,19 +407,36 @@ def _plan_arm(plan: AblationPlan, arm: Arm, rate: float, arms_state, slip: bool,
         if not to_run.combined_from:
             return {"name": arm.name, "status": "not run: no arm was adopted"}, None
     run = f"abl-{arm.name}"
+    own = arm_rate(to_run, rate, arm_rates)
     try:
-        config, info = _prepare(run, plan.recipe, to_run, plan.hours, rate, "ablations")
+        config, info = _prepare(run, plan.recipe, to_run, plan.hours, own, "ablations")
     except (ValueError, OSError) as exc:
         return {"name": arm.name, "status": f"invalid: {exc}"}, None
-    entry = {**info, "name": arm.name, "change": to_run.change, "combined_from": list(to_run.combined_from)}
-    request = _request(run, config, plan.data, rate, plan.hours, plan.disable)
+    entry = {
+        **info,
+        "name": arm.name,
+        "change": to_run.change,
+        "combined_from": list(to_run.combined_from),
+        "samples_per_s": own,
+    }
+    request = _request(run, config, plan.data, own, plan.hours, plan.disable)
     return {**entry, "status": "running", "started": time.time()}, request
 
 
 def run_ablations(
-    plan: AblationPlan, out: Path, rate: float, runner: Runner, log: Log = print, slip: bool = False
+    plan: AblationPlan,
+    out: Path,
+    rate: float,
+    runner: Runner,
+    log: Log = print,
+    slip: bool = False,
+    arm_rates: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Run every pending arm in plan order through `runner`, recording each in `out` as it goes."""
+    """Run every pending arm in plan order through `runner`, recording each in `out` as it goes.
+
+    `rate` is the plan size's samples/s; `arm_rates` (by arm name) replaces it for arms with their own.
+    """
+    own_rates = dict(arm_rates or {})
     state = _load_state(out)
     arms_state = dict(state.get("arms", {}))
     for arm in plan.arms:
@@ -390,7 +447,7 @@ def run_ablations(
             arms_state[name] = entry
             _save_state(out, {**state, "arms": arms_state})
 
-        entry, request = _plan_arm(plan, arm, rate, arms_state, slip, log)
+        entry, request = _plan_arm(plan, arm, rate, own_rates, arms_state, slip)
         _execute(entry, request, runner, save, log)
     return _report(plan, out, state, arms_state)
 

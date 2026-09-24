@@ -100,9 +100,9 @@ def test_muon_decays_its_matrices_like_adamw_and_adamw_keeps_decay_on_matrices_o
     model = _model(n_layers=2)
     cfg = _muon_config(weight_decay=0.1, muon_adjust_lr_fn="match_rms_adamw")
     optimizer = loop.build_optimizer(model, cfg, "cpu")
-    (muon_group,) = optimizer.muon.param_groups
     assert isinstance(optimizer.muon, torch.optim.Muon) and isinstance(optimizer.adamw, torch.optim.AdamW)
-    assert (muon_group["weight_decay"], muon_group["adjust_lr_fn"]) == (0.1, "match_rms_adamw")
+    for muon_group in optimizer.muon.param_groups:
+        assert (muon_group["weight_decay"], muon_group["adjust_lr_fn"]) == (0.1, "match_rms_adamw")
     decay, no_decay = optimizer.adamw.param_groups
     assert decay["weight_decay"] == 0.1 and all(p.ndim >= 2 for p in decay["params"])
     assert no_decay["weight_decay"] == 0.0 and all(p.ndim < 2 for p in no_decay["params"])
@@ -112,7 +112,117 @@ def test_muon_decays_its_matrices_like_adamw_and_adamw_keeps_decay_on_matrices_o
 def test_the_configured_adjust_lr_fn_reaches_muon():
     cfg = _muon_config(muon_adjust_lr_fn="spectral_unclamped")
     optimizer = loop.build_optimizer(_model(), cfg, "cpu")
-    assert optimizer.muon.param_groups[0]["adjust_lr_fn"] == "spectral_unclamped"
+    assert {group["adjust_lr_fn"] for group in optimizer.muon.param_groups} == {"spectral_unclamped"}
+
+
+def test_muon_takes_each_qkv_weight_as_q_k_and_v_and_every_other_matrix_whole():
+    model = _model(n_layers=2)
+    optimizer = loop.build_optimizer(model, _muon_config(), "cpu")
+    names = {id(p): name for name, p in model.named_parameters()}
+    blocks = {
+        names[id(p)]: group[optimizers.ROW_BLOCKS]
+        for group in optimizer.muon.param_groups
+        for p in group["params"]
+    }
+    expected = {
+        f"trunk.blocks.{i}.{name}": 3 if name == "attn.qkv.weight" else 1 for i in range(2) for name in HIDDEN
+    }
+    assert blocks == expected
+    assert "Q, K and V separately" in optimizer.summary()
+
+
+def test_the_three_row_blocks_of_a_qkv_weight_are_whole_query_key_and_value_projections():
+    """The split relies on Attention reading qkv(x) as [3, heads, head_dim]: rows [0, d) are Q,
+    [d, 2d) K and [2d, 3d) V. A per-head interleaved layout would fail every line below."""
+    attn = _model(n_layers=1).trunk.blocks[0].attn
+    x = torch.randn(2, 64, 64, generator=torch.Generator().manual_seed(0))
+
+    def output_without(block: int) -> torch.Tensor:
+        weight = attn.qkv.weight
+        saved = weight.detach().clone()
+        with torch.no_grad():
+            weight.chunk(3)[block].zero_()
+            y = attn(x)
+            weight.copy_(saved)
+        return y
+
+    for block in (0, 1):  # no query or no key: every position attends uniformly, so all outputs agree
+        y = output_without(block)
+        assert torch.allclose(y, y[:, :1].expand_as(y), atol=1e-6)
+    assert torch.equal(output_without(2), torch.zeros_like(x))  # no value: nothing to attend to
+
+
+def _orthogonal(d: int, seed: int) -> torch.Tensor:
+    q, _ = torch.linalg.qr(torch.randn(d, d, generator=torch.Generator().manual_seed(seed)))
+    return q
+
+
+def test_q_k_and_v_each_get_a_full_orthogonal_update_when_one_gradient_dominates():
+    """Keller Jordan's Muon post: Muon works better applied to Q, K and V separately than together.
+
+    Orthogonalised as one [3d, d] matrix, a query gradient 100x the others takes almost the whole
+    update and K and V barely move (singular values near 0.01). Split, each [d, d] block gets an
+    orthogonal update of its own (Newton-Schulz puts singular values in roughly 0.5-1.5)."""
+    model = _model(n_layers=1)
+    cfg = _muon_config(weight_decay=0.0, peak_lr=1.0, muon_adjust_lr_fn="original")  # a [d, d] step of 1
+    optimizer = loop.build_optimizer(model, cfg, "cpu")
+    qkv = model.trunk.blocks[0].attn.qkv.weight
+    d = qkv.shape[1]
+    qkv.grad = torch.cat([100 * _orthogonal(d, 1), _orthogonal(d, 2), _orthogonal(d, 3)])
+    before = qkv.detach().clone()
+    optimizer.step()
+    for name, block in zip("QKV", (before - qkv.detach()).chunk(3), strict=True):
+        singular = torch.linalg.svdvals(block)
+        assert singular.min() > 0.5 and singular.max() < 1.5, (
+            f"{name}: {singular.min():.4f}-{singular.max():.4f}"
+        )
+
+
+def _muon_pair(params, reference_params, **settings):
+    return optimizers.BlockwiseMuon(params, **settings), torch.optim.Muon(reference_params, **settings)
+
+
+SETTINGS = {"lr": 0.02, "weight_decay": 0.1, "adjust_lr_fn": "match_rms_adamw"}
+
+
+def test_a_qkv_weight_steps_bitwise_like_torch_muon_on_separate_q_k_and_v():
+    d = 32
+    generator = torch.Generator().manual_seed(0)
+    start = torch.randn(3 * d, d, generator=generator)
+    fused = torch.nn.Parameter(start.clone())
+    separate = [torch.nn.Parameter(block.clone()) for block in start.chunk(3)]
+    ours, reference = _muon_pair([{"params": [fused], optimizers.ROW_BLOCKS: 3}], separate, **SETTINGS)
+    for _ in range(3):  # momentum and weight decay both carry across steps
+        grad = torch.randn(3 * d, d, generator=generator)
+        fused.grad = grad.clone()
+        for param, block in zip(separate, grad.chunk(3), strict=True):
+            param.grad = block.clone()
+        ours.step()
+        reference.step()
+    assert torch.equal(fused.detach(), torch.cat([p.detach() for p in separate]))
+    buffers = [reference.state[p]["momentum_buffer"] for p in separate]
+    assert torch.equal(ours.state[fused]["momentum_buffer"], torch.cat(buffers))
+
+
+@pytest.mark.parametrize("shape", [(64, 32), (32, 64), (32, 32)])
+def test_a_matrix_taken_whole_steps_bitwise_like_torch_muon(shape):
+    generator = torch.Generator().manual_seed(1)
+    start = torch.randn(*shape, generator=generator)
+    ours_param, reference_param = torch.nn.Parameter(start.clone()), torch.nn.Parameter(start.clone())
+    ours, reference = _muon_pair([ours_param], [reference_param], **SETTINGS)  # no row_blocks: 1
+    for _ in range(3):
+        grad = torch.randn(*shape, generator=generator)
+        ours_param.grad, reference_param.grad = grad.clone(), grad.clone()
+        ours.step()
+        reference.step()
+    assert torch.equal(ours_param.detach(), reference_param.detach())
+
+
+@pytest.mark.parametrize("blocks", [3, 0])
+def test_a_row_block_count_that_does_not_split_a_matrix_evenly_is_refused(blocks):
+    weight = torch.nn.Parameter(torch.zeros(10, 4))
+    with pytest.raises(ValueError, match="row blocks"):
+        optimizers.BlockwiseMuon([{"params": [weight], optimizers.ROW_BLOCKS: blocks}])
 
 
 def test_the_default_optimizer_is_still_one_adamw_over_the_model_in_order():

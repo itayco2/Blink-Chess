@@ -318,7 +318,7 @@ def _plan_rate(args: argparse.Namespace, size: str, mode: str) -> float:
     return float(best["samples_per_s"])
 
 
-def _print_arm_plan(plan, rate: float) -> None:
+def _print_arm_plan(plan, rate: float, arm_rates: dict[str, float]) -> None:
     from blink.model.config import read_tables
     from blink.train import sweep
 
@@ -327,9 +327,13 @@ def _print_arm_plan(plan, rate: float) -> None:
         if arm.combine:
             _say(f"abl-{arm.name}: {arm.change}, chosen when it starts by the adopt rule")
             continue
-        steps = sweep.steps_for(plan.hours, rate, sweep.batch_size_of(base, arm))
+        own = sweep.arm_rate(arm, rate, arm_rates)
+        steps = sweep.steps_for(plan.hours, own, sweep.batch_size_of(base, arm))
         peak = sweep.merged_config(base, arm, steps)["train"]["peak_lr"]
-        _say(f"abl-{arm.name}: {arm.change}; steps {steps:,}; peak_lr {peak:g}; {arm.overrides}")
+        _say(
+            f"abl-{arm.name}: {arm.change}; steps {steps:,}; {own:,.0f} samples/s; "
+            f"peak_lr {peak:g}; {arm.overrides}"
+        )
 
 
 def cmd_sweep_ablations(args: argparse.Namespace) -> int:
@@ -339,14 +343,16 @@ def cmd_sweep_ablations(args: argparse.Namespace) -> int:
     try:
         plan = sweep.load_plan(_repo_config(args.plan, "ablations/plan.toml"))
         rate = _plan_rate(args, plan.size, compile_mode(read_tables(plan.recipe)))
+        arm_rates = sweep.own_bench_rates(plan, lambda size, mode: _plan_rate(args, size, mode))
         if args.dry_run:
-            _print_arm_plan(plan, rate)
+            _print_arm_plan(plan, rate, arm_rates)
             return 0
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep ablations: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     out = _home_eval("ablations.json", args.out)
-    report = sweep.run_ablations(plan, out, rate, sweep.supervised_runner(_say), log=_say, slip=args.slip)
+    runner = sweep.supervised_runner(_say)
+    report = sweep.run_ablations(plan, out, rate, runner, log=_say, slip=args.slip, arm_rates=arm_rates)
     noise = report.get("noise") or {}
     sigma = noise.get("vaa", {}).get("sigma")
     _say(f"sigma VAA {sigma}, sigma ok {noise.get('sigma_ok')}; recipe {report['recipe']}")
@@ -418,9 +424,7 @@ def _register_sweep(sub: argparse._SubParsersAction) -> None:
     actions = sweep.add_subparsers(dest="sweep_command", required=True)
     abl = actions.add_parser("ablations", help="run the ablation arms in order (resumable)")
     abl.add_argument("--plan", help="default: configs/ablations/plan.toml")
-    abl.add_argument(
-        "--rate", type=float, help="samples/s instead of bench.json's best row for the plan's size"
-    )
+    abl.add_argument("--rate", type=float, help="samples/s for every arm instead of bench.json's best rows")
     abl.add_argument(
         "--slip", action="store_true", help="apply the P5 slip rule: drop the plan's slip_cut arms"
     )
