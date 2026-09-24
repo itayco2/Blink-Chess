@@ -10,6 +10,7 @@ from pathlib import Path
 from blink import paths
 from blink.eval import books, fastchess, match
 from blink.play import agents, factory, rules
+from blink.reference import registry
 
 
 def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> agents.Agent:
@@ -18,6 +19,8 @@ def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> 
         return agents.RandomAgent(seed=seed)
     if side == "material":
         return agents.MaterialAgent(seed=seed)
+    if registry.is_dm(side):
+        return registry.load_agent(side, device=device)
     evaluator = factory.load_evaluator(side, device=device, seed=seed)
     return replace(
         factory.make_agent(mode, evaluator, epsilon=epsilon), name=fastchess.engine_name(side, mode)
@@ -57,7 +60,7 @@ def _gauntlet_ok(report: dict) -> bool:
 def _cmd_gauntlet(args: argparse.Namespace) -> int:
     out_dir = args.out or paths.home() / "games" / "gauntlet"
     if not args.dry_run:
-        factory.check_available(args.model)
+        (registry.check_available if registry.is_dm(args.model) else factory.check_available)(args.model)
     ok = True
     for anchor in args.anchor or [1320]:
         gauntlet = fastchess.prepare_gauntlet(
