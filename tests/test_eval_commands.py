@@ -97,7 +97,7 @@ def test_a_block_that_needs_the_mode_says_so_in_one_line(tmp_path, capsys, monke
         "--out",
         str(tmp_path / "o"),
     ]
-    assert cli.main([*args, "--device", "cpu"]) == 2
+    assert cli.main([*args, "--device", "cpu", "--allow-busy-cpu"]) == 2
     assert "shipped mode is unknown" in capsys.readouterr().err
 
 

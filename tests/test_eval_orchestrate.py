@@ -13,6 +13,10 @@ from blink.report import results_schema
 PLAN_TOTAL = 28_600
 
 
+def IDLE():  # noqa: N802 - a constant-like fake of the CPU probe
+    return 0.0
+
+
 def ctx(tmp_path, **kwargs):
     protocol = tmp_path / "EVAL.md"
     if not protocol.exists():
@@ -39,16 +43,18 @@ def recorder(calls, extra=None):
 
 def test_the_blocks_run_in_the_plans_order_and_each_can_run_alone(tmp_path):
     calls = []
-    orchestrate.run_blocks(ctx(tmp_path), recorder(calls), runs_root=tmp_path / "runs", log=lambda s: None)
+    orchestrate.run_blocks(
+        ctx(tmp_path), recorder(calls), runs_root=tmp_path / "runs", log=lambda s: None, load=IDLE
+    )
     assert calls == list(orchestrate.BLOCK_ORDER)
     calls.clear()
     orchestrate.run_blocks(
-        ctx(tmp_path), recorder(calls), only=["E8", "E3"], runs_root=tmp_path, log=lambda s: None
+        ctx(tmp_path), recorder(calls), only=["E8", "E3"], runs_root=tmp_path, log=lambda s: None, load=IDLE
     )
     assert calls == ["E3", "E8"]
     assert json.loads((tmp_path / "out" / "E8.json").read_text(encoding="utf-8"))["games"] == 2
     with pytest.raises(ValueError, match="E10"):
-        orchestrate.run_blocks(ctx(tmp_path), recorder([]), only=["E10"], runs_root=tmp_path)
+        orchestrate.run_blocks(ctx(tmp_path), recorder([]), only=["E10"], runs_root=tmp_path, load=IDLE)
 
 
 def test_the_game_table_lists_every_block_with_the_plans_counts():
@@ -89,16 +95,18 @@ def test_time_based_blocks_refuse_to_start_while_a_training_heartbeat_is_live(tm
     calls = []
     with pytest.raises(orchestrate.TrainingLive, match="E0"):
         orchestrate.run_blocks(
-            ctx(tmp_path), recorder(calls), runs_root=tmp_path / "runs", log=lambda s: None
+            ctx(tmp_path), recorder(calls), runs_root=tmp_path / "runs", log=lambda s: None, load=IDLE
         )
     assert calls == []
-    orchestrate.run_blocks(ctx(tmp_path), recorder(calls), only=["E2", "E3"], runs_root=tmp_path / "runs")
+    orchestrate.run_blocks(
+        ctx(tmp_path), recorder(calls), only=["E2", "E3"], runs_root=tmp_path / "runs", load=IDLE
+    )
     assert calls == ["E2", "E3"]
 
 
 def test_a_finished_run_does_not_block_time_based_blocks(tmp_path):
     live_run(tmp_path / "runs", state="finished")
-    orchestrate.guard_time_based("E5", tmp_path / "runs")
+    assert orchestrate.guard_time_based("E5", tmp_path / "runs", load=IDLE) == 0.0
 
 
 PGN = """[White "Blink-value-ship"]
@@ -144,7 +152,9 @@ def test_each_block_report_carries_its_forfeit_table(tmp_path):
     pgn = tmp_path / "g.pgn"
     pgn.write_text(PGN, encoding="utf-8")
     extra = {"E5": {"pgns": [str(pgn)]}}
-    state = orchestrate.run_blocks(ctx(tmp_path), recorder([], extra), only=["E5"], runs_root=tmp_path)
+    state = orchestrate.run_blocks(
+        ctx(tmp_path), recorder([], extra), only=["E5"], runs_root=tmp_path, load=IDLE
+    )
     assert state["E5"]["forfeits"]["Blink-value-ship"]["time_forfeits"] == 1
 
 
@@ -179,7 +189,12 @@ def run_all(tmp_path):
         "E8": {"rules_on": {"pct": 91.0}},
     }
     return orchestrate.run_all(
-        ctx(tmp_path), runners=recorder([], extra), runs_root=tmp_path, log=lambda s: None, ordo=fake_fit
+        ctx(tmp_path),
+        runners=recorder([], extra),
+        runs_root=tmp_path,
+        log=lambda s: None,
+        ordo=fake_fit,
+        load=IDLE,
     )
 
 
@@ -234,3 +249,21 @@ def test_pack_files_are_found_in_both_layouts(tmp_path):
 def test_every_block_has_a_runner():
     assert set(orchestrate.default_runners()) == set(orchestrate.BLOCK_ORDER)
     assert Path(orchestrate.__file__).name == "orchestrate.py"
+
+
+def test_time_based_blocks_refuse_to_start_on_a_busy_cpu_unless_allowed(tmp_path):
+    calls = []
+    with pytest.raises(orchestrate.MachineBusy, match="E5"):
+        orchestrate.run_blocks(
+            ctx(tmp_path), recorder(calls), only=["E5"], runs_root=tmp_path, load=lambda: 80.0
+        )
+    assert calls == []
+    allowed = ctx(tmp_path, allow_busy_cpu=True)
+    state = orchestrate.run_blocks(
+        allowed, recorder(calls), only=["E5"], runs_root=tmp_path, load=lambda: 80.0
+    )
+    assert calls == ["E5"] and state["E5"]["cpu_pct_at_start"] == 80.0
+    state = orchestrate.run_blocks(
+        ctx(tmp_path), recorder(calls), only=["E3"], runs_root=tmp_path, load=lambda: 99.0
+    )
+    assert state["E3"]["cpu_pct_at_start"] is None  # E3 has no clock: no probe, no refusal

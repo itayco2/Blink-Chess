@@ -33,6 +33,9 @@ FROZEN_TAG = "eval-v1-frozen"
 SELFCHECK_ANCHOR = 1800
 SELFCHECK_TC = "120+1"
 SELFCHECK_BAND = 0.07
+# A loaded machine bends st=0.1: in a CPU-busy smoke, SF19 forfeited 4 of 24 E5 games on time.
+BUSY_CPU_PCT = 25.0
+CPU_SAMPLE_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,10 @@ class TrainingLive(RuntimeError):
     """A time-based block was asked for while a training run's heartbeat is live."""
 
 
+class MachineBusy(RuntimeError):
+    """A time-based block was asked for while other work kept the CPU busy (clocks would bend)."""
+
+
 @dataclass(frozen=True)
 class EvalContext:
     model: str
@@ -87,6 +94,7 @@ class EvalContext:
     data_dir: Path | None = None  # the pack with val/test roots, valprobe.npz and mateset.npz
     selfcheck_tc: str = SELFCHECK_TC  # E0: the slow side of SF's st=0.1 self-check
     sf_procs: int = 1  # Stockfish processes for SF19 labels (E2 regret, E9)
+    allow_busy_cpu: bool = False  # smoke runs only: start time-based blocks on a busy machine
 
     def n(self, default: int) -> int:
         """A match length: the override when set (rounded up to whole pairs), else the plan's number."""
@@ -152,12 +160,34 @@ def live_training_runs(runs_root: Path | None = None) -> list[str]:
     return [run.name for run in list_runs(runs_root or paths.home() / "runs") if run.live]
 
 
-def guard_time_based(block_id: str, runs_root: Path | None = None) -> None:
+def cpu_load(seconds: float = CPU_SAMPLE_S) -> float:
+    """The machine's CPU use in percent over the next few seconds."""
+    import psutil
+
+    return float(psutil.cpu_percent(interval=seconds))
+
+
+def guard_time_based(
+    block_id: str,
+    runs_root: Path | None = None,
+    allow_busy: bool = False,
+    load: Callable[[], float] = cpu_load,
+) -> float | None:
+    """Refuse a time-based block while training is live, or while the CPU is busy (unless allowed).
+
+    Returns the CPU use measured at the start, for the block's report (None for a block with no clock)."""
     if not BLOCKS[block_id].time_based:
-        return
+        return None
     live = live_training_runs(runs_root)
     if live:
         raise TrainingLive(f"{block_id} is time-based and training is live ({', '.join(live)}): not started")
+    busy = load()
+    if busy > BUSY_CPU_PCT and not allow_busy:
+        raise MachineBusy(
+            f"{block_id} is time-based and the CPU is {busy:.0f}% busy "
+            f"(limit {BUSY_CPU_PCT:.0f}%): not started"
+        )
+    return busy
 
 
 # ------------------------------------------------------------------------------ forfeits and adjudications
@@ -210,6 +240,7 @@ def run_blocks(
     only: Sequence[str] | None = None,
     runs_root: Path | None = None,
     log: Callable[[str], None] = print,
+    load: Callable[[], float] = cpu_load,
 ) -> dict:
     """Run the chosen blocks in the plan's order; returns every block's report and its forfeit table."""
     ids = [b for b in BLOCK_ORDER if only is None or b in only]
@@ -220,10 +251,11 @@ def run_blocks(
     log(game_table(ids, ctx.games))
     state: dict = {"protocol": protocol, "started": _now()}
     for block_id in ids:
-        guard_time_based(block_id, runs_root)
+        busy = guard_time_based(block_id, runs_root, ctx.allow_busy_cpu, load)
         log(f"{block_id}: {BLOCKS[block_id].title}")
         report = runners[block_id](ctx, state)
-        report = {**report, "forfeits": forfeit_table(Path(p) for p in report.get("pgns", []))}
+        forfeits = forfeit_table(Path(p) for p in report.get("pgns", []))
+        report = {**report, "forfeits": forfeits, "cpu_pct_at_start": busy}
         state[block_id] = report
         _write_json(ctx.out_dir / f"{block_id}.json", report)
         log(f"{block_id}: {report.get('games', 0):,} games, forfeits {report['forfeits'] or '{}'}")
@@ -510,12 +542,13 @@ def run_all(
     runs_root: Path | None = None,
     log: Callable[[str], None] = print,
     ordo: Callable | None = None,
+    load: Callable[[], float] = cpu_load,
 ) -> dict:
     """The blocks, then Ordo over the final-slice PGNs, then results/results.json (schema v1)."""
     from blink.eval import rating
     from blink.report.results_schema import to_json
 
-    state = run_blocks(ctx, runners or default_runners(), only, runs_root, log)
+    state = run_blocks(ctx, runners or default_runners(), only, runs_root, log, load)
     pgns = [Path(p) for p in final_slice_pgns(state) if Path(p).is_file()]
     fit = (ordo or rating.run_ordo)(pgns, rating.read_anchors(), ctx.out_dir / "ordo") if pgns else None
     results = build_results(state, ctx, fit)

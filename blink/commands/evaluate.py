@@ -275,6 +275,7 @@ def _context(args: argparse.Namespace):
         data_dir=args.data,
         selfcheck_tc=args.selfcheck_tc,
         sf_procs=args.sf_procs,
+        allow_busy_cpu=args.allow_busy_cpu,
     )
 
 
@@ -283,7 +284,13 @@ def _run_guarded(prefix: str, action) -> int:
 
     try:
         action()
-    except (orchestrate.ProtocolMismatch, orchestrate.TrainingLive, FileNotFoundError, ValueError) as exc:
+    except (
+        orchestrate.ProtocolMismatch,
+        orchestrate.TrainingLive,
+        orchestrate.MachineBusy,
+        FileNotFoundError,
+        ValueError,
+    ) as exc:
         return _fail(prefix, exc)
     return 0
 
@@ -366,6 +373,9 @@ def _add_block_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--protocol", type=Path, default=Path("EVAL.md"))
     parser.add_argument("--selfcheck-tc", default="120+1", help="E0: the slow side of SF's self-check")
     parser.add_argument("--sf-procs", type=int, default=1, help="Stockfish processes for SF19 labels")
+    parser.add_argument(
+        "--allow-busy-cpu", action="store_true", help="smoke runs only: time-based blocks on a busy machine"
+    )
 
 
 def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubParsersAction) -> None:
