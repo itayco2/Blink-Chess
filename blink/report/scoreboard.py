@@ -1,0 +1,381 @@
+"""The README scoreboard, generated from results/*.json and nothing else (plan section 6).
+
+`blink report scoreboard --write` puts the generated block between the README markers
+<!-- scoreboard:start --> and <!-- scoreboard:end -->; `--check` fails when the README differs from
+it by a single byte. The block holds, in order: the headline table (each number with its reproduce
+command and what it does NOT prove), the no-search box, Table 1 (strength), Table 2 (ML diagnostics)
+and the DeepMind puzzles by rating band. Every Elo cell carries its 95% interval and game count, Elo
+below the lowest anchor (1320) is labelled extrapolated, paper numbers sit only in the paper-reported
+column, and the text is ASCII (+/- rather than a plus-minus sign).
+"""
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from blink.report import compute as compute_mod
+from blink.report import results_schema as rs
+
+START = "<!-- scoreboard:start -->"
+END = "<!-- scoreboard:end -->"
+ANCHOR_FLOOR = 1320
+DASH = "-"
+TABLE1_HEADING = "### Table 1: strength"
+TABLE2_HEADING = "### Table 2: ML diagnostics"
+BANDS_HEADING = "### DeepMind puzzles by rating band"
+ELO_CAVEAT = "a human or FIDE rating: it is CCRL-Blitz-anchored, with about +/-100 absolute error"
+FRACTION_FIELDS = ("top1", "top3", "top5", "vaa", "near_best", "mate_shortest", "mate_preserving")
+BAND_ORDER = ("<1000", "1000-1500", "1500-2000", "2000-2500", "2500+")
+
+
+class ScoreboardError(ValueError):
+    """The results cannot produce a scoreboard (a missing file, a unit mix-up, bad README markers)."""
+
+
+@dataclass(frozen=True)
+class Bundle:
+    results: rs.Results
+    lichess: rs.LichessSnapshot | None
+    nosearch: dict
+    compute: dict
+
+
+def _read(folder: Path, name: str, hint: str) -> str:
+    path = Path(folder) / name
+    if not path.is_file():
+        raise ScoreboardError(f"{path} is missing ({hint})")
+    return path.read_text(encoding="utf-8")
+
+
+def load_bundle(folder: Path) -> Bundle:
+    """results.json, nosearch.json and compute.json are required; lichess.json appears at G12."""
+    results = rs.from_json(_read(folder, "results.json", "written by the evaluation suite, P8"))
+    nosearch = json.loads(_read(folder, "nosearch.json", "run: uv run blink audit no-search"))
+    _read(folder, "compute.json", "run: uv run blink report compute")
+    compute = compute_mod.read_compute(Path(folder) / "compute.json")
+    lichess_path = Path(folder) / "lichess.json"
+    lichess = (
+        rs.lichess_from_json(lichess_path.read_text(encoding="utf-8")) if lichess_path.is_file() else None
+    )
+    return Bundle(results, lichess, nosearch, compute)
+
+
+def shipped_row(results: rs.Results) -> rs.StrengthRow | None:
+    """The strength row of the shipped model: '<agent> (<mode>)' first, then the bare agent name."""
+    shipped = results.shipped
+    if shipped is None:
+        return None
+    rows = {row.agent: row for row in results.strength}
+    return rows.get(f"{shipped.agent} ({shipped.mode})") or rows.get(shipped.agent)
+
+
+def _is_shipped_diag(results: rs.Results, row: rs.DiagnosticsRow) -> bool:
+    shipped = results.shipped
+    return shipped is not None and (row.agent, row.mode) == (shipped.agent, shipped.mode)
+
+
+# ------------------------------------------------------------------------------------------ formatting
+
+
+def elo_cell(row: rs.StrengthRow | None) -> str:
+    if row is None or row.elo is None:
+        return DASH
+    text = f"{row.elo:.0f} +/- {row.elo_ci95:.0f} ({row.elo_games:,} games)"
+    return f"{text}, extrapolated" if row.elo < ANCHOR_FLOOR else text
+
+
+def pct_ci(pct: float | None, ci: tuple[float, float] | None) -> str:
+    if pct is None:
+        return DASH
+    return f"{pct:.1f}%" + (f" ({ci[0]:.1f} to {ci[1]:.1f})" if ci else "")
+
+
+def millions(n: int | None) -> str:
+    return DASH if n is None else f"{n / 1e6:.2f}M"
+
+
+def _num(value: float | int | None, fmt: str) -> str:
+    return DASH if value is None else format(value, fmt)
+
+
+def _positions(n: int | None) -> str:
+    return DASH if n is None else f"{n / 1e6:.1f}M"
+
+
+def _pct(fraction: float | None) -> str:
+    return DASH if fraction is None else f"{100 * fraction:.1f}%"
+
+
+def lichess_cell(snap: rs.LichessSnapshot | None, with_share: bool = False) -> str:
+    if snap is None:
+        return "rating accruing"
+    if not snap.publishable:
+        return f"rating accruing ({snap.n:,} games, RD {snap.rd})"
+    if with_share:
+        share = f", {_pct(snap.human_share)} vs humans" if snap.human_share is not None else ""
+        return f"{snap.rating}, RD {snap.rd}, {snap.n:,} games{share}, {snap.snapshot_date}"
+    return f"{snap.rating} +/- {2 * snap.rd} (2 RD), {snap.n:,} games, {snap.snapshot_date}"
+
+
+def _cell(text: str) -> str:
+    return text.replace("|", "\\|")
+
+
+def table(header: list[str], rows: list[list[str]]) -> str:
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    lines += ["| " + " | ".join(_cell(c) for c in row) + " |" for row in rows]
+    return "\n".join(lines) + "\n"
+
+
+def _bold(text: str, on: bool) -> str:
+    return f"**{text}**" if on and text != DASH else text
+
+
+# ------------------------------------------------------------------------------------------ sections
+
+
+def _gpu_cell(compute: dict) -> str:
+    flag, total, kwh = compute["flagship_gpu_hours"], compute["total_gpu_hours"], compute["gpu_board_kwh"]
+    energy = DASH if kwh is None else f"{kwh:.1f}"
+    return (
+        f"{_num(flag, '.1f')} flagship / {_num(total, '.1f')} total GPU-h, {energy} GPU-board kWh; "
+        "no cloud GPU and no paid data: one home RTX 3070"
+    )
+
+
+def headline(bundle: Bundle) -> str:
+    row = shipped_row(bundle.results)
+    rows = [
+        ["Elo vs Stockfish 19 UCI_Elo anchors, 95% CI (games)", elo_cell(row),
+         "`uv run blink rate --model ship`", ELO_CAVEAT],
+        ["Lichess BOT blitz (rating, RD, games, share vs humans, date)", lichess_cell(bundle.lichess, True),
+         "`results/lichess.json` (snapshot at G12)",
+         "strength against humans: the pool is mostly bots, it started at 3000, and it is not comparable "
+         "with DeepMind's 2024 numbers"],
+        ["DeepMind 10K puzzles, Wilson 95%", pct_ci(row.dm_puzzles_pct, row.dm_puzzles_ci) if row else DASH,
+         "`uv run blink eval puzzles --model ship`",
+         "playing strength; only exact positions (and colour mirrors) were kept out of training, "
+         "near-duplicates remain"],
+        ["GPU-hours (flagship / whole project), GPU-board kWh", _gpu_cell(bundle.compute),
+         "`results/compute.json`",
+         "zero electricity: kWh counts the GPU board only; whole-PC energy is estimated separately"],
+    ]  # fmt: skip
+    return table(["headline number", "measured", "reproduce", "what it does NOT prove"], rows)
+
+
+def nosearch_box(report: dict) -> str:
+    histogram = {int(k): v for k, v in report.get("histogram", {}).items()}
+    violations = len(report.get("violations", []))
+    one = histogram.get(1, 0)
+    many = sum(v for k, v in histogram.items() if k >= 2)
+    return (
+        f"**No search.** Across {report['decisions']:,} public moves in {report['games']:,} games: at most "
+        f"1 network call and legal+1 positions each ({violations:,} violations; largest batch "
+        f"{report['max_rows']:,} rows). Rows per move: {histogram.get(0, 0):,} with 0 rows (R2 mate now), "
+        f"{one:,} with 1 (one look), {many:,} with 2 or more (one look per move, legal+1). Rebuilt from the "
+        "PGNs alone by `uv run blink audit no-search`.\n"
+    )
+
+
+TABLE1_HEADER = [
+    "agent", "params (non-GAB / total)", "positions seen", "GPU-h", "network evals per move (median / max)",
+    "ms per move p50", "Elo vs SF19 anchors, 95% CI (games)", "about SF19 at N nodes",
+    "DeepMind puzzles, Wilson 95%", "clean subset (n)", "Lichess blitz (R +/- 2RD, N, date)",
+    "paper-reported (scale named)", "reproduce",
+]  # fmt: skip
+
+
+def _strength_line(row: rs.StrengthRow, shipped: bool, lichess: rs.LichessSnapshot | None) -> list[str]:
+    params = millions(row.params_total)
+    if row.params_non_gab is not None:
+        params = f"{millions(row.params_non_gab)} / {params}"
+    evals = DASH
+    if row.evals_per_move_median is not None:
+        evals = f"{row.evals_per_move_median:g} / {_num(row.evals_per_move_max, 'd')}"
+    clean = DASH
+    if row.dm_puzzles_clean_pct is not None:
+        clean = f"{row.dm_puzzles_clean_pct:.1f}% ({_num(row.dm_puzzles_clean_n, ',')})"
+    return [
+        _bold(row.agent, shipped), params, _positions(row.positions_seen), _num(row.gpu_hours, ".1f"), evals,
+        _num(row.ms_per_move_p50, ".1f"),
+        elo_cell(row), _num(row.sf_nodes_equiv, ","), pct_ci(row.dm_puzzles_pct, row.dm_puzzles_ci), clean,
+        lichess_cell(lichess) if shipped else DASH, row.paper_reported or DASH, f"`{row.reproduce}`",
+    ]  # fmt: skip
+
+
+def strength_table(bundle: Bundle) -> str:
+    shipped = shipped_row(bundle.results)
+    rows = [_strength_line(r, r is shipped, bundle.lichess) for r in bundle.results.strength]
+    return f"{TABLE1_HEADING}\n\n" + table(TABLE1_HEADER, rows)
+
+
+def _check_fractions(row: rs.DiagnosticsRow) -> None:
+    for name in FRACTION_FIELDS:
+        value = getattr(row, name)
+        if value is not None and not 0.0 <= value <= 1.0:
+            raise ScoreboardError(f"{row.agent} ({row.mode}): {name}={value} is not a fraction in [0, 1]")
+
+
+def _diag_line(row: rs.DiagnosticsRow, shipped: bool) -> list[str]:
+    _check_fractions(row)
+    tops = DASH
+    if row.top1 is not None:
+        tops = (
+            " / ".join(DASH if v is None else f"{100 * v:.1f}" for v in (row.top1, row.top3, row.top5)) + "%"
+        )
+    ece = (
+        f"{_num(row.ece_before, '.3f')} / {_num(row.ece_after, '.3f')}"
+        if row.ece_before is not None
+        else DASH
+    )
+    mates = (
+        f"{_pct(row.mate_shortest)} / {_pct(row.mate_preserving)}" if row.mate_shortest is not None else DASH
+    )
+    rating = DASH
+    if row.puzzle_rating_equiv is not None:
+        ci = row.puzzle_rating_ci
+        rating = f"{row.puzzle_rating_equiv:.0f}" + (f" ({ci[0]:.0f} to {ci[1]:.0f})" if ci else "")
+    return [
+        _bold(row.agent, shipped), _bold(row.mode, shipped), tops, _pct(row.vaa), _pct(row.near_best),
+        _num(row.kendall_tau_b, ".3f"), _num(row.brier, ".3f"), ece, _num(row.regret_games10k, ".3f"),
+        _num(row.grouped_gap, ".3f"), mates, pct_ci(row.conversion_pct, None), rating,
+    ]  # fmt: skip
+
+
+TABLE2_HEADER = [
+    "agent", "mode", "top-1 / 3 / 5", "VAA (ties count)", "near-best", "Kendall tau-b (scores)", "Brier",
+    "ECE before / after temperature", "win% regret (games10k)", "grouped vs random gap",
+    "mate shortest / preserving", "conversion (proxy)", "puzzle-rating equivalent (CI)",
+]  # fmt: skip
+
+
+def diagnostics_table(bundle: Bundle) -> str:
+    results = bundle.results
+    rows = [_diag_line(r, _is_shipped_diag(results, r)) for r in results.diagnostics]
+    return f"{TABLE2_HEADING}\n\n" + table(TABLE2_HEADER, rows)
+
+
+def band_table(bundle: Bundle) -> str:
+    results = bundle.results
+    with_bands = [r for r in results.diagnostics if r.band_pct]
+    keys = {k for r in with_bands for k in r.band_pct}
+    bands = [b for b in BAND_ORDER if b in keys] + sorted(keys - set(BAND_ORDER))
+    rows = [
+        [_bold(r.agent, _is_shipped_diag(results, r)), _bold(r.mode, _is_shipped_diag(results, r))]
+        + [pct_ci(r.band_pct.get(b), None) for b in bands]
+        for r in with_bands
+    ]
+    return f"{BANDS_HEADING}\n\n" + table(["agent", "mode", *bands], rows)
+
+
+def notes(results: rs.Results) -> str:
+    return (
+        "- Elo always names its pool: Stockfish 19 UCI_Elo anchors fitted by Ordo with fixed anchors "
+        "(CCRL-Blitz-anchored, about +/-100 absolute error), not FIDE. Below 1320, the lowest anchor, a "
+        "rating is extrapolated.\n"
+        "- Paper numbers sit only in the paper-reported column. DeepMind's paper describes a Stockfish "
+        "fallback its released code does not include; Blink's harness has none, and DM-9M is re-measured "
+        "without it.\n"
+        "- Time controls are asymmetric by design: Blink and DM-9M `st=1`, Stockfish `st=0.1`.\n"
+        "- Kendall tau-b is computed on scores and is not comparable with DeepMind's. Validation metrics "
+        "are optimistic; the grouped split shows by how much. The puzzle-rating equivalent is a logistic "
+        "fit on puzzle ratings, never an Elo.\n"
+        "- Generated by `uv run blink report scoreboard --write` from results/*.json "
+        f"({results.generated_at}, EVAL.md sha {results.eval_md_sha[:12]}).\n"
+    )
+
+
+def render_block(bundle: Bundle) -> str:
+    parts = [
+        headline(bundle),
+        nosearch_box(bundle.nosearch),
+        strength_table(bundle),
+        diagnostics_table(bundle),
+        band_table(bundle),
+        notes(bundle.results),
+    ]
+    return "\n".join(parts)
+
+
+# ------------------------------------------------------------------------------------------ README
+
+
+def _span(text: str) -> tuple[int, int]:
+    """Start and end offsets of the block between the markers; ScoreboardError unless each appears once."""
+    if text.count(START) != 1 or text.count(END) != 1:
+        raise ScoreboardError(f"the README needs exactly one {START} and one {END} marker")
+    begin = text.index(START) + len(START) + 1
+    end = text.index(END)
+    if end < begin - 1:
+        raise ScoreboardError("the scoreboard end marker comes before the start marker")
+    return begin, end
+
+
+def write_readme(path: Path, block: str) -> None:
+    text = Path(path).read_text(encoding="utf-8")
+    begin, end = _span(text)
+    Path(path).write_text(text[:begin] + block + text[end:], encoding="utf-8", newline="\n")
+
+
+def check_readme(path: Path, block: str) -> list[str]:
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        begin, end = _span(text)
+    except ScoreboardError as exc:
+        return [str(exc)]
+    if text[begin:end] != block:
+        return [
+            f"{path}: the scoreboard block differs from results/*.json (run: blink report scoreboard --write)"
+        ]
+    return []
+
+
+# ------------------------------------------------------------------------------------------ numbers in prose
+
+_CODE = re.compile(r"```.*?```|`[^`\n]*`|<!--.*?-->|\]\([^)]*\)|https?://\S+", re.DOTALL)
+_NUMBER = re.compile(r"(?<![\w.,/:#-])(\d[\d,]*(?:\.\d+)?)(%|[MBK]\b)?")
+_SCALE = {"M": 1e6, "B": 1e9, "K": 1e3}
+SMALL_COUNT = 12  # integers up to this are counts and section numbers, not measurements
+
+
+def numbers_in(text: str) -> list[str]:
+    """Number tokens a reader sees in prose (code, links and comments removed), small counts left out."""
+    found = []
+    for match in _NUMBER.finditer(_CODE.sub(" ", text)):
+        digits = match.group(1).rstrip(",")
+        if "," not in digits and "." not in digits and int(digits) <= SMALL_COUNT and not match.group(2):
+            continue
+        found.append(digits + (match.group(2) or ""))
+    return found
+
+
+def _numeric_leaves(value) -> list[float]:
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, int | float):
+        return [float(value)]
+    if isinstance(value, dict):
+        return [x for v in value.values() for x in _numeric_leaves(v)]
+    if isinstance(value, list | tuple):
+        return [x for v in value for x in _numeric_leaves(v)]
+    return []
+
+
+def measured_values(folder: Path) -> list[float]:
+    """Every number stored in results/*.json (strings, such as paper-reported text, are not measurements)."""
+    values = []
+    for path in sorted(Path(folder).glob("*.json")):
+        values += _numeric_leaves(json.loads(path.read_text(encoding="utf-8")))
+    return values
+
+
+def is_measured(token: str, values: list[float]) -> bool:
+    """True when `token`, as written (rounding, % of a fraction, an M/B/K suffix), states a measured value."""
+    suffix = token[-1] if token[-1] in "%MBK" else ""
+    digits = token[: len(token) - len(suffix)].replace(",", "")
+    written = float(digits)
+    decimals = len(digits.split(".")[1]) if "." in digits else 0
+    tolerance = 0.5 * 10**-decimals + 1e-9
+    scales = [1 / _SCALE[suffix]] if suffix in _SCALE else [1.0, 100.0]
+    return any(abs(round(v * s, decimals) - written) <= tolerance for v in values for s in scales)
