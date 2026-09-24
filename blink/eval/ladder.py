@@ -149,7 +149,7 @@ def e4_block(ctx, state: dict) -> dict:
     from blink.eval.orchestrate import shipped_mode
 
     mode = shipped_mode(ctx, state)
-    agent = match.blink_agents(ctx.model, ctx.device)[mode]
+    agent = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)[mode]
     play = _nodes_player(agent, ctx.out_dir / "E4", "final")
     result = run_node_ladder(play, ctx.n(RUNG_GAMES), ctx.n(BRACKET_GAMES))
     return {**result, "mode": mode, "pgns": [p for r in result["rungs"] for p in r.get("pgns", [r["pgn"]])]}
@@ -166,6 +166,7 @@ def crossover_nodes(state: dict) -> tuple[int, str | None]:
 
 
 def e4b_block(ctx, state: dict) -> dict:
+    from blink.eval import match
     from blink.eval.orchestrate import shipped_mode
     from blink.play import factory
 
@@ -175,7 +176,8 @@ def e4b_block(ctx, state: dict) -> dict:
     checkpoints = pick_checkpoints(film_frames(film_run_dir(ctx.film_run)))
 
     def play(selector: str, at: int, games: int) -> Report:
-        agent = factory.make_agent(mode, factory.load_evaluator(selector, device=ctx.device))
+        evaluator = factory.load_evaluator(selector, device=ctx.device)
+        agent = factory.make_agent(mode, evaluator, epsilon=match.read_epsilon(ctx.results_dir))
         agent = replace(agent, name=f"Blink-{mode}-{Path(selector).stem}")
         return _nodes_player(agent, ctx.out_dir / "E4b", "dev")(at, games, 0)
 
@@ -195,7 +197,7 @@ def _ladder_agent(name: str, ctx, state: dict):
         return baseline_agent(name, device=ctx.device)  # the P3 rungs, one agent wrapper and its rules
     if name.startswith("SF"):
         return match.stockfish_agent(fastchess.stockfish_exe(), elo=int(name[2:]))
-    return match.blink_agents(name, ctx.device)[shipped_mode(ctx, state)]
+    return match.blink_agents(name, ctx.device, results_dir=ctx.results_dir)[shipped_mode(ctx, state)]
 
 
 def e6_block(ctx, state: dict) -> dict:

@@ -279,7 +279,7 @@ def e8_block(ctx, state: dict) -> dict:
 
     final = _endgame_set(ctx, "final", endgames.WANT - endgames.DEV_COUNT)
     mode = shipped_mode(ctx, state)
-    rules_on = match.blink_agents(ctx.model, ctx.device)[mode]
+    rules_on = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)[mode]
     rules_off = RulesOffAgent(rules_on.evaluator, mode, name=f"{rules_on.name}-rules-off")
     out = {}
     for label, agent in (("rules_on", rules_on), ("rules_off", rules_off)):

@@ -366,13 +366,15 @@ def read_epsilon(results_dir: Path = Path("results")) -> float:
     return float(json.loads(path.read_text(encoding="utf-8"))["epsilon"])
 
 
-def blink_agents(selector: str, device: str, epsilon: float | None = None) -> dict[str, Agent]:
+def blink_agents(
+    selector: str, device: str, epsilon: float | None = None, results_dir: Path = Path("results")
+) -> dict[str, Agent]:
     """Both modes of one model on one evaluator (one load, one CUDA context), named as fastchess does."""
     from blink.eval.fastchess import engine_name
     from blink.play import factory
 
     evaluator = factory.load_evaluator(selector, device=device)
-    eps = read_epsilon() if epsilon is None else epsilon
+    eps = read_epsilon(results_dir) if epsilon is None else epsilon
     return {
         mode: replace(factory.make_agent(mode, evaluator, epsilon=eps), name=engine_name(selector, mode))
         for mode in factory.MODES

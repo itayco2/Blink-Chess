@@ -386,7 +386,7 @@ def e2_block(ctx: EvalContext, state: dict) -> dict:
     from blink.eval import fastchess, match, static
     from blink.eval.sflabel import SfLabeler
 
-    agents = match.blink_agents(ctx.model, ctx.device)
+    agents = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)
     label = fastchess.NAME_UNSAFE.sub("_", ctx.model).strip("_")
     inputs, limits = static_inputs(ctx, label), static_limits(ctx)
     with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:
@@ -436,7 +436,7 @@ def e3_block(ctx: EvalContext, state: dict) -> dict:
     """The pre-registered mode SPRT, in process with one model load, on the dev slice."""
     from blink.eval import books, match, sprt
 
-    agents = match.blink_agents(ctx.model, ctx.device)
+    agents = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)
     config = sprt.SprtConfig(cap_games=ctx.n(sprt.MODE_SPRT.cap_games))
     pairs = config.cap_games // 2
     openings = books.openings_for("dev", 2 * pairs)

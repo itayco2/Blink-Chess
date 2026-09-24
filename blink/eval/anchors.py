@@ -177,7 +177,7 @@ def e7_block(ctx, state: dict) -> dict:
     from blink.reference import registry
 
     dm = "dm:9M"
-    blink = match.blink_agents(ctx.model, ctx.device)[shipped_mode(ctx, state)]
+    blink = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)[shipped_mode(ctx, state)]
     deepmind = registry.load_agent(dm, device=ctx.device)
 
     def play_blink(games: int) -> Report:

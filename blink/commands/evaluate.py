@@ -333,7 +333,7 @@ def _cmd_static(args: argparse.Namespace) -> int:
     limits = static.StaticLimits(
         args.roots, args.value_roots, args.val_roots, args.games10k, args.mateset, args.band_puzzles
     )
-    agents = match.blink_agents(args.model, args.device)
+    agents = match.blink_agents(args.model, args.device, results_dir=args.results)
     inputs = orchestrate.static_inputs(ctx, label)
     started = time.perf_counter()
     with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=args.sf_procs) as labeler:
