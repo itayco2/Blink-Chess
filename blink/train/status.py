@@ -115,7 +115,9 @@ def _format_eval(e: dict[str, Any]) -> str:
     text = f"  eval @ {e.get('step')}: top-1 {e.get('top1')}, value CE {e.get('value_ce')}"
     text += f", win% MAE {e.get('win_mae')}"
     if "vaa" in e:
-        text += f", VAA {e.get('vaa')} (ema {e.get('ema_vaa')})"
+        text += f", VAA {e.get('vaa')} (ema {e.get('ema_vaa')}, {e.get('vaa_set', 'full')})"
+    elif "ema_vaa" in e:
+        text += f", VAA ema {e.get('ema_vaa')} ({e.get('vaa_set', 'subset')} of {e.get('vaa_n')})"
     if "check" in e:
         text += f", check {e['check']} {'FAILED' if 'vaa_check_failed' in e else 'passed'}"
     return text

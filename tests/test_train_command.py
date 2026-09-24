@@ -194,7 +194,7 @@ def test_a_v1_pack_mixes_root_and_child_shards_with_the_manifest_weights(
     assert {c["dtype"] for c in fake_loader.calls} == {ROOT_DTYPE, CHILD_DTYPE}
     assert (ROOT_DTYPE, 48) in calls and (CHILD_DTYPE, 48) in calls
     evals = _jsonl(home / "runs" / "v1" / "evals.jsonl")
-    assert all("vaa" in row for row in evals) and evals[-1]["vaa_n"] == 12
+    assert all("ema_vaa" in row for row in evals) and "vaa" in evals[-1] and evals[-1]["vaa_n"] == 12
 
 
 def test_a_config_with_children_is_refused_on_a_pack_without_child_shards(

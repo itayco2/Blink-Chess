@@ -118,18 +118,22 @@ def test_lr_scale_sets_the_scale_so_a_restart_that_repeats_it_never_compounds(tm
     assert lrs[70] == pytest.approx(1e-3)
 
 
-def test_vaa_is_in_every_eval_row_and_the_checks_score_the_full_probe(tmp_path):
+def test_subset_evals_score_the_ema_and_the_checks_score_raw_and_ema_on_the_full_probe(tmp_path):
+    """The 2k-step evals score one model on the subset (<= 1% overhead); every rule reads the EMA."""
     probe = vaa.probe_from_roots(fixture_records()[:40])
-    cfg = tiny_train_config(steps=40, eval_every=20, vaa_subset=10, keep_last=1, batch_size=16)
+    cfg = tiny_train_config(steps=40, eval_every=15, vaa_subset=10, keep_last=1, batch_size=16)
     run_dir = tmp_path / "run"
     loop.train(cfg, _spec(run_dir), _repeat(fixture_records()[:16]), **_quiet(probe=probe))
     rows = {row["step"]: row for row in _rows(run_dir / "evals.jsonl")}
-    assert sorted(rows) == [0, 2, 10, 12, 20, 40]
-    assert rows[0]["vaa_set"] == "subset" and rows[0]["vaa_n"] == 10
+    assert sorted(rows) == [0, 2, 10, 12, 15, 20, 30, 40]
     checks = {step: row["check"] for step, row in rows.items() if "check" in row}
     assert checks == {2: "5%", 10: "25%", 12: "30%", 20: "50%", 40: "100%"}
-    assert all(rows[s]["vaa_n"] == 40 and rows[s]["vaa_set"] == "full" for s in checks)
-    assert all(0.0 <= row["vaa"] <= 1.0 and "ema_vaa" in row for row in rows.values())
+    for step in (0, 15, 30):
+        assert (rows[step]["vaa_set"], rows[step]["vaa_n"]) == ("subset", 10) and "vaa" not in rows[step]
+        assert 0.0 <= rows[step]["ema_vaa"] <= 1.0
+    for step in checks:
+        assert (rows[step]["vaa_set"], rows[step]["vaa_n"], rows[step]["vaa_subset_n"]) == ("full", 40, 10)
+        assert all(0.0 <= rows[step][key] <= 1.0 for key in ("vaa", "ema_vaa", "ema_vaa_subset"))
     assert [step_of(p) for p in list_checkpoints(run_dir)] == [2, 10, 12, 20, 40]
 
 
@@ -157,7 +161,7 @@ def test_the_5_percent_check_writes_vaa_check_failed_when_the_run_falls_behind(
     row = next(r for r in _rows(tmp_path / "long" / "evals.jsonl") if r.get("check") == "5%")
     assert ("vaa_check_failed" in row) == fails
     if fails:
-        assert row["vaa_check_failed"]["reference"] == "s6h"
+        assert row["vaa_check_failed"] is True and row["check_failure"]["reference"] == "s6h"
 
 
 def test_film_frames_are_saved_at_the_planned_steps_in_one_world(tmp_path):

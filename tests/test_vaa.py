@@ -174,7 +174,7 @@ def test_the_5_percent_check_fails_below_the_reference_minus_2_sigma():
     assert ok["check"] == "5%" and "vaa_check_failed" not in ok
     assert ok["check_threshold"] == pytest.approx(0.38)
     bad = vaa.apply_check("5%", 0.37, [], ref, samples=2_100_000, sigma=0.01)
-    assert bad["vaa_check_failed"]["check"] == "5%"
+    assert bad["vaa_check_failed"] is True and bad["check_failure"]["check"] == "5%"
     skipped = vaa.apply_check("5%", 0.37, [], None, samples=2_100_000, sigma=0.01)
     assert "vaa_check_failed" not in skipped and "no reference" in skipped["check_skipped"]
 
@@ -183,7 +183,7 @@ def test_the_25_and_50_percent_checks_compare_with_the_previous_check():
     history = [{"step": 500, "check": "5%", "ema_vaa": 0.40}, {"step": 3000, "check": "30%", "ema_vaa": 0.50}]
     assert "vaa_check_failed" not in vaa.apply_check("25%", 0.381, history[:1], None, 0, sigma=0.01)
     failed = vaa.apply_check("25%", 0.379, history[:1], None, 0, sigma=0.01)
-    assert failed["vaa_check_failed"]["previous_check"] == "5%"
+    assert failed["check_failure"]["previous_check"] == "5%"
     assert "vaa_check_failed" in vaa.apply_check("50%", 0.47, history, None, 0, sigma=0.01)
     assert "vaa_check_failed" not in vaa.apply_check("50%", 0.49, history, None, 0, sigma=0.01)
     assert "vaa_check_failed" not in vaa.apply_check("30%", 0.01, history, None, 0, sigma=0.01)
@@ -193,3 +193,38 @@ def test_the_preview_must_beat_the_reference_final_vaa():
     ref = _reference()
     assert "vaa_check_failed" in vaa.apply_check("preview", 0.55, [], ref, 0, sigma=0.01)
     assert "vaa_check_failed" not in vaa.apply_check("preview", 0.56, [], ref, 0, sigma=0.01)
+
+
+def test_a_failed_check_marks_its_row_with_vaa_check_failed_true():
+    """The supervisor pauses on a row whose vaa_check_failed is True (P3 reads exactly that)."""
+    history = [{"step": 500, "check": "5%", "ema_vaa": 0.40}]
+    row = vaa.apply_check("25%", 0.30, history, None, 0, sigma=0.01)
+    assert row["vaa_check_failed"] is True
+    assert row["check_failure"] == {
+        "check": "25%",
+        "ema_vaa": 0.30,
+        "threshold": pytest.approx(0.38),
+        "rule": row["check_rule"],
+        "previous_check": "5%",
+    }
+
+
+def test_a_full_pass_also_scores_its_first_roots_as_the_subset():
+    probe = _probe([[(12, False, 0), (2, True, 0)], [(3, False, 0), (9, True, 0)], [(5, True, 0)]])
+    full = vaa.evaluate_vaa(CodeValueNet(), probe, torch.device("cpu"), subset=2)
+    alone = _score(probe.subset(2))
+    assert (full["vaa_subset"], full["n_subset"]) == (alone["vaa"], alone["n"]) == (0.5, 2)
+    assert (full["vaa"], full["n"]) == (pytest.approx(2 / 3), 3)
+
+
+def test_the_5_percent_check_compares_subset_with_subset_when_the_reference_row_is_a_subset_row():
+    rows = (
+        {"step": 1000, "samples": 1_024_000, "ema_vaa": 0.40, "vaa_set": "subset", "vaa_n": 2000},
+        {"step": 4000, "samples": 4_096_000, "ema_vaa": 0.50, "vaa_set": "full", "vaa_n": 20000},
+    )
+    ref = vaa.Reference(name="m6h", rows=rows, cooldown_start=3500)
+    same_roots = vaa.apply_check("5%", 0.45, [], ref, 2_000_000, sigma=0.01, subset=(2000, 0.37))
+    assert same_roots["vaa_check_failed"] is True and same_roots["check_failure"]["ema_vaa"] == 0.37
+    assert "subset" in same_roots["check_rule"]
+    other_size = vaa.apply_check("5%", 0.45, [], ref, 2_000_000, sigma=0.01, subset=(1000, 0.37))
+    assert "vaa_check_failed" not in other_size and "full" in other_size["check_rule"]

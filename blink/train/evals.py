@@ -1,10 +1,14 @@
 """One evals.jsonl row: validation metrics, VAA on the valprobe, and the P7 check at check steps.
 
 Every `eval_every` steps the row holds the fixed validation sample's policy and value metrics (raw
-and EMA) and VAA on the fixed first-`vaa_subset`-roots of the valprobe. At a check step (5, 25, 30,
-50 and 100% of the planned steps) VAA runs on the full valprobe, and with `vaa_checks` the check's
-rule is applied; a failed rule writes a `vaa_check_failed` record into the row, which the supervisor
-reads. `eval_s` records the row's cost so the overhead can be measured.
+and EMA) and the EMA's VAA on the fixed first `vaa_subset` roots of the valprobe (ema_vaa, vaa_set
+"subset"). Only the EMA is scored there: every rule reads the EMA, and one model's forward passes over
+2,000 roots' children are about 1% of 2,000 training steps where two were about 2%. At a check step
+(5, 25, 30, 50 and 100% of the planned steps) VAA runs on the full valprobe for the raw weights (vaa)
+and the EMA (ema_vaa), and the same passes give the EMA's subset VAA (ema_vaa_subset), so the 5% rule
+can meet a reference's subset row on the same roots. With `vaa_checks` the check's rule is applied; a
+failed rule sets `vaa_check_failed` True in the row, which the supervisor reads. `eval_s` records the
+row's cost so the overhead can be measured.
 """
 
 import time
@@ -26,23 +30,35 @@ def _val_metrics(run) -> dict[str, Any]:
 def _vaa_metrics(run, label: str | None) -> dict[str, Any]:
     if run.probe is None:
         return {}
-    probe = run.probe if label else run.probe.subset(run.cfg.vaa_subset)
     chunk = min(vaa.VAA_CHUNK, EVAL_ROWS_PER_TRAIN_ROW * run.micro)  # no-grad rows cost far less VRAM
-    raw = vaa.evaluate_vaa(run.model, probe, run.device, chunk)
-    ema = vaa.evaluate_vaa(run.ema.module, probe, run.device, chunk)
+    subset = run.cfg.vaa_subset
+    if label is None:
+        ema = vaa.evaluate_vaa(run.ema.module, run.probe.subset(subset), run.device, chunk)
+        return {"ema_vaa": ema["vaa"], "vaa_n": ema["n"], "vaa_set": "subset"}
+    raw = vaa.evaluate_vaa(run.model, run.probe, run.device, chunk)
+    ema = vaa.evaluate_vaa(run.ema.module, run.probe, run.device, chunk, subset=subset)
     return {
         "vaa": raw["vaa"],
         "ema_vaa": ema["vaa"],
         "vaa_n": raw["n"],
-        "vaa_set": "full" if label else "subset",
+        "vaa_set": "full",
+        "ema_vaa_subset": ema["vaa_subset"],
+        "vaa_subset_n": ema["n_subset"],
     }
 
 
 def _check(run, label: str, record: dict[str, Any]) -> dict[str, Any]:
     if not run.cfg.vaa_checks:
         return {"check": label}
+    subset = (record["vaa_subset_n"], record["ema_vaa_subset"]) if "ema_vaa_subset" in record else None
     return vaa.apply_check(
-        label, record["ema_vaa"], run.check_history, run.reference, record["samples"], run.cfg.vaa_sigma
+        label,
+        record["ema_vaa"],
+        run.check_history,
+        run.reference,
+        record["samples"],
+        run.cfg.vaa_sigma,
+        subset=subset,
     )
 
 
@@ -56,8 +72,10 @@ def _describe(record: dict[str, Any]) -> str:
         )
     if "vaa" in record:
         parts.append(f"VAA {record['vaa']:.3f} (ema {record['ema_vaa']:.3f}, {record['vaa_set']})")
+    elif "ema_vaa" in record:
+        parts.append(f"VAA ema {record['ema_vaa']:.3f} ({record['vaa_set']} of {record['vaa_n']})")
     if "vaa_check_failed" in record:
-        parts.append(f"CHECK {record['check']} FAILED: {record['vaa_check_failed']}")
+        parts.append(f"CHECK {record['check']} FAILED: {record['check_failure']}")
     elif "check" in record:
         parts.append(f"check {record['check']} passed")
     parts.append(f"{record['eval_s']:.1f} s")

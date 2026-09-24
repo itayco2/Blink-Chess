@@ -162,16 +162,27 @@ def agreement(values: np.ndarray, probe: Probe) -> tuple[float, int]:
 
 
 def evaluate_vaa(
-    model: torch.nn.Module, probe: Probe, device: torch.device, chunk: int = VAA_CHUNK
+    model: torch.nn.Module,
+    probe: Probe,
+    device: torch.device,
+    chunk: int = VAA_CHUNK,
+    subset: int | None = None,
 ) -> dict[str, Any]:
+    """{"vaa", "n"} over the probe; with `subset`, also {"vaa_subset", "n_subset"} over its first roots,
+    read off the same forward passes (the subset's children are the first children of the probe)."""
     was_training = model.training
     model.eval()
     try:
         w_child = child_win_probability(model, probe.child_board, device, chunk)
     finally:
         model.train(was_training)
-    vaa, n = agreement(move_values(w_child, probe), probe)
-    return {"vaa": vaa, "n": n}
+    values = move_values(w_child, probe)
+    vaa, n = agreement(values, probe)
+    out = {"vaa": vaa, "n": n}
+    if subset is not None:
+        part = probe.subset(subset)
+        out["vaa_subset"], out["n_subset"] = agreement(values[: len(part.child_board)], part)
+    return out
 
 
 def check_steps(total: int, preview: bool = False) -> dict[int, str]:
@@ -189,13 +200,18 @@ class Reference:
     rows: tuple[dict[str, Any], ...]
     cooldown_start: int
 
-    def stable_at(self, samples: int) -> float | None:
-        """Its EMA VAA at the latest stable-phase eval with at most `samples` samples seen."""
+    def stable_row(self, samples: int) -> dict[str, Any] | None:
+        """Its latest stable-phase eval row (with an EMA VAA) with at most `samples` samples seen."""
         stable = [r for r in self.rows if r["step"] < self.cooldown_start and "ema_vaa" in r]
         if not stable:
             return None
         seen = [r for r in stable if r["samples"] <= samples]
-        return (seen[-1] if seen else stable[0])["ema_vaa"]
+        return seen[-1] if seen else stable[0]
+
+    def stable_at(self, samples: int) -> float | None:
+        """Its EMA VAA at the latest stable-phase eval with at most `samples` samples seen."""
+        row = self.stable_row(samples)
+        return None if row is None else row["ema_vaa"]
 
     def final(self) -> float | None:
         rows = [r for r in self.rows if "ema_vaa" in r]
@@ -215,8 +231,33 @@ def load_reference(run_dir: Path) -> Reference:
 
 
 def _failed(label: str, ema_vaa: float, threshold: float, rule: str, **extra: Any) -> dict[str, Any]:
+    """A failed check: `vaa_check_failed` is True (the supervisor pauses on it), the detail beside it."""
     detail = {"check": label, "ema_vaa": ema_vaa, "threshold": threshold, "rule": rule, **extra}
-    return {"check": label, "check_rule": rule, "check_threshold": threshold, "vaa_check_failed": detail}
+    return {
+        "check": label,
+        "check_rule": rule,
+        "check_threshold": threshold,
+        "vaa_check_failed": True,
+        "check_failure": detail,
+    }
+
+
+def _five_percent(
+    ema_vaa: float, reference: Reference | None, samples: int, sigma: float, subset: tuple[int, float] | None
+) -> dict[str, Any]:
+    """EMA VAA >= the reference's stable-phase EMA VAA at equal samples - 2 sigma, on the same roots:
+    a reference subset row is met with this check's own subset VAA when the subsets are the same size."""
+    row = None if reference is None else reference.stable_row(samples)
+    if row is None:
+        return {"check": "5%", "check_skipped": "no reference run with stable-phase VAA"}
+    own, roots = ema_vaa, "full"
+    if row.get("vaa_set") == "subset" and subset is not None and subset[0] == row.get("vaa_n"):
+        own, roots = subset[1], "subset"
+    threshold = row["ema_vaa"] - 2 * sigma
+    rule = f"ema_vaa ({roots}) >= {reference.name} stable VAA at equal samples - 2 sigma"
+    if own < threshold:
+        return _failed("5%", own, threshold, rule, reference=reference.name)
+    return {"check": "5%", "check_rule": rule, "check_threshold": threshold}
 
 
 def apply_check(
@@ -226,19 +267,13 @@ def apply_check(
     reference: Reference | None,
     samples: int,
     sigma: float,
+    subset: tuple[int, float] | None = None,
 ) -> dict[str, Any]:
-    """The fields a check adds to its eval row; a failure carries a `vaa_check_failed` record."""
+    """The fields a check adds to its eval row; a failure sets `vaa_check_failed` True.
+
+    `subset` is (roots, EMA VAA) of this check's first `vaa_subset` roots, for the 5% rule."""
     if label == "5%":
-        ref = None if reference is None else reference.stable_at(samples)
-        if ref is None:
-            return {"check": label, "check_skipped": "no reference run with stable-phase VAA"}
-        threshold, rule = (
-            ref - 2 * sigma,
-            f"ema_vaa >= {reference.name} stable VAA at equal samples - 2 sigma",
-        )
-        if ema_vaa < threshold:
-            return _failed(label, ema_vaa, threshold, rule, reference=reference.name)
-        return {"check": label, "check_rule": rule, "check_threshold": threshold}
+        return _five_percent(ema_vaa, reference, samples, sigma, subset)
     if label in ("25%", "50%"):
         previous = [row for row in history if "check" in row and "ema_vaa" in row]
         if not previous:
