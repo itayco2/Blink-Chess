@@ -60,7 +60,7 @@ def _raw_plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
         "cache": str(raw.cache),
         "sha1": raw.sha1,
     }
-    print(f"source-raw: {len(train):,} train, {len(val):,} val records (hash split {SPLIT_RULE})")
+    print(f"source-raw: {len(train):,} train, {len(val):,} val records (hash split {SPLIT_RULE})", flush=True)
     batches = InMemorySource(train, cfg.batch_size, cfg.seed).batches
     return DataPlan(batches, val if len(val) else None, world_id(f"raw:{raw.sha1}"), description)
 

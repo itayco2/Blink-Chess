@@ -33,6 +33,10 @@ VAL_BUCKETS = (0, 1)
 TEST_BUCKETS = (2, 3)
 
 
+def _print_now(message: str) -> None:
+    print(message, flush=True)
+
+
 def read_lines(path: Path, max_lines: int) -> Iterator[bytes]:
     """Up to max_lines complete lines (each ending in a newline) from the start of a .zst."""
     with open(path, "rb") as handle:
@@ -112,7 +116,7 @@ def _save(cache: Path, records: np.ndarray, sidecar: dict) -> None:
 
 
 def load_or_build(
-    raw: Path, max_lines: int, cache_dir: Path, workers: int, log: Callable[[str], None] = print
+    raw: Path, max_lines: int, cache_dir: Path, workers: int, log: Callable[[str], None] = _print_now
 ) -> RawData:
     if not raw.is_file():
         raise FileNotFoundError(f"--source-raw: {raw} does not exist")

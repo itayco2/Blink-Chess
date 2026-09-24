@@ -270,12 +270,17 @@ def _build(cfg: TrainConfig, spec: RunSpec, val: np.ndarray | None, log: Callabl
     return _Run(cfg, spec, model, Ema(model, cfg.ema_max), optimizer, device, val_set, log)
 
 
+def print_now(message: str) -> None:
+    """The default log: flushed per line, so a redirected detached run's log is readable live."""
+    print(message, flush=True)
+
+
 def train(
     cfg: TrainConfig,
     spec: RunSpec,
     source: BatchSource,
     val: np.ndarray | None,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = print_now,
 ) -> TrainResult:
     started = time.monotonic()
     if not spec.resume and list_checkpoints(spec.run_dir):
