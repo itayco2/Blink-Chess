@@ -331,7 +331,13 @@ def run_ordo(
         return OrdoFit((), present, excluded, tally, tuple(command), {})
     proc = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
-        raise RuntimeError(f"ordo failed ({proc.returncode}): {(proc.stdout + proc.stderr).strip()[-400:]}")
+        output = proc.stdout + proc.stderr
+        if "not well connected" in output:
+            raise RuntimeError(
+                "ordo refused the pool: some players reach the fixed anchors only through all-win or "
+                "all-loss results, so their ratings are unbounded; play games that connect them (ordo -g)"
+            )
+        raise RuntimeError(f"ordo failed ({proc.returncode}): {output.strip()[-400:]}")
     rows = parse_ordo_csv((workdir / "ordo.csv").read_text(encoding="utf-8", errors="replace"))
     extras = parse_ordo_text((workdir / "ordo.txt").read_text(encoding="utf-8", errors="replace"))
     return OrdoFit(tuple(rows), present, excluded, tally, tuple(command), extras)
