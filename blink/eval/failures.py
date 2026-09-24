@@ -166,3 +166,16 @@ def run_failures(
         "classes": dict(Counter(f.failure_class for f in found).most_common()),
         "positions_searched": labeler.searched,
     }
+
+
+def e9_block(ctx, state: dict) -> dict:
+    """The final-slice PGNs of E5 (or every PGN under <out>/E5 when E5 ran earlier), at 1M nodes."""
+    from blink.eval import fastchess
+    from blink.eval.sflabel import SfLabeler
+
+    pgns = [Path(p) for p in (state.get("E5") or {}).get("final_slice_pgns", [])]
+    pgns = pgns or sorted((ctx.out_dir / "E5").glob("*.pgn"))
+    cap = MAX_FAILURES if ctx.games is None else min(MAX_FAILURES, ctx.games)
+    with SfLabeler(1_000_000, exe=fastchess.stockfish_exe()) as labeler:
+        result = run_failures(pgns, labeler, max_failures=cap)
+    return {**result, "games": 0, "pgns": []}

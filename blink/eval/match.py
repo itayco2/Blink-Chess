@@ -17,10 +17,12 @@ fastchess block would. `pair_player` feeds the SPRT one opening (both colours) a
 """
 
 import datetime
+import json
+import re
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import chess
@@ -35,6 +37,7 @@ from blink.uci import win_to_cp
 
 MAX_ENGINE_PLIES = 600
 HALFMOVE_DRAW = 100
+NAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 SF_MOVETIME = 0.1  # Stockfish st=0.1, as in fastchess (plan match rules)
 DRAW = "1/2-1/2"
 
@@ -348,3 +351,49 @@ def merge_reports(first: dict, second: dict) -> dict:
         "pgn": pgns[-1],
         "pgns": pgns,
     }
+
+
+# ------------------------------------------------------------------------------ in-process blocks
+
+
+def read_epsilon(results_dir: Path = Path("results")) -> float:
+    """The R4 tie window chosen in E2b (results/epsilon.json), or the play default before E2b has run."""
+    from blink.play.rules import DEFAULT_EPSILON
+
+    path = Path(results_dir) / "epsilon.json"
+    if not path.is_file():
+        return DEFAULT_EPSILON
+    return float(json.loads(path.read_text(encoding="utf-8"))["epsilon"])
+
+
+def blink_agents(selector: str, device: str, epsilon: float | None = None) -> dict[str, Agent]:
+    """Both modes of one model on one evaluator (one load, one CUDA context), named as fastchess does."""
+    from blink.eval.fastchess import engine_name
+    from blink.play import factory
+
+    evaluator = factory.load_evaluator(selector, device=device)
+    eps = read_epsilon() if epsilon is None else epsilon
+    return {
+        mode: replace(factory.make_agent(mode, evaluator, epsilon=eps), name=engine_name(selector, mode))
+        for mode in factory.MODES
+    }
+
+
+def play_inprocess(
+    a: Agent,
+    b: Agent,
+    games: int,
+    book: str,
+    out_dir: Path,
+    skip: int = 0,
+    max_plies: int = MAX_ENGINE_PLIES,
+) -> dict:
+    """`games` games of A against B from a book slice (after `skip` openings): PGN, summary and report."""
+    from blink.eval.books import openings_for
+
+    openings = openings_for(book, (games + 1) // 2, skip)
+    tag = f"{NAME_SAFE.sub('_', a.name)}_vs_{NAME_SAFE.sub('_', b.name)}"
+    pgn = Path(out_dir) / f"{tag}_{time.strftime('%Y%m%d-%H%M%S')}_{skip}.pgn"
+    summary = run_match(a, b, openings, games, pgn, max_plies=max_plies)
+    pgn.with_suffix(".json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return match_report(summary, pgn)

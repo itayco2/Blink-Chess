@@ -222,3 +222,61 @@ def run_epsilon_selection(
     decision = epsilon_decision(conversions, verdict)
     write_epsilon(decision, results_dir)
     return decision
+
+
+# ------------------------------------------------------------------------------ the blocks, in process
+
+
+def _stockfish():
+    from blink.eval import fastchess
+
+    return match.stockfish_agent(fastchess.stockfish_exe())
+
+
+def e2b_block(ctx, state: dict) -> dict:
+    from blink.eval import endgames
+    from blink.play.agents import ValueAgent
+
+    dev = endgames.read_set(endgames.out_dir(), "dev")[: ctx.positions or endgames.DEV_COUNT]
+    evaluator = match.blink_agents(ctx.model, ctx.device, epsilon=0.0)["value"].evaluator
+    agent = {eps: ValueAgent(evaluator, epsilon=eps, name=f"Blink-value-eps{eps:.6f}") for eps in EPSILONS}
+    pgns: list[str] = []
+
+    def convert(eps: float) -> ConversionResult:
+        pgn = ctx.out_dir / "E2b" / f"conversion_eps{eps:.6f}.pgn"
+        pgns.append(str(pgn))
+        with _stockfish() as stockfish:
+            return play_conversion(agent[eps], stockfish, dev, pgn)
+
+    def check(eps: float) -> list[float]:
+        report = match.play_inprocess(
+            agent[eps], agent[0.0], ctx.n(NO_REGRESSION_GAMES), "dev", ctx.out_dir / "E2b"
+        )
+        pgns.append(report["pgn"])
+        return [1.0] * report["wins"] + [0.5] * report["draws"] + [0.0] * report["losses"]
+
+    decision = run_epsilon_selection(convert, check, ctx.results_dir)
+    games = sum(v["n"] for v in decision["conversion"].values()) + (
+        (decision["no_regression"] or {}).get("games") or 0
+    )
+    return {"decision": decision, "games": games, "pgns": pgns}
+
+
+def e8_block(ctx, state: dict) -> dict:
+    from blink.eval import endgames
+    from blink.eval.orchestrate import shipped_mode
+
+    final = endgames.read_set(endgames.out_dir(), "final")[
+        : ctx.positions or endgames.WANT - endgames.DEV_COUNT
+    ]
+    mode = shipped_mode(ctx, state)
+    rules_on = match.blink_agents(ctx.model, ctx.device)[mode]
+    rules_off = RulesOffAgent(rules_on.evaluator, mode, name=f"{rules_on.name}-rules-off")
+    out = {}
+    for label, agent in (("rules_on", rules_on), ("rules_off", rules_off)):
+        with _stockfish() as stockfish:
+            out[label] = play_conversion(
+                agent, stockfish, final, ctx.out_dir / "E8" / f"{label}.pgn"
+            ).as_dict()
+    pgns = [str(ctx.out_dir / "E8" / f"{label}.pgn") for label in out]
+    return {"mode": mode, **out, "games": sum(r["n"] for r in out.values()), "pgns": pgns}

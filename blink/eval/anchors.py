@@ -108,3 +108,89 @@ def run_dm_block(
         "games": gauntlet["games"] + head["games"],
         "pgns": [*gauntlet["pgns"], head["pgn"]],
     }
+
+
+# ------------------------------------------------------------------------------ the blocks (fastchess)
+
+
+def fastchess_player(ctx, selector: str, mode: str, subdir: str) -> AnchorPlay:
+    """The engine under test (Blink, or DM-9M for a dm selector) against one clocked UCI_Elo anchor."""
+    from blink.eval import fastchess
+
+    def play(anchor: Anchor, games: int, book: str, skip: int) -> Report:
+        first = fastchess.blink_engine(selector, mode, ctx.device)
+        second = fastchess.stockfish_anchor(anchor.rating, fastchess.stockfish_exe())
+        gauntlet = fastchess.prepare_pair(
+            first, second, games, book, ctx.out_dir / subdir, ctx.concurrency, skip=skip
+        )
+        return fastchess.match_report(fastchess.execute(gauntlet))
+
+    return play
+
+
+def _prior(state: dict) -> float:
+    """Where the locator starts: the final model's E5 estimate for later rows, else the default."""
+    final = (state.get("E5") or {}).get("final") or {}
+    estimates = [block["locator"]["estimate"] for block in final.values()]
+    return sum(estimates) / len(estimates) if estimates else DEFAULT_PRIOR
+
+
+def e5_block(ctx, state: dict) -> dict:
+    from blink.play.factory import MODES
+
+    grid = rating.read_anchors()
+    final = {
+        mode: run_anchor_block(
+            fastchess_player(ctx, ctx.model, mode, "E5"),
+            grid,
+            DEFAULT_PRIOR,
+            ctx.n(LOCATOR_GAMES),
+            ctx.n(ANCHOR_GAMES),
+        )
+        for mode in MODES
+    }
+    prior = _prior({"E5": {"final": final}})
+    side = {
+        f"{selector}|{mode}": run_side_row(
+            fastchess_player(ctx, selector, mode, "E5-side"),
+            grid,
+            prior,
+            ctx.n(LOCATOR_GAMES),
+            ctx.n(SIDE_GAMES),
+        )
+        for selector in ctx.side_models
+        for mode in MODES
+    }
+    blocks = [*final.values(), *side.values()]
+    return {
+        "final": final,
+        "side": side,
+        "games": sum(b["games"] for b in blocks),
+        "pgns": [p for b in blocks for p in b["pgns"]],
+        "final_slice_pgns": [r["pgn"] for b in blocks for r in b["anchors"]],
+    }
+
+
+def e7_block(ctx, state: dict) -> dict:
+    from blink.eval import match
+    from blink.eval.orchestrate import shipped_mode
+    from blink.reference import registry
+
+    dm = "dm:9M"
+    blink = match.blink_agents(ctx.model, ctx.device)[shipped_mode(ctx, state)]
+    deepmind = registry.load_agent(dm, device=ctx.device)
+
+    def play_blink(games: int) -> Report:
+        return match.play_inprocess(blink, deepmind, games, "final", ctx.out_dir / "E7")
+
+    result = run_dm_block(
+        fastchess_player(ctx, dm, "policy", "E7"),
+        play_blink,
+        rating.read_anchors(),
+        _prior(state),
+        ctx.n(LOCATOR_GAMES),
+        ctx.n(DM_ANCHOR_GAMES),
+        ctx.n(BLINK_VS_DM_GAMES),
+    )
+    anchors_rows = result["gauntlet"]["anchors"]
+    return {**result, "final_slice_pgns": [*(r["pgn"] for r in anchors_rows), result["blink_vs_dm"]["pgn"]]}

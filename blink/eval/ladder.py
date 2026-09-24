@@ -13,6 +13,7 @@ Every match is played by a `play` callable, so each block runs with any game bud
 
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from itertools import combinations
 from pathlib import Path
 
@@ -119,3 +120,96 @@ def run_round_robin(
     """E6: every pair plays `games` games; the ratings come from Ordo over the PGNs."""
     rows = [play(a, b, games) for a, b in round_robin_pairs(players)]
     return {"pairs": rows, "games": sum(r["games"] for r in rows), "pgns": [r["pgn"] for r in rows]}
+
+
+# ------------------------------------------------------------------------------ the blocks, in process
+
+
+def _nodes_player(agent, out_dir: Path, book: str) -> NodePlay:
+    """Blink against full-strength SF19 at a node budget, in process (deterministic: no clock on either)."""
+    from blink.eval import fastchess, match
+
+    def play(nodes: int, games: int, skip: int) -> Report:
+        with match.stockfish_agent(fastchess.stockfish_exe(), nodes=nodes) as stockfish:
+            return match.play_inprocess(agent, stockfish, games, book, out_dir, skip)
+
+    return play
+
+
+def e4_block(ctx, state: dict) -> dict:
+    from blink.eval import match
+    from blink.eval.orchestrate import shipped_mode
+
+    mode = shipped_mode(ctx, state)
+    agent = match.blink_agents(ctx.model, ctx.device)[mode]
+    play = _nodes_player(agent, ctx.out_dir / "E4", "final")
+    result = run_node_ladder(play, ctx.n(RUNG_GAMES), ctx.n(BRACKET_GAMES))
+    return {**result, "mode": mode, "pgns": [p for r in result["rungs"] for p in r.get("pgns", [r["pgn"]])]}
+
+
+def crossover_nodes(state: dict) -> tuple[int, str | None]:
+    """E4's crossover, or the ladder's end it pressed against (flagged) when there was none."""
+    cross = (state.get("E4") or {}).get("crossover") or {}
+    if cross.get("nodes"):
+        return int(cross["nodes"]), None
+    if cross.get("bound") == "above the top rung":
+        return NODE_RUNGS[-1], "no crossover: Blink beat the top rung"
+    return NODE_RUNGS[0], "no crossover: Blink lost to the bottom rung" if cross else "E4 has not run"
+
+
+def e4b_block(ctx, state: dict) -> dict:
+    from blink import paths
+    from blink.eval.orchestrate import shipped_mode
+    from blink.play import factory
+
+    if not ctx.film_run:
+        return {"skipped": "no --film-run given", "games": 0, "pgns": []}
+    mode, (nodes, flag) = shipped_mode(ctx, state), crossover_nodes(state)
+    checkpoints = pick_checkpoints(film_frames(paths.home() / "runs" / ctx.film_run))
+
+    def play(selector: str, at: int, games: int) -> Report:
+        agent = factory.make_agent(mode, factory.load_evaluator(selector, device=ctx.device))
+        agent = replace(agent, name=f"Blink-{mode}-{Path(selector).stem}")
+        return _nodes_player(agent, ctx.out_dir / "E4b", "dev")(at, games, 0)
+
+    result = run_film_checkpoints(play, checkpoints, nodes, ctx.n(FILM_GAMES))
+    return {**result, "flag": flag, "pgns": [r["pgn"] for r in result["checkpoints"]]}
+
+
+def _ladder_agent(name: str, ctx, state: dict):
+    from blink.baselines.evaluator import baseline_agent
+    from blink.eval import fastchess, match
+    from blink.eval.orchestrate import shipped_mode
+    from blink.play import agents
+
+    if name == "random":
+        return agents.RandomAgent()
+    if name == "material":
+        return agents.MaterialAgent()
+    if name in ("linear", "mlp"):
+        return baseline_agent(name, device=ctx.device)
+    if name.startswith("SF"):
+        return match.stockfish_agent(fastchess.stockfish_exe(), elo=int(name[2:]))
+    return match.blink_agents(name, ctx.device)[shipped_mode(ctx, state)]
+
+
+def e6_block(ctx, state: dict) -> dict:
+    from blink.eval import match
+
+    agents, missing = {}, {}
+    for name in LADDER_PLAYERS:
+        try:
+            agents[name] = _ladder_agent(name, ctx, state)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            missing[name] = str(exc)
+
+    def play(a: str, b: str, games: int) -> Report:
+        return match.play_inprocess(agents[a], agents[b], games, "final", ctx.out_dir / "E6")
+
+    players = [p for p in LADDER_PLAYERS if p in agents]
+    try:
+        result = run_round_robin(play, players, ctx.n(LADDER_GAMES))
+    finally:
+        for agent in agents.values():
+            getattr(agent, "close", lambda: None)()
+    return {**result, "missing": missing}
