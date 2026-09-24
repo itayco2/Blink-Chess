@@ -194,3 +194,8 @@ def test_the_batched_screen_keeps_a_position_won_for_black(tmp_path):
     second = fake_labeler(tmp_path, "c", {black_wins: -7.0})
     result = endgames.screen(iter([(3, black_wins)]), first, second)
     assert [(e.line, e.winner) for e in result.kept] == [(3, "black")]
+
+
+def test_an_empty_conversion_has_no_percentage():
+    empty = conversion.ConversionResult("Blink-value", ())
+    assert empty.as_dict()["pct"] is None and empty.as_dict()["wilson95"] is None

@@ -77,8 +77,8 @@ class ConversionResult:
             "agent": self.agent,
             "n": self.n,
             "converted": self.converted,
-            "pct": 100 * self.rate,
-            "wilson95": [100 * low, 100 * high],
+            "pct": 100 * self.rate if self.n else None,
+            "wilson95": [100 * low, 100 * high] if self.n else None,
             "reasons": dict(Counter(g.reason for g in self.games)),
             "games": [asdict(g) for g in self.games],
         }

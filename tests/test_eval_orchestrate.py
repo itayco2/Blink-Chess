@@ -164,7 +164,7 @@ DIAGNOSTICS = [
 ]
 
 
-def fake_fit(pgns, anchors, workdir):
+def fake_fit(pgns, anchors, workdir, **options):
     rows = (
         rating.OrdoRow("Blink-value-run_x", 1712.5, 41.0, 250.0, 400, 62.5),
         rating.OrdoRow("DM-9M", 2210.0, 60.0, 90.0, 200, 45.0),
@@ -298,7 +298,7 @@ def test_a_blink_row_takes_its_puzzle_score_from_blink_eval_puzzles(tmp_path, mo
 
 
 def test_a_refused_ordo_pool_still_writes_results_json_without_elo(tmp_path):
-    def refuse(pgns, anchors, workdir):
+    def refuse(pgns, anchors, workdir, **options):
         raise RuntimeError("ordo refused the pool")
 
     pgn = tmp_path / "final.pgn"
@@ -315,3 +315,23 @@ def test_a_refused_ordo_pool_still_writes_results_json_without_elo(tmp_path):
     results = results_schema.from_json((tmp_path / "results" / "results.json").read_text(encoding="utf-8"))
     assert {r.agent for r in results.strength} == {"Blink-value-ship", "SF1800", "SF1900"}
     assert all(r.elo is None for r in results.strength)
+
+
+def test_a_smoke_run_asks_ordo_for_fewer_simulations_and_a_short_timeout(tmp_path):
+    seen = {}
+
+    def spy(pgns, anchors, workdir, **options):
+        seen.update(options)
+        return fake_fit(pgns, anchors, workdir)
+
+    pgn = tmp_path / "final.pgn"
+    pgn.write_text(PGN, encoding="utf-8")
+    runners = recorder([], {"E5": {"final_slice_pgns": [str(pgn)]}})
+    orchestrate.run_all(
+        ctx(tmp_path, games=2), runners=runners, runs_root=tmp_path, log=lambda s: None, ordo=spy, load=IDLE
+    )
+    assert seen == {"simulations": 100, "timeout_s": 120}
+    orchestrate.run_all(
+        ctx(tmp_path), runners=runners, runs_root=tmp_path, log=lambda s: None, ordo=spy, load=IDLE
+    )
+    assert seen == {"simulations": 1000, "timeout_s": 1800}

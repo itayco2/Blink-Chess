@@ -36,6 +36,9 @@ SELFCHECK_BAND = 0.07
 DM_EXPECTED = (88.9, 1.0)  # DM-9M `params` on the 10K puzzles, % (arXiv v2 Table 1), pre-registered
 # A loaded machine bends st=0.1: in a CPU-busy smoke, SF19 forfeited 4 of 24 E5 games on time.
 BUSY_CPU_PCT = 25.0
+# A smoke run's few games can leave Ordo's error simulations crawling (40 games: 20 simulations > 100 s).
+SMOKE_ORDO_SIMULATIONS = 100
+SMOKE_ORDO_TIMEOUT_S = 120
 CPU_SAMPLE_S = 3.0
 
 
@@ -586,8 +589,11 @@ def _fit(pgns: Sequence[Path], ctx: EvalContext, ordo: Callable) -> tuple[object
     if not pgns:
         return None, None
     anchors = rating.read_anchors()
+    smoke = ctx.games is not None
+    simulations = SMOKE_ORDO_SIMULATIONS if smoke else rating.ORDO_SIMULATIONS
+    timeout_s = SMOKE_ORDO_TIMEOUT_S if smoke else rating.ORDO_TIMEOUT_S
     try:
-        return ordo(pgns, anchors, ctx.out_dir / "ordo"), None
+        return ordo(pgns, anchors, ctx.out_dir / "ordo", simulations=simulations, timeout_s=timeout_s), None
     except RuntimeError as exc:
         tally, left_out = rating.tally_players(pgns), rating.exclusions(pgns, anchors)
         return rating.OrdoFit((), (), left_out, tally, (), {}), str(exc)
