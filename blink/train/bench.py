@@ -289,7 +289,7 @@ class PlaySpec:
     rows: int
     concurrency: int = 1
     iters: int = 200
-    warmup: int = 20  # includes compilation when compile is on
+    warmup: int = 20  # after play's own warm-up (compile and tuning) when compile is on
     device: str = "cuda"
     precision: str = fastmode.DEFAULT_PRECISION
     compile: bool = False
@@ -314,13 +314,14 @@ def _latencies(
     import torch
 
     from blink.model.config import load_config
-    from blink.model.evaluator import TorchEvaluator
+    from blink.model.evaluator import play_evaluator
     from blink.model.transformer import BlinkNet
 
     torch.manual_seed(0)
     precision, compile = mode
     model = BlinkNet(load_config(config).model)
-    evaluator = TorchEvaluator(model, device, precision=precision, compile=compile)
+    # built and warmed exactly as load_evaluator builds it: a compiled trunk is tuned at play's rows
+    evaluator = play_evaluator(model, device, precision=precision, compile=compile)
     codes = random_codes(rows, seed=rows)
     for _ in range(warmup):
         evaluator.evaluate(codes)

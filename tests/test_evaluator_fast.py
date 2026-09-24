@@ -21,7 +21,7 @@ from train_helpers import tiny_model_config  # noqa: E402
 from blink.board import encode, value  # noqa: E402
 from blink.model import loading  # noqa: E402
 from blink.model.config import ModelConfig  # noqa: E402
-from blink.model.evaluator import TorchEvaluator  # noqa: E402
+from blink.model.evaluator import WARM_ROWS, TorchEvaluator, play_evaluator  # noqa: E402
 from blink.model.transformer import BlinkNet, Trunk  # noqa: E402
 from blink.play.agents import expand  # noqa: E402
 
@@ -139,12 +139,25 @@ def test_the_fast_path_in_fp32_gives_the_models_own_numbers(monkeypatch):
     assert np.array_equal(result.value_probs, probs)
 
 
-def test_warm_up_runs_one_row_then_two(monkeypatch):
+def test_warm_up_runs_one_row_then_the_largest_value_batch(monkeypatch):
+    """1 row builds the one-look graph; 219 (218 legal moves + the root) builds the graph every
+    value batch shares and tunes it at the batch P6's p99 is judged at, not at 2 rows."""
     monkeypatch.setattr(torch, "compile", CompileSpy())
     model = _perturbed_model()
     calls = _row_counts(model)
     TorchEvaluator(model, "cpu", compile=True).warm_up()
-    assert calls["trunk"] == [1, 2]
+    assert calls["trunk"] == [1, 219]
+
+
+def test_play_evaluator_warms_up_a_compiled_evaluator_only(monkeypatch):
+    """The one builder load_evaluator, bench play and bench parity share: the default runs nothing."""
+    monkeypatch.setattr(torch, "compile", CompileSpy())
+    model = _perturbed_model()
+    calls = _row_counts(model)
+    default = play_evaluator(model, "cpu")
+    assert default.is_default and calls["model"] == [] and calls["trunk"] == []
+    compiled = play_evaluator(model, "cpu", compile=True)
+    assert compiled.compile and calls["trunk"] == list(WARM_ROWS)
 
 
 # ---------------------------------------------------------------- cuda
@@ -263,6 +276,19 @@ def test_the_compiled_trunk_serves_every_row_count_play_sends(precision):
     assert not any("_orig_mod" in key for key in model.state_dict())
 
 
+@pytest.mark.cuda
+def test_after_warm_up_no_row_count_play_sends_compiles_again():
+    """Warming at 219 rows, not 2, must still leave one graph for every N >= 2 (64 = the square count
+    included): a compile mid-game would cost seconds under R5's clock guard."""
+    torch._dynamo.reset()  # other tests' compiled trunks share Trunk.forward's cache
+    compiled = TorchEvaluator(non_trivial_model(), "cuda", precision="bf16", compile=True)
+    compiled.warm_up()
+    with torch._dynamo.config.patch(error_on_recompile=True):
+        for n in (1, 2, 7, 21, 37, 64, 218, 219, 1):
+            codes = np.random.default_rng(n).integers(0, encode.NUM_CODES, size=(n, 64), dtype=np.uint8)
+            assert compiled.evaluate(codes).policy_logits.shape == (n, 1880)
+
+
 # ---------------------------------------------------------------- loading
 
 
@@ -300,4 +326,4 @@ def test_load_evaluator_warms_a_compiled_evaluator_up_before_returning_it(slim_w
 
     monkeypatch.setattr(torch, "compile", spy)
     evaluator = loading.load_evaluator(str(slim_weights[0]), device="cpu", compile=True)
-    assert evaluator.compile and seen == [1, 2]
+    assert evaluator.compile and seen == list(WARM_ROWS)

@@ -12,6 +12,11 @@ which calls the model exactly as it always has. Two opt-in modes (blink.play.fas
 - compile=True: the trunk is wrapped with torch.compile(dynamic=True) for this evaluator only; the
   model object, its trunk attribute and its weights are untouched. dynamic=True still specialises a
   batch of 1, so warm_up() compiles the one-look (1 row) and value-mode (2+ rows) graphs before play.
+  Inductor tunes a graph's kernels at the rows of its first call and keeps them for every later
+  batch, so the shared value-mode graph is first called at 219 rows, the batch P6's p99 is judged at.
+
+play_evaluator() is the one way play, bench play and bench parity build an evaluator, so a bench
+times exactly the graphs play runs.
 """
 
 import numpy as np
@@ -22,7 +27,9 @@ from blink.model.transformer import BlinkNet
 from blink.play import fastmode
 from blink.play.evaluator import Evaluation
 
-WARM_ROWS = (1, 2)  # a batch of 1 gets its own graph; one symbolic graph serves every N >= 2
+MAX_VALUE_ROWS = 219  # L+1 at its largest: 218 legal moves and the root
+# a batch of 1 gets its own graph; one symbolic graph serves every N >= 2 and is tuned at its first call
+WARM_ROWS = (1, MAX_VALUE_ROWS)
 
 
 class TorchEvaluator:
@@ -72,7 +79,20 @@ class TorchEvaluator:
         )
 
     def warm_up(self) -> None:
-        """Run empty boards at 1 and 2 rows once, so a compiled trunk has both graphs before the first
-        decision (a recompile under R5's clock guard would cost seconds). Startup only: no decision."""
+        """Run empty boards at WARM_ROWS once, so a compiled trunk has both graphs, tuned, before the
+        first decision (a recompile under R5's clock guard would cost seconds). Startup only: no decision."""
         for rows in WARM_ROWS:
             self.evaluate(np.zeros((rows, 64), dtype=np.uint8))
+
+
+def play_evaluator(
+    model: BlinkNet,
+    device: str | torch.device = "cpu",
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
+) -> TorchEvaluator:
+    """The evaluator play runs: a compiled one is warmed up before it is returned, the default is not."""
+    evaluator = TorchEvaluator(model, device, precision=precision, compile=compile)
+    if evaluator.compile:
+        evaluator.warm_up()
+    return evaluator

@@ -20,7 +20,7 @@ import torch
 
 from blink import paths
 from blink.model.config import ModelConfig, config_from_dict
-from blink.model.evaluator import TorchEvaluator
+from blink.model.evaluator import TorchEvaluator, play_evaluator
 from blink.model.transformer import BlinkNet
 from blink.play import fastmode
 from blink.train.checkpoint import latest_checkpoint, load_checkpoint
@@ -83,7 +83,4 @@ def load_evaluator(
     compile: bool = False,
 ) -> TorchEvaluator:
     fastmode.check(precision, device)
-    evaluator = TorchEvaluator(load_model(selector, device), device, precision=precision, compile=compile)
-    if compile:
-        evaluator.warm_up()
-    return evaluator
+    return play_evaluator(load_model(selector, device), device, precision=precision, compile=compile)

@@ -267,13 +267,11 @@ def _parity_out(args: argparse.Namespace) -> Path:
 
 def _parity_evaluators(args: argparse.Namespace):
     """fp32 and the fast mode on one model object: the fast one compiles its own trunk wrapper."""
-    from blink.model.evaluator import TorchEvaluator
+    from blink.model.evaluator import TorchEvaluator, play_evaluator
     from blink.model.loading import load_model
 
     model = load_model(args.model, device=args.device)
-    fast = TorchEvaluator(model, args.device, precision=args.precision, compile=args.compile)
-    if args.compile:
-        fast.warm_up()
+    fast = play_evaluator(model, args.device, precision=args.precision, compile=args.compile)
     return TorchEvaluator(model, args.device), fast
 
 

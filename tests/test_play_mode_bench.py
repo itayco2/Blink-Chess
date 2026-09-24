@@ -10,6 +10,7 @@ pytest.importorskip("torch")
 import torch  # noqa: E402
 
 from blink import cli  # noqa: E402
+from blink.model.evaluator import WARM_ROWS, TorchEvaluator  # noqa: E402
 from blink.train import bench, nstar  # noqa: E402
 
 pytestmark = pytest.mark.torch
@@ -73,6 +74,27 @@ def test_play_rows_record_the_mode_they_were_timed_in(tiny_config, compile_spy):
     assert all(r["p99_ms"] > 0 for r in rows)
     assert compile_spy == [{"dynamic": True}]
     assert "fp32 compiled" in lines[1]
+
+
+def test_a_compiled_bench_warms_up_exactly_as_play_does_before_its_own_rows(tiny_config, monkeypatch):
+    """Inductor tunes a graph at the rows of its first call and keeps that config, so the bench must
+    build the graphs at play's warm-up rows (load_evaluator) before timing, not at its own rows."""
+    seen = []
+
+    def spy(module, **kwargs):
+        return lambda tokens: (seen.append(tokens.shape[0]), module(tokens))[1]
+
+    monkeypatch.setattr(torch, "compile", spy)
+    spec = bench.PlaySpec("tiny", tiny_config, rows=5, iters=2, warmup=1, device="cpu", compile=True)
+    bench.measure_play(spec)
+    assert seen == [*WARM_ROWS, 5, 5, 5]
+
+
+def test_an_uncompiled_bench_times_its_rows_with_no_warm_up(tiny_config, monkeypatch):
+    warmed = []
+    monkeypatch.setattr(TorchEvaluator, "warm_up", lambda self: warmed.append(self))
+    bench.measure_play(bench.PlaySpec("tiny", tiny_config, rows=5, iters=2, warmup=1, device="cpu"))
+    assert warmed == []
 
 
 def test_a_failed_play_row_still_carries_its_key(tiny_config, monkeypatch):
