@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -92,14 +93,72 @@ def test_the_browser_gate_needs_int8_within_30_mb_p50_within_250_ms_and_cold_loa
     fast = bench.gate(int8_bytes=419_787, rows=[_row(p50=12.0)], cold_load_s=1.3)
     assert fast["passed"] is True and fast["failures"] == []
     assert fast["p50_ms"] == 12.0 and fast["int8_bytes"] == 419_787
+    assert fast["cold_load_network"] == bench.COLD_LOAD_NETWORK.to_dict()
     slow = bench.gate(int8_bytes=31_000_000, rows=[_row(p50=260.0)], cold_load_s=5.5)
     assert slow["failures"] == [
         "int8 file 31,000,000 B is over 30,000,000 B",
         "one look p50 260.0 ms on int8 wasm-1t is over 250 ms",
-        "cold load 5.50 s is over 5 s",
+        "cold load 5.50 s over 100 Mbit/s down, 40 ms RTT is over 5 s",
     ]
     missing = bench.gate(int8_bytes=1, rows=[_row(backend="wasm-mt")], cold_load_s=1.0)
     assert missing["failures"] == ["no int8 wasm-1t measurement: the shipped path was not measured"]
+
+
+def test_the_default_cold_load_link_fits_the_plans_own_size_and_time_limits():
+    # a 30 MB int8 file plus the 14.2 MB ORT wasm must be able to arrive within the 5 s cold load
+    from blink.site import bench
+
+    network = bench.COLD_LOAD_NETWORK
+    assert (bench.MAX_INT8_BYTES + 14_239_897) / network.bytes_per_s < bench.MAX_COLD_LOAD_S
+    assert network.to_dict()["down_mbit_s"] == 100.0 and network.to_dict()["rtt_ms"] == 40.0
+    assert "uncompressed" in network.to_dict()["model"]
+
+
+def test_a_network_profile_is_mbit_and_rtt_ms():
+    from blink.site import bench
+
+    assert bench.parse_network("20:40") == bench.Network(down_mbit_s=20.0, rtt_ms=40.0)
+    assert bench.parse_network("1.5:0").describe() == "1.5 Mbit/s down, 0 ms RTT"
+    for bad in ("fast", "20", "20:40:1", "0:40", "20:-1", "inf:40", "nan:40"):
+        with pytest.raises(ValueError, match="MBIT:RTT_MS"):
+            bench.parse_network(bad)
+
+
+def _fetch(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return response.read()
+
+
+def test_the_cold_load_server_paces_every_byte_through_one_shared_link(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from blink.site import bench
+
+    (tmp_path / "a.bin").write_bytes(b"a" * 200_000)
+    (tmp_path / "b.bin").write_bytes(b"b" * 200_000)
+    link = bench.Link(bench.Network(down_mbit_s=8.0, rtt_ms=50.0))  # 1,000,000 B/s
+    with bench.serving(tmp_path, link) as url:
+        started = time.perf_counter()
+        body = _fetch(url + "a.bin")
+        one = time.perf_counter() - started
+        started = time.perf_counter()
+        with ThreadPoolExecutor(2) as pool:
+            bodies = list(pool.map(_fetch, [url + "a.bin", url + "b.bin"]))
+        both = time.perf_counter() - started
+    assert body == b"a" * 200_000 and bodies == [b"a" * 200_000, b"b" * 200_000]
+    assert one >= 0.25 - 0.01, "one round trip, then 200 kB at 1 MB/s"
+    assert both >= 0.45 - 0.01, "two responses share the link: 400 kB at 1 MB/s after a round trip"
+    assert link.bytes_sent == 600_000
+
+
+def test_the_bench_server_without_a_link_is_not_throttled(tmp_path):
+    from blink.site import bench
+
+    (tmp_path / "a.bin").write_bytes(b"a" * 200_000)
+    with bench.serving(tmp_path) as url:
+        started = time.perf_counter()
+        assert _fetch(url + "a.bin") == b"a" * 200_000
+    assert time.perf_counter() - started < 5.0
 
 
 def _bench_site(tmp_path: Path) -> Path:
@@ -152,7 +211,11 @@ def test_the_bench_server_is_loopback_only_and_cross_origin_isolated(tmp_path):
 
 
 def _fake_report(passed: bool) -> dict:
+    from blink.site import bench
+
+    network = bench.COLD_LOAD_NETWORK.to_dict()
     return {
+        "page": {"ready": True, "cold_load_s": 1.25, "network": network, "bytes_served": 14_700_000},
         "backends": [_row()],
         "skipped": [],
         "gate": {"passed": passed, "failures": [] if passed else ["x"]},
@@ -172,8 +235,8 @@ def test_site_bench_writes_its_report_under_blink_home_eval_and_exits_on_the_gat
     (export / "int8" / "model.onnx").write_bytes(b"int8")
     seen = {}
 
-    def fake_run(int8, fp32, runs, warmup, backends, timeout_s):
-        seen.update(int8=int8, fp32=fp32, runs=runs, backends=backends)
+    def fake_run(int8, fp32, runs, warmup, backends, timeout_s, network):
+        seen.update(int8=int8, fp32=fp32, runs=runs, backends=backends, network=network)
         return _fake_report(passed)
 
     monkeypatch.setattr(bench, "run_bench", fake_run)
@@ -186,8 +249,18 @@ def test_site_bench_writes_its_report_under_blink_home_eval_and_exits_on_the_gat
         "fp32": export / "model.onnx",
         "runs": 50,
         "backends": ("wasm-1t", "webgpu"),
+        "network": bench.COLD_LOAD_NETWORK,
     }
-    assert "site_bench.json" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "site_bench.json" in out and "cold load 1.25 s over 100 Mbit/s down, 40 ms RTT" in out
+    assert cli.main(["site", "bench", "--model", str(export), "--network", "20:40"]) == (0 if passed else 1)
+    assert seen["network"] == bench.Network(down_mbit_s=20.0, rtt_ms=40.0)
+
+
+def test_site_bench_refuses_a_malformed_network_profile(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["site", "bench", "--model", str(tmp_path), "--network", "fast"])
+    assert "MBIT:RTT_MS" in capsys.readouterr().err
 
 
 def test_site_bench_names_the_missing_model_and_the_command_that_makes_it(tmp_path, capsys):
@@ -254,3 +327,10 @@ def test_the_bench_measures_int8_and_fp32_on_wasm_in_edge(tmp_path):
     assert rows[("int8", "wasm-mt")]["threads"] > 1, "the bench server is cross-origin isolated"
     assert report["page"]["ready"] is True and report["page"]["console_errors"] == []
     assert report["gate"]["int8_bytes"] == int8.stat().st_size
+    page, network = report["page"], bench.COLD_LOAD_NETWORK
+    assert page["network"] == network.to_dict() and report["gate"]["cold_load_network"] == network.to_dict()
+    wasm = (SITE / "node_modules" / "onnxruntime-web" / "dist" / "ort-wasm-simd-threaded.wasm").stat().st_size
+    assert page["bytes_served"] >= wasm + int8.stat().st_size, (
+        "the worker's ORT wasm and the model came through"
+    )
+    assert page["cold_load_s"] >= page["bytes_served"] / network.bytes_per_s, "paced over the link"

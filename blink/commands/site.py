@@ -75,7 +75,25 @@ def _selftest_failures(url: str, timeout: float) -> list[str]:
     return failures + [f"console error during the selftest: {error}" for error in check.console_errors]
 
 
+def _network(text: str):
+    from blink.site import bench
+
+    try:
+        return bench.parse_network(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _print_cold_load(page: dict) -> None:
+    link = f"over {page['network']['profile']}"
+    if page.get("cold_load_s") is None:
+        print(f"  cold load {link}: the page was not ready")
+        return
+    print(f"  cold load {page['cold_load_s']:.2f} s {link} ({page['bytes_served']:,} B served)")
+
+
 def _print_bench(report: dict) -> None:
+    _print_cold_load(report["page"])
     for row in report["backends"]:
         look = row.get("look_ms", {})
         timing = f"look p50 {look['p50']:.2f} ms" if "p50" in look else row.get("reason", "")
@@ -100,7 +118,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             return 2
     backends = tuple(name.strip() for name in args.backends.split(",") if name.strip())
     try:
-        report = bench.run_bench(int8, fp32, args.runs, args.warmup, backends, args.timeout)
+        report = bench.run_bench(int8, fp32, args.runs, args.warmup, backends, args.timeout, args.network)
     except bench.BenchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -129,7 +147,7 @@ def _cmd_vendor(args: argparse.Namespace) -> int:
 
 
 def register(sub: argparse._SubParsersAction) -> None:
-    from blink.site import serve
+    from blink.site import bench, serve
 
     site = sub.add_parser("site", help="the local browser page: serve it, smoke-test it, build its assets")
     tasks = site.add_subparsers(dest="site_command", required=True)
@@ -164,6 +182,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--backends", default="wasm-1t,wasm-mt,webgpu", help="comma list; int8 skips webgpu"
     )
     bench_cmd.add_argument("--timeout", type=float, default=600.0, help="seconds for the whole bench page")
+    bench_cmd.add_argument(
+        "--network",
+        type=_network,
+        default=bench.COLD_LOAD_NETWORK,
+        help=f"MBIT:RTT_MS to pace the cold load over (default {bench.COLD_LOAD_NETWORK.describe()})",
+    )
     bench_cmd.add_argument("--out", help="default: BLINK_HOME/eval/site_bench.json")
     bench_cmd.set_defaults(func=_cmd_bench)
 
