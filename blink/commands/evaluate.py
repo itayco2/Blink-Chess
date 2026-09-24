@@ -26,8 +26,17 @@ def _print_puzzles(summary: dict, agent_name: str) -> None:
         print(f"  {band:>10}: {row['correct']}/{row['n']} = {100 * row['accuracy']:.1f}%")
 
 
+def _missing(path: Path, what: str) -> bool:
+    if path.is_file():
+        return False
+    print(f"blink eval: {what} {path} does not exist")
+    return True
+
+
 def _cmd_puzzles(args: argparse.Namespace) -> int:
     source = puzzles.resolve_set(args.set)
+    if _missing(source, "puzzle set"):
+        return 2
     evaluator = factory.load_evaluator(args.model, device=args.device)
     label = f"{_set_label(args.set)}_{fastchess.NAME_UNSAFE.sub('_', args.model).strip('_')}"
     out_dir = args.out or paths.home() / "eval" / "puzzles"
@@ -43,6 +52,8 @@ def _cmd_puzzles(args: argparse.Namespace) -> int:
 
 def _cmd_signcheck(args: argparse.Namespace) -> int:
     source = (args.data or paths.home() / "data" / "skeleton") / f"{args.split}.bin"
+    if _missing(source, "record file"):
+        return 2
     records = signcheck.read_records(source, limit=args.limit)
     result = {
         "model": args.model,

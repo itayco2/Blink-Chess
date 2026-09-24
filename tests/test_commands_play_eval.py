@@ -127,3 +127,9 @@ def test_a_missing_model_loader_is_one_clear_line_not_a_traceback(monkeypatch, c
     code = cli.main(["gauntlet", "--model", "run:skeleton", "--out", str(tmp_path)])
     assert code == 2
     assert "blink.model.loading" in capsys.readouterr().err
+
+
+def test_missing_inputs_are_one_clear_line_and_exit_2(tmp_path, capsys):
+    assert cli.main(["eval", "puzzles", "--set", str(tmp_path / "none.csv"), "--model", "random"]) == 2
+    assert cli.main(["eval", "signcheck", "--model", "random", "--data", str(tmp_path)]) == 2
+    assert capsys.readouterr().out.count("does not exist") == 2
