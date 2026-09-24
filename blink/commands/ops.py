@@ -14,6 +14,7 @@ Torch is imported only inside the commands that need it, so `blink --help` works
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from blink import paths
@@ -438,6 +439,18 @@ def _refuse(command: str, exc: Exception) -> int:
     return EXIT_REFUSED
 
 
+def _positive(kind: type) -> Callable[[str], int | float]:
+    """An argparse type: an int or float above zero (a zero poll would spin on the public API)."""
+
+    def parse(text: str) -> int | float:
+        value = kind(text)
+        if value <= 0:
+            raise argparse.ArgumentTypeError(f"must be above zero, got {text}")
+        return value
+
+    return parse
+
+
 def cmd_lichess_config(args: argparse.Namespace) -> int:
     from blink.lichess import config
 
@@ -512,7 +525,10 @@ def cmd_lichess_check(args: argparse.Namespace) -> int:
         return _refuse("check", exc)
     _say(monitor.format_verdict(args.bot, verdict))
     if verdict.stop and args.stop:
-        _pause_bot(args.bot, api, args, "stop rule: " + "; ".join(verdict.reasons))
+        try:
+            _pause_bot(args.bot, api, args, "stop rule: " + "; ".join(verdict.reasons))
+        except OSError as exc:
+            return _refuse("check --stop", exc)
     return 1 if verdict.stop else 0
 
 
@@ -521,9 +537,9 @@ def cmd_lichess_pause(args: argparse.Namespace) -> int:
 
     try:
         snapshot.check_name(args.bot)
-    except ValueError as exc:
+        _pause_bot(args.bot, snapshot.default_api(), args, args.reason)
+    except (ValueError, OSError) as exc:
         return _refuse("pause", exc)
-    _pause_bot(args.bot, snapshot.default_api(), args, args.reason)
     return 0
 
 
@@ -538,10 +554,13 @@ def _pause_options(parser: argparse.ArgumentParser) -> None:
     from blink.lichess import pause
 
     parser.add_argument(
-        "--timeout", type=float, default=pause.DEFAULT_TIMEOUT_S, help="seconds to wait for no game"
+        "--timeout",
+        type=_positive(float),
+        default=pause.DEFAULT_TIMEOUT_S,
+        help="seconds to wait for no game",
     )
     parser.add_argument(
-        "--poll", type=float, default=pause.DEFAULT_POLL_S, help="seconds between status reads"
+        "--poll", type=_positive(float), default=pause.DEFAULT_POLL_S, help="seconds between status reads"
     )
     parser.add_argument("--bot-root", default=str(pause.BOT_ROOT), help="the lichess-bot folder to match")
 
@@ -577,11 +596,13 @@ def _register_lichess(sub: argparse._SubParsersAction) -> None:
     snap.add_argument("--bot", required=True)
     snap.add_argument("--no-write", action="store_true", help="print only; write nothing")
     snap.add_argument("--out", default=str(Path("results") / "lichess.json"))
-    snap.add_argument("--max-games", type=int, default=3000, help="newest rated blitz games to export")
+    snap.add_argument(
+        "--max-games", type=_positive(int), default=3000, help="newest rated blitz games to export"
+    )
     snap.set_defaults(func=cmd_lichess_snapshot)
     check = actions.add_parser("check", help="the stop rule over the last 50 games; exits 1 when it fires")
     check.add_argument("--bot", required=True)
-    check.add_argument("--window", type=int, default=50)
+    check.add_argument("--window", type=_positive(int), default=50)
     check.add_argument("--stop", action="store_true", help="pause the bot when the rule fires")
     check.add_argument(
         "--pgn-dir", help="lichess-bot's PGNs, for aborted games (default BLINK_HOME/lichess/pgn)"

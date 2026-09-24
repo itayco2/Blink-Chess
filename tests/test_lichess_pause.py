@@ -280,3 +280,32 @@ def test_a_bad_bot_name_is_refused_before_anything_happens(monkeypatch, tmp_path
     monkeypatch.setenv("BLINK_HOME", str(tmp_path))
     assert cli.main(["lichess", "pause", "--bot", name]) == 2
     assert not (tmp_path / "lichess" / "PAUSED").exists()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["lichess", "pause", "--bot", "BlinkBot", "--poll", "0"],
+        ["lichess", "check", "--bot", "BlinkBot", "--window", "0"],
+        ["lichess", "snapshot", "--bot", "BlinkBot", "--max-games", "-1"],
+    ],
+)
+def test_non_positive_poll_window_or_game_counts_are_refused_by_the_parser(argv):
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(argv)
+    assert exit_info.value.code == 2
+
+
+def test_a_pause_that_cannot_write_its_flag_is_refused_cleanly(monkeypatch, tmp_path, capsys):
+    blocker = tmp_path / "home"
+    blocker.write_text("a file where the BLINK_HOME folder should be", encoding="utf-8")
+    monkeypatch.setenv("BLINK_HOME", str(blocker))
+    monkeypatch.setattr(snapshot, "default_api", lambda: object())
+    never = pause.PauseDeps(
+        is_playing=lambda: pytest.fail("polled without a flag"),
+        find_bot=lambda: pytest.fail("looked for the bot without a flag"),
+        stop_tree=lambda proc: pytest.fail("stopped the bot without a flag"),
+    )
+    monkeypatch.setattr(pause, "default_deps", lambda name, api, root: never)
+    assert cli.main(["lichess", "pause", "--bot", "BlinkBot"]) == 2
+    assert "blink lichess pause" in capsys.readouterr().err
