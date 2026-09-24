@@ -109,4 +109,5 @@ def parameter_report(model: BlinkNet) -> dict[str, int]:
     """Total, GAB-lite and non-GAB parameter counts (README Table 1 shows non-GAB / total)."""
     total = count_parameters(model)
     gab = 0 if model.trunk.gab is None else count_parameters(model.trunk.gab)
-    return {"total": total, "gab": gab, "non_gab": total - gab, "blocks": count_parameters(model.trunk.blocks)}
+    blocks = count_parameters(model.trunk.blocks)
+    return {"total": total, "gab": gab, "non_gab": total - gab, "blocks": blocks}
