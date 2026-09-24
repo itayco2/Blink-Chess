@@ -18,7 +18,7 @@ import math
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import NormalDist
@@ -229,14 +229,16 @@ def strength_fields(row: OrdoRow) -> dict[str, float | int]:
     return {"elo": row.rating, "elo_ci95": row.error, "elo_games": row.played}
 
 
-def tally_players(pgns: Iterable[Path]) -> dict[str, dict[str, float]]:
-    """Games and points per player, from the PGN headers alone (unfinished games are skipped)."""
+def tally_players(pgns: Iterable[Path], without: Collection[str] = ()) -> dict[str, dict[str, float]]:
+    """Games and points per player, from the PGN headers alone (unfinished games are skipped, and so is
+    every game of a player in `without`)."""
     tally: dict[str, dict[str, float]] = {}
     for path in pgns:
         with open(path, encoding="utf-8", errors="replace") as handle:
             while (headers := chess.pgn.read_headers(handle)) is not None:
                 points = RESULT_POINTS.get(headers.get("Result", "*"))
-                if points is None:
+                names = (headers.get("White", "?"), headers.get("Black", "?"))
+                if points is None or any(name in without for name in names):
                     continue
                 for side, gained in zip(("White", "Black"), points, strict=True):
                     entry = tally.setdefault(headers.get(side, "?"), {"games": 0, "points": 0.0})
@@ -257,6 +259,17 @@ def unfittable(tally: dict[str, dict[str, float]], anchors: Sequence[Anchor] = (
         elif entry["points"] == entry["games"]:
             out[player] = "all wins"
     return out
+
+
+def exclusions(pgns: Sequence[Path], anchors: Sequence[Anchor]) -> dict[str, str]:
+    """Unfittable players, found again after each round of removals until none is left: a player whose
+    only draws or wins came against an excluded player is itself unfittable once those games go."""
+    excluded: dict[str, str] = {}
+    while True:
+        found = unfittable(tally_players(pgns, excluded), anchors)
+        if not found:
+            return excluded
+        excluded |= found
 
 
 def anchors_present(anchors: Sequence[Anchor], tally: dict[str, dict[str, float]]) -> tuple[Anchor, ...]:
@@ -307,8 +320,8 @@ def run_ordo(
 ) -> OrdoFit:
     """Fit every player in `pgns` with the anchors that played fixed: the rows, and who was left out."""
     tally = tally_players(pgns)
-    excluded = unfittable(tally, anchors)
-    present = anchors_present(anchors, tally)
+    excluded = exclusions(pgns, anchors)
+    present = anchors_present(anchors, tally_players(pgns, excluded))
     listing, anchors_csv, exclude = _write_inputs(workdir, pgns, present, excluded)
     command = ordo_command(exe or ordo_exe(), listing, anchors_csv, workdir / "ordo", simulations)
     if excluded:

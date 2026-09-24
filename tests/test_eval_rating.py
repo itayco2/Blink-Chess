@@ -136,6 +136,15 @@ def test_all_win_and_all_loss_players_are_reported_not_fitted(tmp_path):
     assert rating.unfittable(tally) == {"Blink-policy": "all losses", "SF1320": "all wins"}
 
 
+def test_a_player_left_with_only_losses_after_an_exclusion_is_excluded_too(tmp_path):
+    pgn = tmp_path / "g.pgn"
+    games = [("Blink-policy", "Random", "1-0")] * 4 + [("Blink-policy", "SF1320", "0-1")] * 4
+    write_games(pgn, games)
+    anchors = (rating.Anchor("SF1320", 1320),)
+    assert rating.unfittable(rating.tally_players([pgn]), anchors) == {"Random": "all losses"}
+    assert rating.exclusions([pgn], anchors) == {"Random": "all losses", "Blink-policy": "all losses"}
+
+
 def test_only_anchors_that_played_are_passed_to_ordo(tmp_path):
     anchors = (rating.Anchor("SF1320", 1320), rating.Anchor("SF1400", 1400))
     kept = rating.anchors_present(anchors, {"SF1320": {"games": 2, "points": 1.0}})
