@@ -1,0 +1,258 @@
+/* The Proof of Work look: paper and ink, one accent, Heebo (OFL-1.1, vendored in fonts/) for both languages. */
+@font-face {
+  font-family: "Heebo";
+  src: url("fonts/Heebo-wght.ttf") format("truetype");
+  font-weight: 100 900;
+  font-display: block;
+}
+
+:root {
+  --paper: #f3efe6;
+  --ink: #141413;
+  --muted: #6b665c;
+  --light: #ebe3d1;
+  --dark: #c9ba9c;
+  --accent: #b4441f;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 1080px;
+  height: 1350px;
+  overflow: hidden;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: "Heebo", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+#stage {
+  position: relative;
+  width: 1080px;
+  height: 1350px;
+}
+
+#film,
+.card {
+  position: absolute;
+  inset: 0;
+}
+
+.row {
+  position: absolute;
+  left: 110px;
+  right: 110px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 40px;
+  padding: 0 96px;
+  text-align: center;
+  background: var(--paper);
+  visibility: hidden;
+}
+
+#hook-text {
+  font-size: 88px;
+  font-weight: 800;
+  line-height: 1.12;
+}
+
+#hook-sub {
+  font-size: 40px;
+  color: var(--muted);
+}
+
+#top {
+  top: 52px;
+  font-size: 30px;
+}
+
+#brand,
+#end-brand {
+  font-weight: 800;
+  letter-spacing: 0.2em;
+}
+
+#end-brand {
+  font-size: 34px;
+}
+
+#frame-label,
+#kind,
+#note,
+#to-play {
+  color: var(--muted);
+}
+
+#line1 {
+  top: 104px;
+  font-size: 36px;
+  font-weight: 600;
+}
+
+#line2 {
+  top: 156px;
+  height: 40px;
+  font-size: 28px;
+}
+
+#found {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+#board {
+  position: absolute;
+  top: 206px;
+  left: 110px;
+  width: 860px;
+  height: 860px;
+  direction: ltr;
+}
+
+.light {
+  fill: var(--light);
+}
+
+.dark {
+  fill: var(--dark);
+}
+
+.frame {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.coord {
+  font-family: "Heebo", sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  fill: var(--muted);
+}
+
+.arrow line {
+  stroke: var(--ink);
+}
+
+.arrow polygon {
+  fill: var(--ink);
+}
+
+.arrow.found line {
+  stroke: var(--accent);
+}
+
+.arrow.found polygon {
+  fill: var(--accent);
+}
+
+.label rect {
+  fill: var(--paper);
+  stroke: var(--ink);
+  stroke-width: 2;
+}
+
+.label text {
+  font-family: "Heebo", sans-serif;
+  font-size: 26px;
+  font-weight: 700;
+  fill: var(--ink);
+}
+
+#milestone {
+  position: absolute;
+  top: 1010px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 34px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+#value {
+  position: absolute;
+  top: 1074px;
+  left: 110px;
+  width: 860px;
+}
+
+#win-text {
+  font-size: 30px;
+  font-weight: 600;
+}
+
+#hist {
+  display: block;
+  width: 860px;
+  height: 132px;
+  margin-top: 8px;
+  direction: ltr;
+}
+
+.bar {
+  fill: var(--ink);
+}
+
+#baseline {
+  stroke: var(--muted);
+  stroke-width: 2;
+}
+
+#win-mark {
+  stroke: var(--accent);
+  stroke-width: 4;
+}
+
+#axis text {
+  font-family: "Heebo", sans-serif;
+  font-size: 22px;
+  fill: var(--muted);
+}
+
+#counter {
+  top: 1272px;
+  font-size: 27px;
+}
+
+#note {
+  position: absolute;
+  top: 1314px;
+  left: 110px;
+  right: 110px;
+  font-size: 21px;
+}
+
+#end-rating {
+  font-size: 60px;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+#end-never {
+  font-size: 42px;
+  line-height: 1.25;
+}
+
+#end-repo {
+  font-size: 38px;
+  font-weight: 600;
+}

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1080, height=1350">
+<title>Blink learning film</title>
+<link rel="stylesheet" href="film.css">
+</head>
+<body>
+<main id="stage">
+  <section id="film">
+    <header id="top" class="row">
+      <span id="brand" dir="ltr">BLINK</span>
+      <span id="frame-label"></span>
+    </header>
+    <div id="line1" class="row"><span id="puzzle"></span><span id="to-play"></span></div>
+    <div id="line2" class="row"><span id="kind"></span><span id="found"></span></div>
+    <svg id="board" viewBox="0 0 800 800" dir="ltr" role="img" aria-label="chess board">
+      <defs id="sprite"></defs>
+      <g id="squares"></g>
+      <g id="coords"></g>
+      <g id="pieces"></g>
+      <g id="arrows"></g>
+      <g id="labels"></g>
+      <rect class="frame" x="1" y="1" width="798" height="798"></rect>
+    </svg>
+    <p id="milestone"></p>
+    <section id="value">
+      <p id="win-text"></p>
+      <svg id="hist" viewBox="0 0 860 132" dir="ltr" role="img" aria-label="value distribution">
+        <g id="bars"></g>
+        <line id="baseline" x1="0" y1="100" x2="860" y2="100"></line>
+        <line id="win-mark" x1="0" y1="0" x2="0" y2="108"></line>
+        <g id="axis"></g>
+      </svg>
+    </section>
+    <footer id="counter" class="row"><span id="step"></span><span id="seen"></span><span id="gpu"></span></footer>
+    <p id="note"></p>
+  </section>
+  <section id="hook" class="card">
+    <p id="hook-text"></p>
+    <p id="hook-sub"></p>
+  </section>
+  <section id="end" class="card">
+    <p id="end-brand" dir="ltr">BLINK</p>
+    <p id="end-rating"></p>
+    <p id="end-never"></p>
+    <p id="end-repo" dir="ltr"></p>
+  </section>
+</main>
+<script src="film.js"></script>
+</body>
+</html>
