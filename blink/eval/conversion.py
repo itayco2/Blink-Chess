@@ -3,10 +3,10 @@
 Conversion: Blink plays the winning side of each screened endgame (blink.eval.endgames) against
 Stockfish 19 at st=0.1, and the metric is the share it wins by checkmate within 100 of its own moves
 (200 plies from the start position; a longer game is stopped and counts as not converted, as does any
-draw). Games are played in process: SF19 gets `go movetime 100` with the whole game, and Blink needs no
-clock because its compute never depends on time (N4). "Rules off" (F16) is Blink's network with only R1:
-no mate-now shortcut (R2), no rule-draw handling (R3) and no tie-break (R4); it still goes through the
-EvalBudget, so the no-search audit covers it too.
+draw). Games are played in process on fastchess's clocks (blink.eval.match): SF19 gets `go movetime 100`
+with the whole game and loses on time over 0.2 s, Blink over 1.5 s. "Rules off" (F16) is Blink's network
+with only R1: no mate-now shortcut (R2), no rule-draw handling (R3) and no tie-break (R4); it still goes
+through the EvalBudget, so the no-search audit covers it too.
 
 The epsilon rule (the R4 tie window, section 1): each epsilon in {0, 1/256, 1/128} converts the 200 dev
 endgames; the highest conversion rate wins (a tie goes to the smallest epsilon). A winner other than 0
@@ -94,6 +94,7 @@ def play_conversion(
 ) -> ConversionResult:
     """Blink on the winning side of every endgame, in order; the PGN gets one game per endgame."""
     pgn.parent.mkdir(parents=True, exist_ok=True)
+    match.warm_up(blink, opponent)
     out = []
     for endgame in endgames:
         blink_white = endgame.blink_color == chess.WHITE

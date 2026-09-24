@@ -12,8 +12,10 @@ for the Elo column, E2 for the diagnostics).
 
 Where the games are played: the fastchess blocks are the ones against clocked UCI_Elo anchors (E0's SF
 self-check, E5 and DM-9M's E7 gauntlet), at concurrency 5 as in the plan. Every other match runs in process
-with one model load (one CUDA context, PF58): Blink needs no clock there because its compute never depends
-on time (N4), and Stockfish gets `go movetime 100` (st=0.1) or `go nodes N` with the whole game.
+with one model load (one CUDA context, PF58), on fastchess's clocks (blink.eval.match): a Blink or DM-9M
+move over 1.5 s (st=1 timemargin=500) and a Stockfish move over 0.2 s at `go movetime 100` lose on time;
+Stockfish at `go nodes N` has no clock. Blink's compute never depends on time (N4), so the clock only
+checks that no move ran long.
 A `games` override makes every match that long (and every SPRT cap), for smoke runs.
 
 Blink plays every block after E2b with the epsilon E2b chose (results/epsilon.json), in process and under
@@ -276,6 +278,13 @@ def gate_failures(state: dict) -> list[str]:
     failures = []
     for block_id in BLOCK_ORDER:
         report = state.get(block_id) or {}
+        for engine, counts in (report.get("forfeits") or {}).items():
+            on_time, other = counts.get("time_forfeits", 0), counts.get("forfeits", 0)
+            if engine.startswith("Blink") and on_time + other:
+                failures.append(
+                    f"{block_id}: {engine} lost {on_time} games on time and {other} to an illegal move or "
+                    "a crash (Blink forfeits must be 0)"
+                )
         for player, audit in (report.get("nosearch") or {}).items():
             if not audit["compliant"]:
                 failures.append(
