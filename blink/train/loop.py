@@ -196,7 +196,7 @@ def _train_step(run: _Run, data: StepData, lr: float) -> tuple[torch.Tensor, ...
     out = step.accumulate(run.model, data, run.device, run.micro, cfg.alpha, cfg.tau, cfg.lambda_v)
     grad_norm = torch.nn.utils.clip_grad_norm_(run.model.parameters(), run.clip.limit())
     if run.clip.measuring:
-        message = run.clip.observe(run.step, grad_norm.item())
+        message = run.clip.observe(run.step, grad_norm.detach())  # read back once, at the warmup's end
         if message:
             run.log(message)
     run.optimizer.step()

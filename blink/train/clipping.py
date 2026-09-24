@@ -6,10 +6,13 @@ fraction >= 20%). With clip_norm = "auto" the warmup steps are left unclipped wh
 norms are recorded, and at the end of the warmup the clip is fixed at 2 x their 95th percentile. The
 recorded norms and the chosen clip travel in every checkpoint, so a resume inside the warmup picks
 up the same measurement.
+
+The warmup norms stay where they were computed (0-dim device tensors) until the warmup ends: reading
+each one back with .item() forced a host sync every step, which cost S 37% of its rate (PF60).
 """
 
 import math
-from typing import Any
+from typing import Any, SupportsFloat
 
 import numpy as np
 
@@ -23,7 +26,7 @@ class GradClip:
         self.auto = setting == AUTO
         self.warmup_steps = warmup_steps
         self.value: float | None = None if self.auto else float(setting)
-        self.norms: list[float] = []
+        self.norms: list[SupportsFloat] = []  # floats, or device scalars read back at the warmup's end
 
     @property
     def measuring(self) -> bool:
@@ -33,13 +36,14 @@ class GradClip:
         """The max norm to pass to clip_grad_norm_ (infinite while the warmup is measured)."""
         return math.inf if self.value is None else self.value
 
-    def observe(self, step: int, norm: float) -> str | None:
-        """Record a warmup step's norm; returns the log line when the clip gets fixed."""
+    def observe(self, step: int, norm: SupportsFloat) -> str | None:
+        """Record a warmup norm (read back only when the warmup ends); the log line once the clip is fixed."""
         if not self.measuring or step >= self.warmup_steps:
             return None
-        self.norms.append(float(norm))
+        self.norms.append(norm)
         if step < self.warmup_steps - 1:
             return None
+        self.norms = self._floats()
         norms = np.asarray(self.norms)
         p95 = float(np.percentile(norms, PERCENTILE))
         self.value = MULTIPLIER * p95
@@ -48,8 +52,11 @@ class GradClip:
             f"(median {np.median(norms):.4g}, p95 {p95:.4g}, max {norms.max():.4g})"
         )
 
+    def _floats(self) -> list[float]:
+        return [float(n) for n in self.norms]
+
     def state_dict(self) -> dict[str, Any]:
-        return {"value": self.value, "norms": list(self.norms)}
+        return {"value": self.value, "norms": self._floats()}
 
     def load_state_dict(self, state: dict[str, Any], step: int = 0) -> None:
         if not self.auto:

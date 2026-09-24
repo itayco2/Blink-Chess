@@ -46,6 +46,38 @@ def test_the_clip_state_survives_a_resume_mid_warmup():
     assert resumed.value == clip.value == pytest.approx(2 * np.percentile([3.0, 5.0, 7.0, 9.0], 95))
 
 
+class _DeviceNorm:
+    """A stand-in for a 0-dim CUDA tensor: reading it on the host (float) is a device sync."""
+
+    reads = 0
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def __float__(self) -> float:
+        _DeviceNorm.reads += 1
+        return self.value
+
+
+def test_warmup_norms_stay_on_the_device_until_the_warmup_ends():
+    """PF60: reading every warmup norm back (.item()) synced each step and cost 37% of S's rate."""
+    _DeviceNorm.reads = 0
+    clip = GradClip("auto", warmup_steps=50)
+    for step in range(49):
+        assert clip.observe(step, _DeviceNorm(float(step + 1))) is None
+    assert _DeviceNorm.reads == 0 and clip.measuring
+    assert clip.observe(49, _DeviceNorm(50.0)).startswith("clip auto: ")
+    assert _DeviceNorm.reads == 50
+    assert clip.value == pytest.approx(2 * np.percentile(np.arange(1, 51), 95))
+    assert clip.state_dict()["norms"] == [float(n) for n in range(1, 51)]
+
+
+def test_a_mid_warmup_checkpoint_stores_plain_floats():
+    clip = GradClip("auto", warmup_steps=10)
+    clip.observe(0, _DeviceNorm(3.0))
+    assert clip.state_dict() == {"value": None, "norms": [3.0]}
+
+
 def test_a_resume_past_warmup_without_a_measured_clip_is_refused():
     clip = GradClip("auto", warmup_steps=4)
     with pytest.raises(ValueError, match="warmup"):
