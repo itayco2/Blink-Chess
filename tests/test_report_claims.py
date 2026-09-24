@@ -102,9 +102,19 @@ def test_the_claim_refuses_missing_results_files(tmp_path):
         claims.fill_claim(tmp_path)
 
 
-def test_the_claim_refuses_a_kwh_that_covers_too_few_gpu_hours(tmp_path):
-    write_bundle(tmp_path, compute_obj={**compute(), "kwh_coverage": 0.9})
-    with pytest.raises(claims.ClaimRefused, match="kWh"):
+def test_a_partly_metered_project_states_how_many_gpu_hours_its_kwh_covers(tmp_path):
+    """Runs before the power logger existed have no kWh: the claim says what the number covers."""
+    partial = {**compute(), "gpu_board_kwh": 29.1, "kwh_gpu_hours": 124.6, "kwh_coverage": 124.6 / 181.2}
+    write_bundle(tmp_path, compute_obj=partial)
+    text = claims.fill_claim(tmp_path)
+    assert "one home RTX 3070 (29.1 GPU-board kWh, measured on 124.6 of the 181.2 GPU-hours)." in text
+    write_bundle(tmp_path)
+    assert "one home RTX 3070 (39.8 GPU-board kWh)." in claims.fill_claim(tmp_path)
+
+
+def test_the_claim_refuses_a_flagship_whose_energy_was_not_measured(tmp_path):
+    write_bundle(tmp_path, compute_obj={**compute(), "flagship_kwh": None, "kwh_coverage": 0.3})
+    with pytest.raises(claims.ClaimRefused, match="flagship"):
         claims.fill_claim(tmp_path)
 
 

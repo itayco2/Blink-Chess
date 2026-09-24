@@ -11,7 +11,8 @@ billed once, to the parent. Runs trained on the CPU, folders without a metrics.j
 checkpoint name gives no step are listed as skipped.
 
 Energy (GPU board only, never the whole PC). When every window carries gpu_power_w (the mean board
-power over that window), energy is the sum of seconds times watts. Otherwise the run's nvidia-smi log
+power over that window, which the trainer logs from NVML's energy counter: blink.train.power), energy
+is the sum of seconds times watts. Otherwise the run's nvidia-smi log
 (runs/NAME/nvidia-smi.csv, `nvidia-smi --query-gpu=timestamp,power.draw --format=csv -l 10`) is
 integrated with the trapezoid rule, skipping gaps longer than 120 s. A run with neither has no kWh,
 and kwh_coverage says what share of the GPU-hours the published kWh covers.

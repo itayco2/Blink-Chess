@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = REPO_ROOT / "results"
 MODES = ("policy", "value")
 LANGS = ("en", "he")
-KWH_MIN_COVERAGE = 0.99  # the published kWh must cover at least 99% of the published GPU-hours
+KWH_FULL_COVERAGE = 0.99  # at or above this share of the GPU-hours, the kWh is stated without a qualifier
 
 HOOKS = {
     ("policy", "en"): "Blink: a chess AI that never searches.",
@@ -39,7 +39,7 @@ CLAIM = (
     "and it uses no opening book, tablebase or engine at play time. It was trained by supervised learning "
     "on {positions} positions drawn from the 409,710,113-position Lichess evaluation database (CC0). "
     "Training took {flagship_h} GPU-hours for the flagship run ({total_h} for the whole project), with no "
-    "cloud GPU and no paid data: one home RTX 3070 ({kwh} GPU-board kWh). Against pinned Stockfish 19 "
+    "cloud GPU and no paid data: one home RTX 3070 ({energy}). Against pinned Stockfish 19 "
     "UCI_Elo anchors it rates {elo} +/- {elo_ci} (95% CI, {games} games{extrapolated}). That is a "
     "CCRL-Blitz-anchored engine scale, not FIDE, and puts it about level with Stockfish 19 at {nodes} nodes "
     "per move. It solves {puzzles}% (Wilson 95% {puzzles_lo} to {puzzles_hi}) of DeepMind's 10K puzzles; no "
@@ -112,18 +112,29 @@ def _strength_blanks(row: rs.StrengthRow, missing: list[str]) -> dict:
     }
 
 
+def _energy(kwh: float, covered_h: float | None, total_h: float, coverage: float) -> str:
+    """'39.8 GPU-board kWh', or, when earlier runs were unmetered, the GPU-hours the kWh covers."""
+    if coverage >= KWH_FULL_COVERAGE or covered_h is None:
+        return f"{kwh:.1f} GPU-board kWh"
+    return f"{kwh:.1f} GPU-board kWh, measured on {covered_h:.1f} of the {total_h:.1f} GPU-hours"
+
+
 def _compute_blanks(compute: dict, missing: list[str]) -> dict:
+    """The flagship's energy must be measured; the project's kWh is published with what it covers."""
     keys = ("flagship_gpu_hours", "total_gpu_hours", "gpu_board_kwh")
     got = {k: _need(missing, f"compute.json: {k}", compute.get(k)) for k in keys}
+    if compute.get("flagship_kwh") is None:
+        missing.append("compute.json: flagship_kwh (the flagship run's GPU-board energy was not measured)")
     coverage = compute.get("kwh_coverage") or 0.0
-    if got["gpu_board_kwh"] is not None and coverage < KWH_MIN_COVERAGE:
-        missing.append(f"compute.json: the kWh covers {100 * coverage:.1f}% of the GPU-hours (needs 99%)")
-    if None in got.values():
+    covered_h = compute.get("kwh_gpu_hours")
+    if coverage < KWH_FULL_COVERAGE:
+        _need(missing, "compute.json: kwh_gpu_hours (the GPU-hours the kWh covers)", covered_h)
+    if None in got.values() or compute.get("flagship_kwh") is None:
         return {}
     return {
         "flagship_h": f"{got['flagship_gpu_hours']:.1f}",
         "total_h": f"{got['total_gpu_hours']:.1f}",
-        "kwh": f"{got['gpu_board_kwh']:.1f}",
+        "energy": _energy(got["gpu_board_kwh"], covered_h, got["total_gpu_hours"], coverage),
     }
 
 
