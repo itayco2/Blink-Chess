@@ -12,6 +12,7 @@ row's cost so the overhead can be measured.
 """
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from blink.train import telemetry, vaa
@@ -27,16 +28,16 @@ def _val_metrics(run) -> dict[str, Any]:
     return {**raw, **{f"ema_{k}": v for k, v in ema.items() if k != "n"}}
 
 
-def _vaa_metrics(run, label: str | None) -> dict[str, Any]:
+def _vaa_metrics(run, label: str | None, tick: Callable[[], None] | None) -> dict[str, Any]:
     if run.probe is None:
         return {}
     chunk = min(vaa.VAA_CHUNK, EVAL_ROWS_PER_TRAIN_ROW * run.micro)  # no-grad rows cost far less VRAM
     subset = run.cfg.vaa_subset
     if label is None:
-        ema = vaa.evaluate_vaa(run.ema.module, run.probe.subset(subset), run.device, chunk)
+        ema = vaa.evaluate_vaa(run.ema.module, run.probe.subset(subset), run.device, chunk, tick=tick)
         return {"ema_vaa": ema["vaa"], "vaa_n": ema["n"], "vaa_set": "subset"}
-    raw = vaa.evaluate_vaa(run.model, run.probe, run.device, chunk)
-    ema = vaa.evaluate_vaa(run.ema.module, run.probe, run.device, chunk, subset=subset)
+    raw = vaa.evaluate_vaa(run.model, run.probe, run.device, chunk, tick=tick)
+    ema = vaa.evaluate_vaa(run.ema.module, run.probe, run.device, chunk, subset=subset, tick=tick)
     return {
         "vaa": raw["vaa"],
         "ema_vaa": ema["vaa"],
@@ -82,10 +83,12 @@ def _describe(record: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def evaluate(run, label: str | None = None) -> None:
-    """Write one evals row for the current step (nothing when the run has neither val nor probe)."""
+def evaluate(run, label: str | None = None, tick: Callable[[], None] | None = None) -> None:
+    """Write one evals row for the current step (nothing when the run has neither val nor probe).
+
+    `tick` runs between VAA chunks (the trainer beats its heartbeat there during a long check)."""
     started = time.perf_counter()
-    metrics = {**_val_metrics(run), **_vaa_metrics(run, label)}
+    metrics = {**_val_metrics(run), **_vaa_metrics(run, label, tick)}
     if not metrics:
         return
     record = {"step": run.step, "samples": run.step * run.cfg.batch_size, **metrics}

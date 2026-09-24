@@ -228,3 +228,12 @@ def test_the_5_percent_check_compares_subset_with_subset_when_the_reference_row_
     assert "subset" in same_roots["check_rule"]
     other_size = vaa.apply_check("5%", 0.45, [], ref, 2_000_000, sigma=0.01, subset=(1000, 0.37))
     assert "vaa_check_failed" not in other_size and "full" in other_size["check_rule"]
+
+
+def test_scoring_ticks_after_every_chunk_so_a_long_check_keeps_the_heartbeat_fresh():
+    """A full-valprobe check is minutes of forward passes; the supervisor kills a 60 s stale heartbeat."""
+    probe = vaa.probe_from_roots(fixture_records()[:10])
+    ticks = []
+    model = BlinkNet(tiny_model_config())
+    vaa.evaluate_vaa(model, probe, torch.device("cpu"), chunk=7, tick=lambda: ticks.append(1))
+    assert len(ticks) == -(-len(probe.child_board) // 7)

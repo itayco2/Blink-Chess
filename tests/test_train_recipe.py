@@ -137,6 +137,20 @@ def test_subset_evals_score_the_ema_and_the_checks_score_raw_and_ema_on_the_full
     assert [step_of(p) for p in list_checkpoints(run_dir)] == [2, 10, 12, 20, 40]
 
 
+def test_the_heartbeat_keeps_beating_inside_an_eval(tmp_path, monkeypatch):
+    beats = []
+    real = loop.heartbeat.beat_once
+    monkeypatch.setattr(
+        loop.heartbeat, "beat_once", lambda path, payload: beats.append(payload) or real(path, payload)
+    )
+    probe = vaa.probe_from_roots(fixture_records()[:40])
+    cfg = tiny_train_config(steps=4, warmup_steps=1, eval_every=4, heartbeat_s=0.0, batch_size=16)
+    loop.train(cfg, _spec(tmp_path / "run"), _repeat(fixture_records()[:16]), **_quiet(probe=probe))
+    during = [b for b in beats if b.get("phase") == "eval"]
+    assert during and all(b["state"] == "running" for b in during)
+    assert {b["step"] for b in during} >= {0, 4}
+
+
 def _reference_run(runs_root, name: str, ema_vaa: float) -> None:
     ref = runs_root / name
     ref.mkdir(parents=True)

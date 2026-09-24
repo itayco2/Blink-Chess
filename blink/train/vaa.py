@@ -14,6 +14,7 @@ child_board, child_move, child_is_best and child_terminal (0 none, 1 checkmate, 
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -128,9 +129,16 @@ def probe_from_roots(records: np.ndarray) -> Probe:
 
 @torch.no_grad()
 def child_win_probability(
-    model: torch.nn.Module, boards: np.ndarray, device: torch.device, chunk: int = VAA_CHUNK
+    model: torch.nn.Module,
+    boards: np.ndarray,
+    device: torch.device,
+    chunk: int = VAA_CHUNK,
+    tick: Callable[[], None] | None = None,
 ) -> np.ndarray:
-    """W for each packed board, for its own side to move, in bounded bf16 chunks on CUDA."""
+    """W for each packed board, for its own side to move, in bounded bf16 chunks on CUDA.
+
+    `tick` runs after every chunk: a full-valprobe check is minutes of forward passes, and the
+    trainer uses it to keep its heartbeat fresh for the supervisor's 60 s staleness rule."""
     centers = torch.as_tensor(value.BIN_CENTERS, dtype=torch.float32, device=device)
     codes = encode.unpack(boards)
     parts = []
@@ -139,6 +147,8 @@ def child_win_probability(
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
             _, logits = model(tokens)
         parts.append(torch.softmax(logits.float(), dim=-1) @ centers)
+        if tick is not None:
+            tick()
     return torch.cat(parts).double().cpu().numpy() if parts else np.zeros(0)
 
 
@@ -167,13 +177,14 @@ def evaluate_vaa(
     device: torch.device,
     chunk: int = VAA_CHUNK,
     subset: int | None = None,
+    tick: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """{"vaa", "n"} over the probe; with `subset`, also {"vaa_subset", "n_subset"} over its first roots,
     read off the same forward passes (the subset's children are the first children of the probe)."""
     was_training = model.training
     model.eval()
     try:
-        w_child = child_win_probability(model, probe.child_board, device, chunk)
+        w_child = child_win_probability(model, probe.child_board, device, chunk, tick)
     finally:
         model.train(was_training)
     values = move_values(w_child, probe)

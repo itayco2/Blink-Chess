@@ -188,6 +188,16 @@ def _beat(run: _Run, state: str, **extra: Any) -> None:
     run.last_beat = time.monotonic()
 
 
+def _beat_if_due(run: _Run, **extra: Any) -> None:
+    if time.monotonic() - run.last_beat >= run.cfg.heartbeat_s:
+        _beat(run, "running", **extra)
+
+
+def _evaluate(run: _Run, label: str | None = None) -> None:
+    """An evals row; the heartbeat keeps beating between VAA chunks (a full check takes minutes)."""
+    evals.evaluate(run, label, tick=lambda: _beat_if_due(run, phase="eval"))
+
+
 def _train_step(run: _Run, data: StepData, lr: float) -> tuple[torch.Tensor, ...]:
     cfg = run.cfg
     for group in run.optimizer.param_groups:
@@ -262,15 +272,14 @@ def _after_step(run: _Run, window: telemetry.MetricWindow, lr: float, end: int) 
         _write_metrics(run, window, lr)
     label = run.checks.get(run.step)
     if run.step % cfg.eval_every == 0 or run.step == end or label is not None:
-        evals.evaluate(run, label)
+        _evaluate(run, label)
         window.mark("eval")
     if run.step in run.film_plan:
         _save_frame(run, run.film_plan[run.step])
     if _checkpoint_due(run, end):
         _write_checkpoint(run)
         window.mark("ckpt")
-    if time.monotonic() - run.last_beat >= cfg.heartbeat_s:
-        _beat(run, "running")
+    _beat_if_due(run)
 
 
 def _run_steps(run: _Run, source: BatchSource, end: int) -> None:
@@ -330,7 +339,7 @@ def train(
     _beat(run, "running")
     try:
         if run.step == 0:
-            evals.evaluate(run)
+            _evaluate(run)
             if 0 in run.film_plan:
                 _save_frame(run, "init")
         _run_steps(run, source, end)
