@@ -127,3 +127,19 @@ def test_the_token_is_gone_before_any_other_startup_work(monkeypatch):
     monkeypatch.setattr(uci, "limit_cpu", lambda *args: seen.append("LICHESS_BOT_TOKEN" in os.environ))
     run(["--random"])
     assert seen == [False]
+
+
+def test_a_pinned_model_without_its_loader_is_refused_cleanly(monkeypatch, weights, capsys):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_loader(name, *args, **kwargs):
+        if name == "blink.model.loading":
+            raise ImportError("No module named 'torch'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(uci.factory, "check_available", lambda selector: None)
+    monkeypatch.setattr(builtins, "__import__", no_loader)
+    code, out = run(["--model", str(weights), "--sha", SHA])
+    assert code == 2 and out == "" and "torch" in capsys.readouterr().err

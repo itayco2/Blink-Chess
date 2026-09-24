@@ -231,8 +231,10 @@ def pinned_weights_problem(selector: str, expected: str) -> str | None:
     """Why the engine must not start under `--sha expected`, or None when its weights hash to it."""
     if selector in factory.RANDOM_SELECTORS or registry.is_dm(selector):
         return f"--sha pins a Blink weights file, and {selector!r} is not one"
-    from blink.model.loading import resolve_selector  # torch: loaded here only when a model is pinned
-
+    try:
+        from blink.model.loading import resolve_selector  # torch: loaded here only when a model is pinned
+    except ImportError as exc:
+        return f"the model loader cannot be imported ({exc})"
     try:
         path, _ = resolve_selector(selector)
     except (ValueError, FileNotFoundError) as exc:
