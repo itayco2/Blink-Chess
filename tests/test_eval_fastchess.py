@@ -94,6 +94,7 @@ def test_the_fastchess_summary_is_parsed():
         "draws": 1,
         "points": 0.5,
         "elo": "Elo: -inf +/- nan, nElo: -inf +/- nan",
+        "penta": [1, 0, 0, 0, 0],
     }
     assert fastchess.parse_summary("nothing here") is None
 

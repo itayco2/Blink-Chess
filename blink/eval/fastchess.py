@@ -38,6 +38,7 @@ SUMMARY = re.compile(
     r"Games: (\d+), Wins: (\d+), Losses: (\d+), Draws: (\d+), Points: ([\d.]+)",
 )
 ELO = re.compile(r"^Elo: .*$", re.MULTILINE)
+PTNML = re.compile(r"Ptnml\(0-2\): \[(\d+), (\d+), (\d+), (\d+), (\d+)\]")
 NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -181,6 +182,7 @@ def parse_summary(output: str) -> dict | None:
         return None
     games, wins, losses, draws, points = found[-1]
     elo = ELO.findall(text)
+    penta = PTNML.findall(text)
     return {
         "games": int(games),
         "wins": int(wins),
@@ -188,6 +190,7 @@ def parse_summary(output: str) -> dict | None:
         "draws": int(draws),
         "points": float(points),
         "elo": elo[-1] if elo else None,
+        "penta": [int(c) for c in penta[-1]] if penta else None,
     }
 
 
@@ -198,11 +201,12 @@ def _engine_env() -> dict[str, str]:
     return {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (root, inherited) if p), "PYTHONUTF8": "1"}
 
 
-def _book_start(book: str, pairs: int) -> tuple[Path, int]:
+def _book_start(book: str, pairs: int, skip: int = 0) -> tuple[Path, int]:
+    """The book file and the first opening to play, after `skip` openings of the slice."""
     path, first, last = books.resolve(book)
-    if last is not None and first + pairs - 1 > last:
-        raise ValueError(f"{pairs} openings run past the end of the {book} slice ({first}-{last})")
-    return path, first
+    if last is not None and first + skip + pairs - 1 > last:
+        raise ValueError(f"{skip + pairs} openings run past the end of the {book} slice ({first}-{last})")
+    return path, first + skip
 
 
 def run_fastchess(command: Sequence[str], log: Path) -> int:
@@ -247,12 +251,24 @@ def prepare_gauntlet(
     anchor_spec = stockfish_anchor(anchor, stockfish_exe())
     if tc:
         blink_spec, anchor_spec = with_tc(blink_spec, tc), with_tc(anchor_spec, tc)
-    book_path, start = _book_start(book, games // 2)
+    return prepare_pair(blink_spec, anchor_spec, games, book, out_dir, concurrency, max_moves)
+
+
+def prepare_pair(
+    first: EngineSpec,
+    second: EngineSpec,
+    games: int,
+    book: str,
+    out_dir: Path,
+    concurrency: int = 5,
+    max_moves: int = MAX_MOVES,
+    skip: int = 0,
+) -> Gauntlet:
+    """Any two engines on a book slice (after `skip` of its openings), with a fresh timestamped PGN."""
+    book_path, start = _book_start(book, games // 2, skip)
     book_path, out_dir = book_path.resolve(), out_dir.resolve()
-    pgn = out_dir / f"{blink_spec.name}_vs_{anchor_spec.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn"
-    return Gauntlet(
-        blink_spec, anchor_spec, GauntletPlan(games, book_path, start, concurrency, pgn, max_moves)
-    )
+    pgn = out_dir / f"{first.name}_vs_{second.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn"
+    return Gauntlet(first, second, GauntletPlan(games, book_path, start, concurrency, pgn, max_moves))
 
 
 def execute(gauntlet: Gauntlet) -> dict:
@@ -275,6 +291,25 @@ def execute(gauntlet: Gauntlet) -> dict:
         "audit": audit,
         "blink_forfeits": audit["forfeits"].get(gauntlet.blink.name, {}),
         "anchor_forfeits": audit["forfeits"].get(gauntlet.anchor.name, {}),
+    }
+
+
+def match_report(report: dict) -> dict:
+    """A fastchess report in the shape every P8 block reads: the first engine's W/D/L, score, pentanomial."""
+    summary = report.get("summary") or {}
+    games = summary.get("games", 0)
+    return {
+        "a": report["blink"],
+        "b": report["anchor"],
+        "games": games,
+        "wins": summary.get("wins", 0),
+        "draws": summary.get("draws", 0),
+        "losses": summary.get("losses", 0),
+        "score": summary.get("points", 0.0) / games if games else None,
+        "penta": summary.get("penta"),
+        "pgn": report["pgn"],
+        "returncode": report["returncode"],
+        "audit": {k: report["audit"][k] for k in ("decisions", "compliant", "forfeits", "adjudications")},
     }
 
 

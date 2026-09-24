@@ -307,3 +307,44 @@ def stockfish_agent(
         options |= {"UCI_LimitStrength": True, "UCI_Elo": elo}
         return EngineAgent(f"SF{elo}", exe, movetime=movetime, options=options)
     return EngineAgent("SF19", exe, movetime=movetime, options=options)
+
+
+def match_report(summary: dict, pgn: Path) -> dict:
+    """An in-process summary in the shape fastchess.match_report gives: A's W/D/L, score, pentanomial."""
+    return {
+        "a": summary["a"],
+        "b": summary["b"],
+        "games": summary["games"],
+        "wins": summary["a_wins"],
+        "draws": summary["draws"],
+        "losses": summary["a_losses"],
+        "score": summary["a_score"] if summary["games"] else None,
+        "penta": summary["penta"],
+        "pgn": str(pgn),
+        "illegal_moves": summary["illegal_moves"],
+        "crashes": summary["crashes"],
+        "adjudications": summary["adjudications"],
+    }
+
+
+def merge_reports(first: dict, second: dict) -> dict:
+    """Two reports of the same pairing (more games at a bracketing rung) as one."""
+    if (first["a"], first["b"]) != (second["a"], second["b"]):
+        raise ValueError(f"cannot merge {first['a']} vs {first['b']} with {second['a']} vs {second['b']}")
+    games = first["games"] + second["games"]
+    wins, draws = first["wins"] + second["wins"], first["draws"] + second["draws"]
+    penta = None
+    if first.get("penta") and second.get("penta"):
+        penta = [x + y for x, y in zip(first["penta"], second["penta"], strict=True)]
+    pgns = [p for r in (first, second) for p in (r.get("pgns") or [r["pgn"]])]
+    return {
+        **first,
+        "games": games,
+        "wins": wins,
+        "draws": draws,
+        "losses": first["losses"] + second["losses"],
+        "score": (wins + draws / 2) / games if games else None,
+        "penta": penta,
+        "pgn": pgns[-1],
+        "pgns": pgns,
+    }
