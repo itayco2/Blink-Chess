@@ -155,7 +155,9 @@ def cmd_film_extract(args: argparse.Namespace) -> int:
 
     run_dir = _run_dir(args.run)
     position = extract.film_position(Path(args.bands), args.puzzle)
-    rungs = [extract.parse_milestone(text) for text in args.milestone]
+    rungs = extract.ladder_rungs(
+        Path(args.results), [extract.parse_milestone(text) for text in args.milestone]
+    )
     film = extract.extract(
         run_dir,
         position,
@@ -208,7 +210,13 @@ def _register_film(sub: argparse._SubParsersAction) -> None:
     )
     extract.add_argument("--device", default="cpu")
     extract.add_argument(
-        "--milestone", action="append", default=[], help="LABEL=TOP1, a ladder rung to flash when passed"
+        "--milestone",
+        action="append",
+        default=[],
+        help="LABEL=AGENT: flash LABEL when the run passes that ladder row's measured VAA (else top-1)",
+    )
+    extract.add_argument(
+        "--results", default=str(RESULTS_DIR), help="results/ holding the ladder's results.json"
     )
     extract.add_argument("--out")
     extract.set_defaults(func=_film_errors(cmd_film_extract))

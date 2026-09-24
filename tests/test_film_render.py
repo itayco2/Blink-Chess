@@ -280,3 +280,13 @@ def test_film_commands_refuse_a_run_name_that_is_a_path(capsys):
 
     assert cli.main(["film", "render", "--lang", "en", "--run", "../outside", "--mode", "policy"]) == 1
     assert "bad run name" in capsys.readouterr().err
+
+
+def test_milestones_on_screen_say_what_they_were_measured_on():
+    milestone = {"label": "passed the MLP", "step": 250, "metric": "vaa", "threshold": 0.2}
+    film = {**_film(), "milestones": [milestone]}
+    assert render.build_payload(film, "en", "value", None)["milestones"] == [
+        {"label": "passed the MLP (on the val probe)", "step": 250}
+    ]
+    he = render.build_payload(film, "he", "value", None)["milestones"][0]
+    assert he["step"] == 250 and he["label"].startswith("passed the MLP (") and "val probe" not in he["label"]

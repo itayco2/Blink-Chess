@@ -259,21 +259,66 @@ def test_the_checkpoint_at_the_planned_last_step_is_labelled_the_final_weights(t
     assert kinds == ["init", "ema", "final"]
 
 
-def test_milestones_mark_the_first_eval_step_whose_ema_top1_passes_each_rung(tmp_path):
-    run = _film_run(tmp_path, [0, 250, 500])
-    rows = [{"step": 0, "ema_top1": 0.05}, {"step": 250, "ema_top1": 0.21}, {"step": 500, "ema_top1": 0.30}]
+def _ladder_results(tmp_path):
+    """The fixture results plus diagnostics for two ladder rungs: VAA for the MLP, policy top-1 for random."""
+    from test_report_fixtures import diagnostics_rows, results, write_bundle
+
+    from blink.report import results_schema as rs
+
+    rungs = (rs.DiagnosticsRow("MLP", "value", vaa=0.2), rs.DiagnosticsRow("random", "policy", top1=0.03))
+    return write_bundle(tmp_path / "results", results_obj=results(diagnostics=diagnostics_rows() + rungs))
+
+
+def _evals(run, rows):
     (run / "evals.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-    rungs = [("passed the MLP", 0.2), ("passed a random mover", 0.03), ("never reached", 0.9)]
-    assert extract.find_milestones(run, rungs) == [
-        {"label": "passed a random mover", "step": 0},
-        {"label": "passed the MLP", "step": 250},
+
+
+def test_milestone_thresholds_come_from_results_json_not_the_command_line(tmp_path):
+    """A rung's threshold is its measured VAA (else policy top-1) in results.json, compared with the same
+    metric of the run's EMA in evals.jsonl, and film.json names both sources."""
+    run = _film_run(tmp_path, [0, 250, 500])
+    _evals(
+        run,
+        [
+            {"step": 0, "ema_top1": 0.05, "ema_vaa": 0.01},
+            {"step": 250, "ema_top1": 0.10, "ema_vaa": 0.21},
+            {"step": 500, "ema_top1": 0.30, "ema_vaa": 0.30},
+        ],
+    )
+    rungs = extract.ladder_rungs(
+        _ladder_results(tmp_path), [("passed the MLP", "MLP"), ("beat random", "random")]
+    )
+    assert [(r["agent"], r["metric"], r["threshold"]) for r in rungs] == [
+        ("MLP", "vaa", 0.2),
+        ("random", "top1", 0.03),
     ]
+    found = extract.find_milestones(run, rungs)
+    assert [(m["label"], m["step"]) for m in found] == [("beat random", 0), ("passed the MLP", 250)]
+    mlp = found[1]
+    assert mlp["threshold_source"] == "results.json diagnostics (MLP, value): vaa = 0.2"
+    assert mlp["compared_with"] == "ema_vaa in the run's evals.jsonl (its val probe)"
     position = _position(tmp_path)
     film_json = extract.extract(run, position, _blocklist(tmp_path, position), expect=None, milestones=rungs)
     assert [m["step"] for m in film_json["milestones"]] == [0, 250]
-    with pytest.raises(extract.FilmError, match="LABEL=TOP1"):
+
+
+def test_a_milestone_must_name_a_ladder_row_with_a_measured_metric(tmp_path):
+    folder = _ladder_results(tmp_path)
+    with pytest.raises(extract.FilmError, match="not a ladder row"):
+        extract.ladder_rungs(folder, [("passed DeepMind", "DM-9M")])
+    with pytest.raises(extract.FilmError, match="not a ladder row"):
+        extract.ladder_rungs(folder, [("typo", "MLPP")])
+    no_diag = _ladder_results(tmp_path / "b")
+    data = json.loads((no_diag / "results.json").read_text(encoding="utf-8"))
+    data["diagnostics"] = [d for d in data["diagnostics"] if d["agent"] != "MLP"]
+    (no_diag / "results.json").write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(extract.FilmError, match="diagnostics"):
+        extract.ladder_rungs(no_diag, [("passed the MLP", "MLP")])
+    with pytest.raises(extract.FilmError, match="results.json"):
+        extract.ladder_rungs(tmp_path / "none", [("passed the MLP", "MLP")])
+    with pytest.raises(extract.FilmError, match="LABEL=AGENT"):
         extract.parse_milestone("no equals sign")
-    assert extract.parse_milestone("passed the MLP=0.21") == ("passed the MLP", 0.21)
+    assert extract.parse_milestone("passed the MLP=MLP") == ("passed the MLP", "MLP")
 
 
 def test_gpu_hours_of_a_branched_run_start_at_its_branch_step(tmp_path):
@@ -341,3 +386,24 @@ def test_a_run_that_names_no_pack_is_refused_unless_one_is_given(tmp_path):
     (run / "config.json").write_text(json.dumps({"data": {"source": "raw"}}), encoding="utf-8")
     with pytest.raises(extract.FilmError, match="raw"):
         extract.extract(run, position, path, expect=None)
+
+
+def test_blink_film_extract_reads_milestones_from_results_and_refuses_an_unknown_rung(
+    tmp_path, monkeypatch, capsys
+):
+    from blink import cli
+
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    run = _film_run(tmp_path, [0, 250, 500], name="demo")
+    _evals(run, [{"step": 250, "ema_vaa": 0.25}])
+    position = _position(tmp_path)
+    args = ["film", "extract", "--run", "demo", "--puzzle", "mX46Y", "--bands", str(_bands(tmp_path))]
+    args += ["--blocklist", str(_blocklist(tmp_path, position)), "--pad-to", "21"]
+    args += ["--results", str(_ladder_results(tmp_path))]
+    assert cli.main([*args, "--milestone", "passed the MLP=MLPP"]) == 1
+    assert "not a ladder row" in capsys.readouterr().err
+    assert cli.main([*args, "--milestone", "passed the MLP=MLP"]) == 0
+    written = extract.read_film(tmp_path / "film" / "demo" / "film.json")
+    assert [(m["label"], m["step"], m["metric"]) for m in written["milestones"]] == [
+        ("passed the MLP", 250, "vaa")
+    ]

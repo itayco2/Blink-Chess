@@ -89,6 +89,7 @@ TEXTS = {
         "accruing": "Lichess blitz rating: still accruing",
         "run": "run {run}",
         "padded": "{padded} of {total} frames are interpolated between {measured} measured ones",
+        "milestone": "{label} (on the val probe)",
     },
     "he": {
         "sub": "צפו בה לומדת עמדה אחת.",
@@ -110,6 +111,7 @@ TEXTS = {
         "accruing": "דירוג הבליץ ב-Lichess עוד נצבר",
         "run": "ריצה {run}",
         "padded": "{padded} מתוך {total} השלבים הם אינטרפולציה בין {measured} שלבים מדודים",
+        "milestone": "{label} (בסט האימות)",
     },
 }
 
@@ -172,6 +174,14 @@ def _note(lang: str, film: dict) -> str:
     return f"{run}. {padded}"
 
 
+def _milestones(lang: str, film: dict) -> list[dict]:
+    """Ladder milestones for the page: the step, and the label with the set it was measured on."""
+    template = TEXTS[lang]["milestone"]
+    return [
+        {"label": template.format(label=m["label"]), "step": m["step"]} for m in film.get("milestones", [])
+    ]
+
+
 def build_payload(film: dict, lang: str, mode: str, lichess: rs.LichessSnapshot | None) -> dict:
     require_proof(film)
     text = TEXTS[lang]
@@ -179,11 +189,11 @@ def build_payload(film: dict, lang: str, mode: str, lichess: rs.LichessSnapshot 
         "lang": lang,
         "dir": "rtl" if lang == "he" else "ltr",
         "hook": hook_for(lang, mode),
-        "text": {k: v for k, v in text.items() if k not in ("rating", "accruing")},
+        "text": {k: v for k, v in text.items() if k not in ("rating", "accruing", "milestone")},
         "timing": {"hook": HOOK_S, "morph": MORPH_S, "hold": HOLD_S, "end": END_S},
         "position": film["position"],
         "frames": [{k: frame[k] for k in FRAME_KEYS} for frame in film["frames"]],
-        "milestones": film.get("milestones", []),
+        "milestones": _milestones(lang, film),
         "note": _note(lang, film),
         "end": {"rating": _rating_line(lang, lichess), "never_seen": text["never_seen"], "repo": REPO_URL},
     }
