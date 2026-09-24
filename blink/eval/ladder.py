@@ -191,10 +191,8 @@ def _ladder_agent(name: str, ctx, state: dict):
 
     if name == "random":
         return agents.RandomAgent()
-    if name == "material":
-        return agents.MaterialAgent()
-    if name in ("linear", "mlp"):
-        return baseline_agent(name, device=ctx.device)
+    if name in ("material", "linear", "mlp"):
+        return baseline_agent(name, device=ctx.device)  # the P3 rungs, one agent wrapper and its rules
     if name.startswith("SF"):
         return match.stockfish_agent(fastchess.stockfish_exe(), elo=int(name[2:]))
     return match.blink_agents(name, ctx.device)[shipped_mode(ctx, state)]

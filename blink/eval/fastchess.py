@@ -254,6 +254,15 @@ def prepare_gauntlet(
     return prepare_pair(blink_spec, anchor_spec, games, book, out_dir, concurrency, max_moves)
 
 
+def _unique(path: Path) -> Path:
+    """`path`, or path-2, path-3, ... when it exists: two runs never share a PGN."""
+    candidate, number = path, 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}-{number}{path.suffix}")
+        number += 1
+    return candidate
+
+
 def prepare_pair(
     first: EngineSpec,
     second: EngineSpec,
@@ -267,7 +276,7 @@ def prepare_pair(
     """Any two engines on a book slice (after `skip` of its openings), with a fresh timestamped PGN."""
     book_path, start = _book_start(book, games // 2, skip)
     book_path, out_dir = book_path.resolve(), out_dir.resolve()
-    pgn = out_dir / f"{first.name}_vs_{second.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn"
+    pgn = _unique(out_dir / f"{first.name}_vs_{second.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn")
     return Gauntlet(first, second, GauntletPlan(games, book_path, start, concurrency, pgn, max_moves))
 
 

@@ -95,3 +95,15 @@ def test_stockfish_in_process_mates_in_one_and_quits(tmp_path):
     with match.stockfish_agent(SF, nodes=2000) as engine:
         assert engine.choose(board, game="g1").move == chess.Move.from_uci("d1d8")
     assert engine._engine is None
+
+
+def test_two_matches_never_append_to_one_pgn(tmp_path):
+    first = match.unique_path(tmp_path / "a.pgn")
+    first.write_text("x", encoding="utf-8")
+    second = match.unique_path(tmp_path / "a.pgn")
+    second.write_text("y", encoding="utf-8")
+    assert (first.name, second.name, match.unique_path(tmp_path / "a.pgn").name) == (
+        "a.pgn",
+        "a-2.pgn",
+        "a-3.pgn",
+    )

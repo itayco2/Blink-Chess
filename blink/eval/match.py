@@ -379,6 +379,15 @@ def blink_agents(selector: str, device: str, epsilon: float | None = None) -> di
     }
 
 
+def unique_path(path: Path) -> Path:
+    """`path`, or path-2, path-3, ... when it exists: two matches never append to one PGN."""
+    candidate, number = Path(path), 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}-{number}{path.suffix}")
+        number += 1
+    return candidate
+
+
 def play_inprocess(
     a: Agent,
     b: Agent,
@@ -393,7 +402,7 @@ def play_inprocess(
 
     openings = openings_for(book, (games + 1) // 2, skip)
     tag = f"{NAME_SAFE.sub('_', a.name)}_vs_{NAME_SAFE.sub('_', b.name)}"
-    pgn = Path(out_dir) / f"{tag}_{time.strftime('%Y%m%d-%H%M%S')}_{skip}.pgn"
+    pgn = unique_path(Path(out_dir) / f"{tag}_{time.strftime('%Y%m%d-%H%M%S')}_{skip}.pgn")
     summary = run_match(a, b, openings, games, pgn, max_plies=max_plies)
     pgn.with_suffix(".json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return match_report(summary, pgn)
