@@ -60,6 +60,26 @@ def test_probe_counts_castling_best_moves_written_king_takes_rook():
     assert counts.alt_dropped == 0
 
 
+CHESS960_FEN = "rbnnqrk1/p5pp/1p3p2/2pbp3/8/2PNBP2/PP1P1NPP/RB2QK1R w KQ -"  # king on f1, rooks a1 h1
+CHESS960_CASTLE = _line(CHESS960_FEN, [{"cp": -95, "line": "f1h1"}])
+CHESS960_QUIET = _line(CHESS960_FEN, [{"cp": -95, "line": "b2b3"}])
+ROOK_OFF_CORNER_FEN = "2r1k1r1/2q2p1p/3b1P1Q/4p2B/1p1p2P1/pP1R4/P1P1R2P/1K6 b q -"  # the q rook is on c8
+ROOK_OFF_CORNER = _line(ROOK_OFF_CORNER_FEN, [{"cp": 24, "line": "c7c6"}])
+
+
+def test_probe_names_chess960_castles_among_illegal_best_moves():
+    """Real rows: the eval DB holds Chess960 positions whose best move castles king-takes-rook."""
+    counts = probe.probe_lines([CHESS960_CASTLE, BAD_LINES[3]], check_every=1)
+    assert counts.rejects == {"illegal_best_move": 2}
+    assert counts.chess960_castles == 1
+
+
+def test_probe_counts_castling_rights_a_standard_board_drops():
+    counts = probe.probe_lines([CHESS960_QUIET, ROOK_OFF_CORNER, *CASTLING_LINES], check_every=1)
+    assert counts.parsed == 4
+    assert counts.nonstandard_castling == 2
+
+
 def test_merging_counts_adds_every_field():
     a = probe.probe_lines(CASTLING_LINES, check_every=1)
     b = probe.probe_lines([MATE_LINE, BAD_LINES[0]], check_every=1)

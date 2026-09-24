@@ -32,9 +32,16 @@ OWN_KING = encode.OWN + chess.KING - 1
 CASTLING_MOVES = np.array(
     [moves.FROM_TO.index((chess.E1, chess.G1)), moves.FROM_TO.index((chess.E1, chess.C1))], dtype=np.uint16
 )
-SIDE_TO_MOVE = re.compile(rb'"fen"\s*:\s*"\S+ ([wb])')
+FEN_FIELDS = re.compile(rb'"fen"\s*:\s*"(\S+) ([wb]) (\S+)')  # placement, side to move, castling
+# What each standard castling right needs on the board; anything else is Chess960 (X-FEN or Shredder).
+STANDARD_RIGHTS = {
+    "K": ((chess.E1, "K"), (chess.H1, "R")),
+    "Q": ((chess.E1, "K"), (chess.A1, "R")),
+    "k": ((chess.E8, "k"), (chess.H8, "r")),
+    "q": ((chess.E8, "k"), (chess.A8, "r")),
+}
 COUNT_FIELDS = ("lines", "parsed", "checked", "legal", "canonical", "castling", "mate", "shallow_nonmate")
-COUNT_FIELDS += ("white", "black", "alt_dropped")
+COUNT_FIELDS += ("white", "black", "alt_dropped", "chess960_castles", "nonstandard_castling")
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,8 @@ class ProbeCounts:
     white: int = 0
     black: int = 0
     alt_dropped: int = 0  # PVs 2..5 whose first move the parser could not use
+    chess960_castles: int = 0  # illegal_best_move rejects that are legal Chess960 castles
+    nonstandard_castling: int = 0  # parsed lines whose castling rights a standard board drops
     rejects: Mapping[str, int] = field(default_factory=dict)
     errors: Mapping[str, int] = field(default_factory=dict)
     error_samples: tuple[str, ...] = ()
@@ -81,6 +90,42 @@ def _check(line: bytes, rec: np.void) -> tuple[bool, bool]:
     return decoded in board.legal_moves, decoded == canonical
 
 
+def _is_chess960_castle(line: bytes) -> bool:
+    """True when a rejected best move is a legal Chess960 castle (king takes own rook)."""
+    try:
+        row = orjson.loads(line)
+        board = chess.Board(row["fen"] + " 0 1", chess960=True)
+        move = chess.Move.from_uci(row["evals"][0]["pvs"][0]["line"].split()[0])
+    except (orjson.JSONDecodeError, KeyError, IndexError, ValueError):
+        return False
+    return move in board.legal_moves and board.is_castling(move)
+
+
+def _squares(placement: str) -> dict[int, str]:
+    squares = {}
+    for rank_from_top, row in enumerate(placement.split("/")):
+        file = 0
+        for char in row:
+            if char.isdigit():
+                file += int(char)
+            else:
+                squares[chess.square(file, 7 - rank_from_top)] = char
+                file += 1
+    return squares
+
+
+def _nonstandard_castling(placement: str, rights: str) -> bool:
+    """True when a castling right needs a king or rook that is not on its standard square."""
+    if rights == "-":
+        return False
+    squares = _squares(placement)
+    for right in rights:
+        needs = STANDARD_RIGHTS.get(right)
+        if needs is None or any(squares.get(square) != piece for square, piece in needs):
+            return True
+    return False
+
+
 def _record_stats(records: np.ndarray) -> dict:
     codes = encode.unpack(records["board"])
     is_mate = records["cp"] == CP_NONE
@@ -99,12 +144,13 @@ def _record_stats(records: np.ndarray) -> dict:
 def probe_lines(lines: list[bytes], check_every: int = DEFAULT_CHECK_EVERY) -> ProbeCounts:
     """Probe statistics for some lines. Module-level, so spawned workers can run it."""
     recs, rejects, errors, samples = [], Counter(), Counter(), []
-    checked = legal = canonical = white = 0
+    checked = legal = canonical = white = chess960_castles = nonstandard = 0
     for i, line in enumerate(lines):
         try:
             rec = parse.parse_line(line)
         except parse.Rejected as exc:
             rejects[exc.reason] += 1
+            chess960_castles += exc.reason == "illegal_best_move" and _is_chess960_castle(line)
             continue
         except Exception as exc:  # noqa: BLE001 - counted and reported; the probe then fails
             errors[type(exc).__name__] += 1
@@ -112,8 +158,10 @@ def probe_lines(lines: list[bytes], check_every: int = DEFAULT_CHECK_EVERY) -> P
                 samples.append(f"{type(exc).__name__}: {exc} | {line[:160].decode('utf-8', 'replace')}")
             continue
         recs.append(rec)
-        side = SIDE_TO_MOVE.search(line)
-        white += bool(side and side.group(1) == b"w")
+        fen = FEN_FIELDS.search(line)
+        if fen:
+            white += fen.group(2) == b"w"
+            nonstandard += _nonstandard_castling(fen.group(1).decode("ascii"), fen.group(3).decode("ascii"))
         if i % check_every == 0:
             ok_legal, ok_canonical = _check(line, rec)
             checked, legal, canonical = checked + 1, legal + ok_legal, canonical + ok_canonical
@@ -126,6 +174,8 @@ def probe_lines(lines: list[bytes], check_every: int = DEFAULT_CHECK_EVERY) -> P
         canonical=canonical,
         white=white,
         black=len(recs) - white,
+        chess960_castles=chess960_castles,
+        nonstandard_castling=nonstandard,
         rejects=dict(rejects),
         errors=dict(errors),
         error_samples=tuple(samples),
@@ -153,6 +203,8 @@ def build_report(counts: ProbeCounts, source: Path, reader: zst.FrameReader, tim
         "parsed": counts.parsed,
         "rejects": dict(sorted(counts.rejects.items())),
         "reject_share": _share(lines - counts.parsed, lines),
+        "illegal_best_moves_that_are_chess960_castles": counts.chess960_castles,
+        "parsed_with_chess960_castling_rights": counts.nonstandard_castling,
         "errors": dict(sorted(counts.errors.items())),
         "error_samples": list(counts.error_samples),
         "best_move_legal_pct": _pct(counts.parsed, reached_move),
@@ -213,6 +265,9 @@ def summary(report: dict) -> str:
             f"source      {report['source']['path']} ({report['frames']} frames, end: {report['end']})",
             f"lines       {report['lines']:,} parsed {report['parsed']:,} rejects {report['rejects']}",
             f"errors      {report['errors'] or 'none'}",
+            f"chess960    {report['illegal_best_moves_that_are_chess960_castles']:,} rejected best moves are "
+            f"Chess960 castles; {report['parsed_with_chess960_castling_rights']:,} parsed lines have "
+            f"castling rights a standard board drops",
             f"legal       best move {report['best_move_legal_pct']:.4f}%; sample of {check['checked']:,}: "
             f"legal {check['legal_pct']:.3f}%, canonical uci {check['canonical_uci_pct']:.3f}%",
             f"castling    {report['castling_best_move_pct']:.3f}% of best moves",
