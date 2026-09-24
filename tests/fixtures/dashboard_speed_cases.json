@@ -1,0 +1,1650 @@
+{
+ "about": "The dashboard's speed WARN (plan P4): train-phase samples/s more than 30% below the median of the last 10 train rows that were not slow, for 5 minutes of wall time. blink.train.status.speed_check (tests/test_status.py) and live.html's speedCheck (site/tests/dashboard.test.mjs) must both give every expect below.",
+ "cases": [
+  {
+   "name": "steady rows never warn",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1010.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 990.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1005.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1010.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 990.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1005.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1010.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 990.0,
+     "time": 300.0,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 1005.0,
+     "time": 330.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": false,
+    "reference": 1005.0,
+    "rate": 1005.0,
+    "slow_s": 0.0
+   }
+  },
+  {
+   "name": "one slow row does not warn",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 500.0,
+     "time": 300.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": false,
+    "reference": 1000.0,
+    "rate": 500.0,
+    "slow_s": 0.0
+   }
+  },
+  {
+   "name": "slow for four minutes is not yet a warning",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 600.0,
+     "time": 300.0,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 600.0,
+     "time": 330.0,
+     "phase": "train"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 600.0,
+     "time": 360.0,
+     "phase": "train"
+    },
+    {
+     "step": 700,
+     "samples_per_s": 600.0,
+     "time": 390.0,
+     "phase": "train"
+    },
+    {
+     "step": 750,
+     "samples_per_s": 600.0,
+     "time": 420.0,
+     "phase": "train"
+    },
+    {
+     "step": 800,
+     "samples_per_s": 600.0,
+     "time": 450.0,
+     "phase": "train"
+    },
+    {
+     "step": 850,
+     "samples_per_s": 600.0,
+     "time": 480.0,
+     "phase": "train"
+    },
+    {
+     "step": 900,
+     "samples_per_s": 600.0,
+     "time": 510.0,
+     "phase": "train"
+    },
+    {
+     "step": 950,
+     "samples_per_s": 600.0,
+     "time": 540.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": false,
+    "reference": 1000.0,
+    "rate": 600.0,
+    "slow_s": 240.0
+   }
+  },
+  {
+   "name": "slow for five minutes of wall time warns",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 600.0,
+     "time": 300.0,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 600.0,
+     "time": 330.0,
+     "phase": "train"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 600.0,
+     "time": 360.0,
+     "phase": "train"
+    },
+    {
+     "step": 700,
+     "samples_per_s": 600.0,
+     "time": 390.0,
+     "phase": "train"
+    },
+    {
+     "step": 750,
+     "samples_per_s": 600.0,
+     "time": 420.0,
+     "phase": "train"
+    },
+    {
+     "step": 800,
+     "samples_per_s": 600.0,
+     "time": 450.0,
+     "phase": "train"
+    },
+    {
+     "step": 850,
+     "samples_per_s": 600.0,
+     "time": 480.0,
+     "phase": "train"
+    },
+    {
+     "step": 900,
+     "samples_per_s": 600.0,
+     "time": 510.0,
+     "phase": "train"
+    },
+    {
+     "step": 950,
+     "samples_per_s": 600.0,
+     "time": 540.0,
+     "phase": "train"
+    },
+    {
+     "step": 1000,
+     "samples_per_s": 600.0,
+     "time": 570.0,
+     "phase": "train"
+    },
+    {
+     "step": 1050,
+     "samples_per_s": 600.0,
+     "time": 600.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": true,
+    "reference": 1000.0,
+    "rate": 600.0,
+    "slow_s": 300.0
+   }
+  },
+  {
+   "name": "few slow rows spanning five minutes still warn",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 600.0,
+     "time": 300,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 600.0,
+     "time": 450,
+     "phase": "train"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 600.0,
+     "time": 600,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": true,
+    "reference": 1000.0,
+    "rate": 600.0,
+    "slow_s": 300.0
+   }
+  },
+  {
+   "name": "eval and checkpoint windows never count",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 100.0,
+     "time": 300.0,
+     "phase": "eval"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 50.0,
+     "time": 330.0,
+     "phase": "eval"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 100.0,
+     "time": 360.0,
+     "phase": "eval"
+    },
+    {
+     "step": 700,
+     "samples_per_s": 50.0,
+     "time": 390.0,
+     "phase": "eval"
+    },
+    {
+     "step": 750,
+     "samples_per_s": 100.0,
+     "time": 420.0,
+     "phase": "eval"
+    },
+    {
+     "step": 800,
+     "samples_per_s": 50.0,
+     "time": 450.0,
+     "phase": "eval"
+    },
+    {
+     "step": 850,
+     "samples_per_s": 100.0,
+     "time": 480.0,
+     "phase": "eval"
+    },
+    {
+     "step": 900,
+     "samples_per_s": 50.0,
+     "time": 510.0,
+     "phase": "eval"
+    },
+    {
+     "step": 950,
+     "samples_per_s": 100.0,
+     "time": 540.0,
+     "phase": "eval"
+    },
+    {
+     "step": 1000,
+     "samples_per_s": 50.0,
+     "time": 570.0,
+     "phase": "eval"
+    },
+    {
+     "step": 1050,
+     "samples_per_s": 100.0,
+     "time": 600.0,
+     "phase": "eval"
+    },
+    {
+     "step": 1100,
+     "samples_per_s": 50.0,
+     "time": 630.0,
+     "phase": "eval"
+    },
+    {
+     "step": 1150,
+     "samples_per_s": 80.0,
+     "time": 700.0,
+     "phase": "ckpt"
+    },
+    {
+     "step": 1200,
+     "samples_per_s": 80.0,
+     "time": 730.0,
+     "phase": "ckpt"
+    },
+    {
+     "step": 1250,
+     "samples_per_s": 80.0,
+     "time": 760.0,
+     "phase": "ckpt"
+    },
+    {
+     "step": 1300,
+     "samples_per_s": 80.0,
+     "time": 790.0,
+     "phase": "ckpt"
+    },
+    {
+     "step": 1350,
+     "samples_per_s": 990.0,
+     "time": 900.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": false,
+    "reference": 1000.0,
+    "rate": 990.0,
+    "slow_s": 0.0
+   }
+  },
+  {
+   "name": "an eval window inside a slow stretch neither ends nor starts it",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 600.0,
+     "time": 300.0,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 100.0,
+     "time": 450.0,
+     "phase": "eval"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 600.0,
+     "time": 620.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": true,
+    "reference": 1000.0,
+    "rate": 600.0,
+    "slow_s": 320.0
+   }
+  },
+  {
+   "name": "a fast row ends the slow stretch",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 600.0,
+     "time": 300.0,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 600.0,
+     "time": 330.0,
+     "phase": "train"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 600.0,
+     "time": 360.0,
+     "phase": "train"
+    },
+    {
+     "step": 700,
+     "samples_per_s": 600.0,
+     "time": 390.0,
+     "phase": "train"
+    },
+    {
+     "step": 750,
+     "samples_per_s": 600.0,
+     "time": 420.0,
+     "phase": "train"
+    },
+    {
+     "step": 800,
+     "samples_per_s": 600.0,
+     "time": 450.0,
+     "phase": "train"
+    },
+    {
+     "step": 850,
+     "samples_per_s": 600.0,
+     "time": 480.0,
+     "phase": "train"
+    },
+    {
+     "step": 900,
+     "samples_per_s": 950.0,
+     "time": 510.0,
+     "phase": "train"
+    },
+    {
+     "step": 950,
+     "samples_per_s": 600.0,
+     "time": 540.0,
+     "phase": "train"
+    },
+    {
+     "step": 1000,
+     "samples_per_s": 600.0,
+     "time": 570.0,
+     "phase": "train"
+    },
+    {
+     "step": 1050,
+     "samples_per_s": 600.0,
+     "time": 600.0,
+     "phase": "train"
+    },
+    {
+     "step": 1100,
+     "samples_per_s": 600.0,
+     "time": 630.0,
+     "phase": "train"
+    },
+    {
+     "step": 1150,
+     "samples_per_s": 600.0,
+     "time": 660.0,
+     "phase": "train"
+    },
+    {
+     "step": 1200,
+     "samples_per_s": 600.0,
+     "time": 690.0,
+     "phase": "train"
+    },
+    {
+     "step": 1250,
+     "samples_per_s": 600.0,
+     "time": 720.0,
+     "phase": "train"
+    },
+    {
+     "step": 1300,
+     "samples_per_s": 600.0,
+     "time": 750.0,
+     "phase": "train"
+    },
+    {
+     "step": 1350,
+     "samples_per_s": 600.0,
+     "time": 780.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": false,
+    "reference": 1000.0,
+    "rate": 600.0,
+    "slow_s": 240.0
+   }
+  },
+  {
+   "name": "a long spill keeps warning because slow rows never lower the reference",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 500.0,
+     "time": 300.0,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 500.0,
+     "time": 330.0,
+     "phase": "train"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 500.0,
+     "time": 360.0,
+     "phase": "train"
+    },
+    {
+     "step": 700,
+     "samples_per_s": 500.0,
+     "time": 390.0,
+     "phase": "train"
+    },
+    {
+     "step": 750,
+     "samples_per_s": 500.0,
+     "time": 420.0,
+     "phase": "train"
+    },
+    {
+     "step": 800,
+     "samples_per_s": 500.0,
+     "time": 450.0,
+     "phase": "train"
+    },
+    {
+     "step": 850,
+     "samples_per_s": 500.0,
+     "time": 480.0,
+     "phase": "train"
+    },
+    {
+     "step": 900,
+     "samples_per_s": 500.0,
+     "time": 510.0,
+     "phase": "train"
+    },
+    {
+     "step": 950,
+     "samples_per_s": 500.0,
+     "time": 540.0,
+     "phase": "train"
+    },
+    {
+     "step": 1000,
+     "samples_per_s": 500.0,
+     "time": 570.0,
+     "phase": "train"
+    },
+    {
+     "step": 1050,
+     "samples_per_s": 500.0,
+     "time": 600.0,
+     "phase": "train"
+    },
+    {
+     "step": 1100,
+     "samples_per_s": 500.0,
+     "time": 630.0,
+     "phase": "train"
+    },
+    {
+     "step": 1150,
+     "samples_per_s": 500.0,
+     "time": 660.0,
+     "phase": "train"
+    },
+    {
+     "step": 1200,
+     "samples_per_s": 500.0,
+     "time": 690.0,
+     "phase": "train"
+    },
+    {
+     "step": 1250,
+     "samples_per_s": 500.0,
+     "time": 720.0,
+     "phase": "train"
+    },
+    {
+     "step": 1300,
+     "samples_per_s": 500.0,
+     "time": 750.0,
+     "phase": "train"
+    },
+    {
+     "step": 1350,
+     "samples_per_s": 500.0,
+     "time": 780.0,
+     "phase": "train"
+    },
+    {
+     "step": 1400,
+     "samples_per_s": 500.0,
+     "time": 810.0,
+     "phase": "train"
+    },
+    {
+     "step": 1450,
+     "samples_per_s": 500.0,
+     "time": 840.0,
+     "phase": "train"
+    },
+    {
+     "step": 1500,
+     "samples_per_s": 500.0,
+     "time": 870.0,
+     "phase": "train"
+    },
+    {
+     "step": 1550,
+     "samples_per_s": 500.0,
+     "time": 900.0,
+     "phase": "train"
+    },
+    {
+     "step": 1600,
+     "samples_per_s": 500.0,
+     "time": 930.0,
+     "phase": "train"
+    },
+    {
+     "step": 1650,
+     "samples_per_s": 500.0,
+     "time": 960.0,
+     "phase": "train"
+    },
+    {
+     "step": 1700,
+     "samples_per_s": 500.0,
+     "time": 990.0,
+     "phase": "train"
+    },
+    {
+     "step": 1750,
+     "samples_per_s": 500.0,
+     "time": 1020.0,
+     "phase": "train"
+    },
+    {
+     "step": 1800,
+     "samples_per_s": 500.0,
+     "time": 1050.0,
+     "phase": "train"
+    },
+    {
+     "step": 1850,
+     "samples_per_s": 500.0,
+     "time": 1080.0,
+     "phase": "train"
+    },
+    {
+     "step": 1900,
+     "samples_per_s": 500.0,
+     "time": 1110.0,
+     "phase": "train"
+    },
+    {
+     "step": 1950,
+     "samples_per_s": 500.0,
+     "time": 1140.0,
+     "phase": "train"
+    },
+    {
+     "step": 2000,
+     "samples_per_s": 500.0,
+     "time": 1170.0,
+     "phase": "train"
+    },
+    {
+     "step": 2050,
+     "samples_per_s": 500.0,
+     "time": 1200.0,
+     "phase": "train"
+    },
+    {
+     "step": 2100,
+     "samples_per_s": 500.0,
+     "time": 1230.0,
+     "phase": "train"
+    },
+    {
+     "step": 2150,
+     "samples_per_s": 500.0,
+     "time": 1260.0,
+     "phase": "train"
+    },
+    {
+     "step": 2200,
+     "samples_per_s": 500.0,
+     "time": 1290.0,
+     "phase": "train"
+    },
+    {
+     "step": 2250,
+     "samples_per_s": 500.0,
+     "time": 1320.0,
+     "phase": "train"
+    },
+    {
+     "step": 2300,
+     "samples_per_s": 500.0,
+     "time": 1350.0,
+     "phase": "train"
+    },
+    {
+     "step": 2350,
+     "samples_per_s": 500.0,
+     "time": 1380.0,
+     "phase": "train"
+    },
+    {
+     "step": 2400,
+     "samples_per_s": 500.0,
+     "time": 1410.0,
+     "phase": "train"
+    },
+    {
+     "step": 2450,
+     "samples_per_s": 500.0,
+     "time": 1440.0,
+     "phase": "train"
+    },
+    {
+     "step": 2500,
+     "samples_per_s": 500.0,
+     "time": 1470.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": true,
+    "reference": 1000.0,
+    "rate": 500.0,
+    "slow_s": 1170.0
+   }
+  },
+  {
+   "name": "rows without a phase count as train rows",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0
+    },
+    {
+     "step": 100,
+     "samples_per_s": 1000.0,
+     "time": 30.0
+    },
+    {
+     "step": 150,
+     "samples_per_s": 1000.0,
+     "time": 60.0
+    },
+    {
+     "step": 200,
+     "samples_per_s": 1000.0,
+     "time": 90.0
+    },
+    {
+     "step": 250,
+     "samples_per_s": 1000.0,
+     "time": 120.0
+    },
+    {
+     "step": 300,
+     "samples_per_s": 1000.0,
+     "time": 150.0
+    },
+    {
+     "step": 350,
+     "samples_per_s": 1000.0,
+     "time": 180.0
+    },
+    {
+     "step": 400,
+     "samples_per_s": 1000.0,
+     "time": 210.0
+    },
+    {
+     "step": 450,
+     "samples_per_s": 1000.0,
+     "time": 240.0
+    },
+    {
+     "step": 500,
+     "samples_per_s": 1000.0,
+     "time": 270.0
+    },
+    {
+     "step": 550,
+     "samples_per_s": 600.0,
+     "time": 300.0
+    },
+    {
+     "step": 600,
+     "samples_per_s": 600.0,
+     "time": 330.0
+    },
+    {
+     "step": 650,
+     "samples_per_s": 600.0,
+     "time": 360.0
+    },
+    {
+     "step": 700,
+     "samples_per_s": 600.0,
+     "time": 390.0
+    },
+    {
+     "step": 750,
+     "samples_per_s": 600.0,
+     "time": 420.0
+    },
+    {
+     "step": 800,
+     "samples_per_s": 600.0,
+     "time": 450.0
+    },
+    {
+     "step": 850,
+     "samples_per_s": 600.0,
+     "time": 480.0
+    },
+    {
+     "step": 900,
+     "samples_per_s": 600.0,
+     "time": 510.0
+    },
+    {
+     "step": 950,
+     "samples_per_s": 600.0,
+     "time": 540.0
+    },
+    {
+     "step": 1000,
+     "samples_per_s": 600.0,
+     "time": 570.0
+    },
+    {
+     "step": 1050,
+     "samples_per_s": 600.0,
+     "time": 600.0
+    }
+   ],
+   "expect": {
+    "warn": true,
+    "reference": 1000.0,
+    "rate": 600.0,
+    "slow_s": 300.0
+   }
+  },
+  {
+   "name": "a gradual drift is followed, not warned",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "time": 0.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "samples_per_s": 980.0,
+     "time": 30.0,
+     "phase": "train"
+    },
+    {
+     "step": 150,
+     "samples_per_s": 960.3999999999999,
+     "time": 60.0,
+     "phase": "train"
+    },
+    {
+     "step": 200,
+     "samples_per_s": 941.1919999999999,
+     "time": 90.0,
+     "phase": "train"
+    },
+    {
+     "step": 250,
+     "samples_per_s": 922.3681599999999,
+     "time": 120.0,
+     "phase": "train"
+    },
+    {
+     "step": 300,
+     "samples_per_s": 903.9207968,
+     "time": 150.0,
+     "phase": "train"
+    },
+    {
+     "step": 350,
+     "samples_per_s": 885.8423808639999,
+     "time": 180.0,
+     "phase": "train"
+    },
+    {
+     "step": 400,
+     "samples_per_s": 868.1255332467199,
+     "time": 210.0,
+     "phase": "train"
+    },
+    {
+     "step": 450,
+     "samples_per_s": 850.7630225817854,
+     "time": 240.0,
+     "phase": "train"
+    },
+    {
+     "step": 500,
+     "samples_per_s": 833.7477621301498,
+     "time": 270.0,
+     "phase": "train"
+    },
+    {
+     "step": 550,
+     "samples_per_s": 817.0728068875467,
+     "time": 300.0,
+     "phase": "train"
+    },
+    {
+     "step": 600,
+     "samples_per_s": 800.7313507497959,
+     "time": 330.0,
+     "phase": "train"
+    },
+    {
+     "step": 650,
+     "samples_per_s": 784.7167237347999,
+     "time": 360.0,
+     "phase": "train"
+    },
+    {
+     "step": 700,
+     "samples_per_s": 769.0223892601038,
+     "time": 390.0,
+     "phase": "train"
+    },
+    {
+     "step": 750,
+     "samples_per_s": 753.6419414749017,
+     "time": 420.0,
+     "phase": "train"
+    },
+    {
+     "step": 800,
+     "samples_per_s": 738.5691026454037,
+     "time": 450.0,
+     "phase": "train"
+    },
+    {
+     "step": 850,
+     "samples_per_s": 723.7977205924956,
+     "time": 480.0,
+     "phase": "train"
+    },
+    {
+     "step": 900,
+     "samples_per_s": 709.3217661806457,
+     "time": 510.0,
+     "phase": "train"
+    },
+    {
+     "step": 950,
+     "samples_per_s": 695.1353308570327,
+     "time": 540.0,
+     "phase": "train"
+    },
+    {
+     "step": 1000,
+     "samples_per_s": 681.2326242398921,
+     "time": 570.0,
+     "phase": "train"
+    },
+    {
+     "step": 1050,
+     "samples_per_s": 667.6079717550942,
+     "time": 600.0,
+     "phase": "train"
+    },
+    {
+     "step": 1100,
+     "samples_per_s": 654.2558123199923,
+     "time": 630.0,
+     "phase": "train"
+    },
+    {
+     "step": 1150,
+     "samples_per_s": 641.1706960735925,
+     "time": 660.0,
+     "phase": "train"
+    },
+    {
+     "step": 1200,
+     "samples_per_s": 628.3472821521207,
+     "time": 690.0,
+     "phase": "train"
+    },
+    {
+     "step": 1250,
+     "samples_per_s": 615.7803365090782,
+     "time": 720.0,
+     "phase": "train"
+    },
+    {
+     "step": 1300,
+     "samples_per_s": 603.4647297788966,
+     "time": 750.0,
+     "phase": "train"
+    },
+    {
+     "step": 1350,
+     "samples_per_s": 591.3954351833187,
+     "time": 780.0,
+     "phase": "train"
+    },
+    {
+     "step": 1400,
+     "samples_per_s": 579.5675264796523,
+     "time": 810.0,
+     "phase": "train"
+    },
+    {
+     "step": 1450,
+     "samples_per_s": 567.9761759500592,
+     "time": 840.0,
+     "phase": "train"
+    },
+    {
+     "step": 1500,
+     "samples_per_s": 556.616652431058,
+     "time": 870.0,
+     "phase": "train"
+    },
+    {
+     "step": 1550,
+     "samples_per_s": 545.4843193824369,
+     "time": 900.0,
+     "phase": "train"
+    },
+    {
+     "step": 1600,
+     "samples_per_s": 534.5746329947881,
+     "time": 930.0,
+     "phase": "train"
+    },
+    {
+     "step": 1650,
+     "samples_per_s": 523.8831403348923,
+     "time": 960.0,
+     "phase": "train"
+    },
+    {
+     "step": 1700,
+     "samples_per_s": 513.4054775281945,
+     "time": 990.0,
+     "phase": "train"
+    },
+    {
+     "step": 1750,
+     "samples_per_s": 503.1373679776306,
+     "time": 1020.0,
+     "phase": "train"
+    },
+    {
+     "step": 1800,
+     "samples_per_s": 493.074620618078,
+     "time": 1050.0,
+     "phase": "train"
+    },
+    {
+     "step": 1850,
+     "samples_per_s": 483.21312820571643,
+     "time": 1080.0,
+     "phase": "train"
+    },
+    {
+     "step": 1900,
+     "samples_per_s": 473.5488656416021,
+     "time": 1110.0,
+     "phase": "train"
+    },
+    {
+     "step": 1950,
+     "samples_per_s": 464.07788832877003,
+     "time": 1140.0,
+     "phase": "train"
+    },
+    {
+     "step": 2000,
+     "samples_per_s": 454.79633056219467,
+     "time": 1170.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": false,
+    "reference": 503.1373679776306,
+    "rate": 454.79633056219467,
+    "slow_s": 0.0
+   }
+  },
+  {
+   "name": "rows without a time or a rate are skipped",
+   "rows": [
+    {
+     "step": 50,
+     "samples_per_s": 1000.0,
+     "phase": "train"
+    },
+    {
+     "step": 100,
+     "time": 30.0,
+     "phase": "train"
+    }
+   ],
+   "expect": {
+    "warn": false,
+    "reference": null,
+    "rate": null,
+    "slow_s": 0.0
+   }
+  }
+ ]
+}
