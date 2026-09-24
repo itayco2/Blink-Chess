@@ -1,5 +1,6 @@
 """The README scoreboard: made from results/*.json only, spliced between two markers, checked byte-exact."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -110,7 +111,9 @@ def test_the_diagnostics_and_band_tables_show_fractions_as_percent(tmp_path):
     assert row.startswith("| **Blink-M** | **value** | 51.2 / 78.1 / 87.4% | 60.3% | 77.1% | 0.412 | 0.121 |")
     assert "1905 (1880 to 1931)" in row
     bands = _table_rows(block, sb.BANDS_HEADING)
-    assert bands[0] == "| **Blink-M** | **value** | 97.2% | 91.0% | 80.3% | 62.4% | 41.0% |"
+    assert bands[0].startswith(
+        "| **Blink-M** | **value** | 97.2% (96.1 to 98.0, n=1,203) | 91.0% (89.8 to 92.0"
+    )
 
 
 def test_a_fraction_column_holding_a_percent_is_refused(tmp_path):
@@ -240,3 +243,45 @@ def test_a_kwh_that_covers_only_part_of_the_gpu_hours_says_how_much(tmp_path):
     block = _block(tmp_path, compute_obj={**compute(), "kwh_coverage": 0.62})
     assert "39.8 GPU-board kWh (measured on 62% of the GPU-h)" in block
     assert "measured on" not in _block(tmp_path / "full")
+
+
+def test_every_band_cell_and_the_conversion_cell_carry_a_wilson_interval_and_their_n(tmp_path):
+    block = _block(tmp_path)
+    for row in _table_rows(block, sb.BANDS_HEADING):
+        for cell in row.strip("| ").split(" | ")[2:]:
+            assert " to " in cell and ", n=" in cell, cell
+    assert "| 2500+ |" in block and "41.0% (38.0 to 44.1, n=1,012)" in block
+    assert "88.4% (85.3 to 90.9, n=500)" in _table_rows(block, sb.TABLE2_HEADING)[0]
+
+
+def test_a_percentage_is_never_printed_without_its_interval():
+    assert sb.pct_ci(None, None) == sb.DASH
+    assert sb.pct_ci(80.1, (79.3, 80.9)) == "80.1% (79.3 to 80.9)"
+    with pytest.raises(sb.ScoreboardError, match="interval"):
+        sb.pct_ci(95.4, None)
+
+
+def _edited_results(folder, agent: str, **fields):
+    data = json.loads((folder / "results.json").read_text(encoding="utf-8"))
+    row = next(r for r in data["strength"] if r["agent"] == agent)
+    row.update(fields)
+    (folder / "results.json").write_text(json.dumps(data), encoding="utf-8")
+    return folder
+
+
+def test_a_paper_row_that_fills_a_measured_cell_is_refused(tmp_path):
+    folder = _edited_results(
+        write_bundle(tmp_path / "r"),
+        "DM-270M",
+        dm_puzzles_pct=95.4,
+        dm_puzzles_ci=[94.9, 95.8],
+        gpu_hours=12000.0,
+    )
+    with pytest.raises(sb.ScoreboardError, match="paper"):
+        sb.load_bundle(folder)
+
+
+def test_a_puzzle_percentage_without_its_wilson_interval_is_refused(tmp_path):
+    folder = _edited_results(write_bundle(tmp_path / "r"), "DM-9M", dm_puzzles_ci=None)
+    with pytest.raises(sb.ScoreboardError, match="Wilson"):
+        sb.load_bundle(folder)

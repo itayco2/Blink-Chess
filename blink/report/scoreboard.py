@@ -4,9 +4,10 @@
 <!-- scoreboard:start --> and <!-- scoreboard:end -->; `--check` fails when the README differs from
 it by a single byte. The block holds, in order: the headline table (each number with its reproduce
 command and what it does NOT prove), the no-search box, Table 1 (strength), Table 2 (ML diagnostics)
-and the DeepMind puzzles by rating band. Every Elo cell carries its 95% interval and game count, Elo
-below the lowest anchor (1320) is labelled extrapolated, paper numbers sit only in the paper-reported
-column, and the text is ASCII (+/- rather than a plus-minus sign).
+and the DeepMind puzzles by rating band. Every Elo cell carries its 95% interval and game count, every
+percentage its Wilson 95% interval (and, where results.json stores a count rather than an interval,
+its n), Elo below the lowest anchor (1320) is labelled extrapolated, paper numbers sit only in the
+paper-reported column, and the text is ASCII (+/- rather than a plus-minus sign).
 """
 
 import json
@@ -14,6 +15,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from blink.eval.puzzles import wilson
 from blink.report import compute as compute_mod
 from blink.report import results_schema as rs
 from blink.train.atomic import write_text_atomic
@@ -106,7 +108,19 @@ def elo_cell(row: rs.StrengthRow | None) -> str:
 def pct_ci(pct: float | None, ci: tuple[float, float] | None) -> str:
     if pct is None:
         return DASH
-    return f"{pct:.1f}%" + (f" ({ci[0]:.1f} to {ci[1]:.1f})" if ci else "")
+    if ci is None:
+        raise ScoreboardError(f"{pct}% has no 95% interval: a percentage is never printed without one")
+    return f"{pct:.1f}% ({ci[0]:.1f} to {ci[1]:.1f})"
+
+
+def pct_n(pct: float | None, n: int | None) -> str:
+    """A percentage of n trials with its Wilson 95% interval and its n."""
+    if pct is None:
+        return DASH
+    if not n:
+        raise ScoreboardError(f"{pct}% has no n: its Wilson interval cannot be shown")
+    low, high = wilson(round(pct / 100 * n), n)
+    return f"{pct:.1f}% ({100 * low:.1f} to {100 * high:.1f}, n={n:,})"
 
 
 def millions(n: int | None) -> str:
@@ -255,13 +269,13 @@ def _diag_line(row: rs.DiagnosticsRow, shipped: bool) -> list[str]:
         f"{_pct(row.mate_shortest)} / {_pct(row.mate_preserving)}" if row.mate_shortest is not None else DASH
     )
     rating = DASH
-    if row.puzzle_rating_equiv is not None:
+    if row.puzzle_rating_equiv is not None:  # the schema requires its bootstrap CI
         ci = row.puzzle_rating_ci
-        rating = f"{row.puzzle_rating_equiv:.0f}" + (f" ({ci[0]:.0f} to {ci[1]:.0f})" if ci else "")
+        rating = f"{row.puzzle_rating_equiv:.0f} ({ci[0]:.0f} to {ci[1]:.0f})"
     return [
         _bold(row.agent, shipped), _bold(row.mode, shipped), tops, _pct(row.vaa), _pct(row.near_best),
         _num(row.kendall_tau_b, ".3f"), _num(row.brier, ".3f"), ece, _num(row.regret_games10k, ".3f"),
-        _num(row.grouped_gap, ".3f"), mates, pct_ci(row.conversion_pct, None), rating,
+        _num(row.grouped_gap, ".3f"), mates, pct_n(row.conversion_pct, row.conversion_n), rating,
     ]  # fmt: skip
 
 
@@ -285,7 +299,7 @@ def band_table(bundle: Bundle) -> str:
     bands = [b for b in BAND_ORDER if b in keys] + sorted(keys - set(BAND_ORDER))
     rows = [
         [_bold(r.agent, _is_shipped_diag(results, r)), _bold(r.mode, _is_shipped_diag(results, r))]
-        + [pct_ci(r.band_pct.get(b), None) for b in bands]
+        + [pct_n(r.band_pct.get(b), r.band_n.get(b)) for b in bands]
         for r in with_bands
     ]
     return f"{BANDS_HEADING}\n\n" + table(["agent", "mode", *bands], rows)

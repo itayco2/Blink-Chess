@@ -16,7 +16,13 @@ GENERATED_AT = "2026-10-07T12:00:00+03:00"
 
 
 def strength_rows() -> tuple[rs.StrengthRow, ...]:
-    blink = dict(kind="blink", params_total=22_550_000, params_non_gab=21_878_256, positions_seen=573_400_000)
+    blink = dict(
+        kind="blink",
+        params_total=22_550_000,
+        params_non_gab=21_878_256,
+        positions_seen=573_400_000,
+        training_positions=398_100_000,
+    )
     return (
         rs.StrengthRow(
             "random",
@@ -97,6 +103,7 @@ def strength_rows() -> tuple[rs.StrengthRow, ...]:
 
 def diagnostics_rows() -> tuple[rs.DiagnosticsRow, ...]:
     bands = {"<1000": 97.2, "1000-1500": 91.0, "1500-2000": 80.3, "2000-2500": 62.4, "2500+": 41.0}
+    band_n = {"<1000": 1_203, "1000-1500": 2_518, "1500-2000": 2_871, "2000-2500": 2_396, "2500+": 1_012}
     return (
         rs.DiagnosticsRow(
             "Blink-M",
@@ -113,9 +120,11 @@ def diagnostics_rows() -> tuple[rs.DiagnosticsRow, ...]:
             regret_games10k=0.043,
             grouped_gap=0.021,
             band_pct=bands,
+            band_n=band_n,
             mate_shortest=0.62,
             mate_preserving=0.95,
             conversion_pct=88.4,
+            conversion_n=500,
             puzzle_rating_equiv=1_905.0,
             puzzle_rating_ci=(1_880.0, 1_931.0),
         ),
@@ -126,6 +135,7 @@ def diagnostics_rows() -> tuple[rs.DiagnosticsRow, ...]:
             top3=0.781,
             top5=0.874,
             band_pct={"<1000": 95.1, "1000-1500": 84.2, "1500-2000": 70.0, "2000-2500": 48.8, "2500+": 30.2},
+            band_n=band_n,
         ),
     )
 

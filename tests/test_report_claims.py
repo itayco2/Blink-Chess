@@ -14,7 +14,7 @@ VALUE_CLAIM = (
     "Blink is a 22.6M-parameter transformer that looks exactly one move ahead, never two: each move is at "
     "most one batched forward pass that scores the position after every legal move once. It never evaluates "
     "an opponent's reply, and it uses no opening book, tablebase or engine at play time. It was trained by "
-    "supervised learning on 573,400,000 positions drawn from the 409,710,113-position Lichess evaluation "
+    "supervised learning on 398,100,000 positions drawn from the 409,710,113-position Lichess evaluation "
     "database (CC0). Training took 120.3 GPU-hours for the flagship run (181.2 for the whole project), with "
     "no cloud GPU and no paid data: one home RTX 3070 (39.8 GPU-board kWh). Against pinned Stockfish 19 "
     "UCI_Elo anchors it rates 1850 +/- 35 (95% CI, 4,100 games). That is a CCRL-Blitz-anchored engine "
@@ -146,4 +146,18 @@ def test_a_shipped_mode_outside_policy_and_value_is_refused(tmp_path):
         tmp_path, results_obj=results(strength=rows, shipped=replace(results().shipped, mode="both"))
     )
     with pytest.raises(claims.ClaimRefused, match="both"):
+        claims.fill_claim(tmp_path)
+
+
+def test_the_positions_blank_counts_distinct_database_positions_not_samples_seen(tmp_path):
+    """positions_seen (573.4M samples with repeats and children) is larger than the database itself."""
+    write_bundle(tmp_path)
+    text = claims.fill_claim(tmp_path)
+    assert "on 398,100,000 positions drawn from the 409,710,113-position" in text
+    assert "573,400,000" not in text
+    rows = tuple(
+        replace(r, training_positions=None) if r.agent == "Blink-M (value)" else r for r in strength_rows()
+    )
+    write_bundle(tmp_path, results_obj=results(strength=rows))
+    with pytest.raises(claims.ClaimRefused, match="training_positions"):
         claims.fill_claim(tmp_path)

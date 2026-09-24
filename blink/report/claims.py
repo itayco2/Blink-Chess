@@ -4,7 +4,10 @@ HOOK_EN and HOOK_HE are module attributes computed from results/results.json: th
 evaluation has named a shipped mode, so no document can quote a hook the evidence has not chosen.
 `fill_claim` writes the pre-registered claim sentence with every blank taken from results/*.json and
 refuses, naming each missing value, rather than print a sentence with a gap or a guess in it. The
-wording is the plan's, in ASCII (+/- for the plus-minus sign).
+wording is the plan's, in ASCII (+/- for the plus-minus sign). "Trained on __ positions drawn from the
+409,710,113-position database" is filled with training_positions, the distinct database positions
+(results_schema.training_positions), never positions_seen: samples seen count repeats across epochs
+and constructed child rows, so they can exceed the database itself.
 """
 
 from pathlib import Path
@@ -90,14 +93,14 @@ def _need(missing: list[str], label: str, value):
 
 
 def _strength_blanks(row: rs.StrengthRow, missing: list[str]) -> dict:
-    fields = ("params_total", "positions_seen", "elo", "elo_ci95", "elo_games", "sf_nodes_equiv")
+    fields = ("params_total", "training_positions", "elo", "elo_ci95", "elo_games", "sf_nodes_equiv")
     fields += ("dm_puzzles_pct", "dm_puzzles_ci")
     got = {f: _need(missing, f"shipped strength row {row.agent!r}: {f}", getattr(row, f)) for f in fields}
     if None in got.values():
         return {}
     return {
         "params": f"{got['params_total'] / 1e6:.1f}M",
-        "positions": f"{got['positions_seen']:,}",
+        "positions": f"{got['training_positions']:,}",  # distinct DB positions, never samples seen
         "elo": f"{row.elo:.0f}",
         "elo_ci": f"{row.elo_ci95:.0f}",
         "games": f"{row.elo_games:,}",
