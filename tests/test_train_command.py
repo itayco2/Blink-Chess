@@ -160,8 +160,7 @@ def _jsonl(path) -> list[dict]:
 def test_a_v1_pack_mixes_root_and_child_shards_with_the_manifest_weights(
     home, tmp_path, fake_loader, monkeypatch
 ):
-    import sys
-    import types
+    from blink.data import rebalance
 
     calls = []
 
@@ -169,9 +168,9 @@ def test_a_v1_pack_mixes_root_and_child_shards_with_the_manifest_weights(
         calls.append((records.dtype, len(weights)))
         return np.full(len(records), 2.0, dtype=np.float32)
 
-    rebalance = types.ModuleType("blink.data.rebalance")
-    rebalance.weights_for = weights_for
-    monkeypatch.setitem(sys.modules, "blink.data.rebalance", rebalance)
+    # Spy on the real module (P2 built it): replacing the module would hide the names the CLI's
+    # other areas import from it, such as bigpack's GamesHistogram.
+    monkeypatch.setattr(rebalance, "weights_for", weights_for)
     _v1_pack(tmp_path / "v1", weights=[1.0] * 48)
     config = tmp_path / "mixed.toml"
     config.write_text(MIXED_CONFIG, encoding="utf-8")
