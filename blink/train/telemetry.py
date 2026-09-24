@@ -118,7 +118,9 @@ class MetricWindow:
 
     Each row carries a phase: "eval" or "ckpt" when an evaluation or a checkpoint ran inside its
     window (its samples/s is then not a training rate), else "train". Throughput stop rules read only
-    "train" rows.
+    "train" rows. It also carries its wall-clock `time` (the rules judge minutes, not rows) and
+    `data_wait_frac`, the share of the window the loop spent waiting for its next batch (P4: <= 5%).
+    Neither touches the losses: both are host clocks read around the batch source.
     """
 
     def __init__(self, device: torch.device) -> None:
@@ -129,11 +131,16 @@ class MetricWindow:
         zero = torch.zeros((), device=self.device)
         self.loss_policy, self.loss_value, self.grad_norm, self.clipped = zero, zero, zero, zero
         self.steps, self.samples, self.started = 0, 0, time.perf_counter()
+        self.wait_s = 0.0
         self.phase = "train"
 
     def mark(self, phase: str) -> None:
         if PHASES.index(phase) > PHASES.index(self.phase):
             self.phase = phase
+
+    def waited(self, seconds: float) -> None:
+        """Time the loop spent blocked on the batch source (reading, cutting, weighting a batch)."""
+        self.wait_s += seconds
 
     def add(self, loss_policy, loss_value, grad_norm, clip_norm: float, samples: int) -> None:
         self.loss_policy = self.loss_policy + loss_policy
@@ -157,6 +164,8 @@ class MetricWindow:
             "samples_per_s": self.samples / elapsed,
             "gpu_mem_gb": torch.cuda.max_memory_reserved(self.device) / 2**30 if on_cuda else 0.0,
             "phase": self.phase,
+            "data_wait_frac": min(1.0, self.wait_s / elapsed),
+            "time": time.time(),
         }
         self._reset()
         return record

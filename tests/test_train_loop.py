@@ -1,4 +1,5 @@
 import json
+import time
 
 import numpy as np
 import pytest
@@ -245,3 +246,27 @@ def test_a_new_run_rewrites_a_stale_config_a_reader_is_holding_open(tmp_path):
     with held_open(run_dir / "config.json"):
         loop.train(cfg, _spec(run_dir, max_steps=1), _repeat(records[:16]), val=records, log=lambda _: None)
     assert json.loads((run_dir / "config.json").read_text(encoding="utf-8"))["world"] == WORLD
+
+
+def _sleepy(batch: np.ndarray, seconds: float):
+    def source(start_step: int):
+        while True:
+            time.sleep(seconds)
+            yield batch
+
+    return source
+
+
+def test_metrics_record_how_long_the_loop_waited_for_its_batches(tmp_path):
+    records = fixture_records()
+    cfg = tiny_train_config(
+        steps=9, warmup_steps=2, metrics_every=3, batch_size=16, eval_every=1000, ckpt_every_steps=1000
+    )
+    for name, seconds in (("fast", 0.0), ("slow", 0.1)):
+        loop.train(cfg, _spec(tmp_path / name), _sleepy(records[:16], seconds), val=None, log=lambda _: None)
+    fast, slow = (_records_jsonl(tmp_path / name / "metrics.jsonl") for name in ("fast", "slow"))
+    assert all(0.0 <= row["data_wait_frac"] <= 1.0 for row in fast + slow)
+    assert all(row["time"] > 1_600_000_000 for row in fast + slow)
+    later = slice(1, None)  # step 1's window also holds the model's first call
+    assert min(r["data_wait_frac"] for r in slow[later]) > 0.2
+    assert max(r["data_wait_frac"] for r in slow[later]) > max(r["data_wait_frac"] for r in fast[later])
