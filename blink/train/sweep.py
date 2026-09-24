@@ -13,6 +13,11 @@ resumes the one that was running. Judging, after every arm has cooled down:
 VAA and top-1 are fractions in [0, 1], as evals.jsonl writes top1; 1 pt is 0.01. An arm's metrics are
 its last evals row plus, for an arm trained before the checks scored games10k and the mateset, the
 post-hoc record `blink sweep rescore` writes (blink.train.posthoc), read afresh whenever arms are judged.
+The adopted set must be settled before a15 trains, since a15's VAA vouches only for what it trained
+with: before a15 starts the sweep scores a01-a03 post hoc for any metric a finished arm holds and they
+lack, and holds a15 if that fails; a15 stopped partway resumes with the arms it started with; and the
+recipe stays D when the adopted set no longer matches the arms a15 recorded. Only the sweep writes
+ablations.json; `blink sweep rescore` writes posthoc.json files only.
 
 Sizes. S, M and M12 run for the same wall-clock hours; a conditional size (L) runs only if its
 measured rate passes the epoch floor. `choose` then applies the pre-registered precedence:
@@ -40,7 +45,7 @@ from blink.train.supervise import Outcome, checkpoint_steps, read_jsonl
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "configs"
 SIZE_ORDER = ("t", "s", "m", "m12", "l")
-RERUN_STATES = ("pending", "running")
+RERUN_STATES = ("pending", "running", "held")  # held: a15 waiting for arms it cannot judge yet
 DEADLINE_FACTOR = 1.5  # a supervised arm is stopped at 1.5x its planned hours plus the allowance
 COMPILE_ALLOWANCE_S = 1800.0
 TOLERANCE = 1e-9
@@ -48,6 +53,9 @@ TABLES = ("model", "train")
 # the final check row's metrics an arm's entry repeats: what the arms are judged on (a07 games10k,
 # a08 its mate_preserving guard) and what FINDINGS reports beside them
 PICKED = ("vaa", "top1", "value_ce", "games10k_top1", "mate_preserving", "shortest_mate")
+# what post-hoc scoring can raise without stopping a sweep: posthoc.NotFinished is a ValueError, a
+# missing input an OSError, a CUDA out-of-memory a RuntimeError
+SCORE_ERRORS = (ValueError, OSError, RuntimeError)
 
 Log = Callable[[str], None]
 
@@ -243,13 +251,17 @@ def noise_floor(results: Mapping[str, Mapping[str, Any]], sigma_arms: Sequence[s
     return {**floor, "arms": list(sigma_arms), "sigma_ok": floor["vaa"]["sigma"] <= 0.01 + TOLERANCE}
 
 
+def _needed(arm: Arm) -> list[str]:
+    """The metrics an arm's adopt rule reads: its own, policy top-1, and its guard if it has one."""
+    return [arm.judged_on, "top1"] + ([arm.guard] if arm.guard else [])
+
+
 def decide(arm: Arm, metrics: Mapping[str, Any], floor: Mapping[str, Any] | None) -> dict[str, Any]:
     """The pre-registered adopt rule for one arm."""
     metric = arm.judged_on
     if floor is None:
         return {"adopt": False, "reason": "not judged: the noise floor needs a01-a03 finished"}
-    needed = [metric, "top1"] + ([arm.guard] if arm.guard else [])
-    missing = [k for k in needed if metrics.get(k) is None or k not in floor]
+    missing = [k for k in _needed(arm) if metrics.get(k) is None or k not in floor]
     if missing:
         return {"adopt": False, "reason": f"not judged: {', '.join(missing)} missing"}
     bar = floor[metric]["d"] + 2 * floor[metric]["sigma"]
@@ -346,7 +358,8 @@ def _execute(entry: dict[str, Any], request: RunRequest | None, runner: Runner, 
     """Record the entry as running, run it, then record how it ended (saved before and after)."""
     save(entry)
     if request is None:
-        log(f"{entry.get('name')}: {entry['status']}")
+        reason = f" ({entry['reason']})" if entry.get("reason") else ""
+        log(f"{entry.get('name')}: {entry['status']}{reason}")
         return entry
     log(f"{entry.get('name')}: {entry['steps']:,} steps, run {request.run}")
     done = _finish_entry(entry, runner(request), request.run)
@@ -358,8 +371,17 @@ def _execute(entry: dict[str, Any], request: RunRequest | None, runner: Runner, 
 # ---------------------------------------------------------------- the ablation sweep
 
 
+def _run_of(name: str, entry: Mapping[str, Any]) -> str:
+    return entry.get("run") or f"abl-{name}"
+
+
+def _finished_metrics(arms_state: Mapping[str, Mapping]) -> dict[str, dict[str, Any]]:
+    """Each finished arm's final metrics, with any post-hoc record written since it finished."""
+    return {n: _refreshed(e)["metrics"] for n, e in arms_state.items() if e.get("status") == "finished"}
+
+
 def _judge(plan: AblationPlan, arms_state: Mapping[str, Mapping]) -> tuple[dict | None, dict[str, dict]]:
-    finished = {n: _refreshed(e)["metrics"] for n, e in arms_state.items() if e.get("status") == "finished"}
+    finished = _finished_metrics(arms_state)
     floor = noise_floor(finished, plan.sigma_arms)
     decisions = {}
     for arm in plan.arms:
@@ -373,17 +395,102 @@ def _judge(plan: AblationPlan, arms_state: Mapping[str, Mapping]) -> tuple[dict 
     return floor, decisions
 
 
-def _plan_arm(plan: AblationPlan, arm: Arm, rate: float, arms_state, slip: bool, log: Log):
+def _floor_gaps(plan: AblationPlan, finished: Mapping[str, Mapping]) -> dict[str, list[str]]:
+    """{arm: metrics} for each finished arm whose own final row holds a metric its adopt rule reads but
+    the a01-a03 noise floor lacks: the seeds predate it, and scoring them post hoc judges the arm.
+
+    A metric the arm itself lacks is no gap (a08's mate_preserving, which today's mateset cannot score):
+    no scoring of the seeds can judge that arm, and a15 goes ahead without it as before."""
+    floor = noise_floor(finished, plan.sigma_arms)
+    if floor is None:
+        return {}
+    gaps = {}
+    for arm in plan.arms:
+        metrics = finished.get(arm.name)
+        if metrics is None or arm.name in plan.sigma_arms or arm.combine:
+            continue
+        lacking = [k for k in _needed(arm) if metrics.get(k) is not None and k not in floor]
+        if lacking:
+            gaps[arm.name] = lacking
+    return gaps
+
+
+def _score_arms(runs: Mapping[str, str], scorer: Callable[[str], Any], log: Log) -> None:
+    """Score each arm's run post hoc; an arm that cannot be scored is logged and skipped."""
+    for name, run in runs.items():
+        try:
+            scorer(run)
+        except SCORE_ERRORS as exc:
+            log(f"{name}: not rescored ({exc})")
+
+
+def _settle_floor(plan: AblationPlan, arms_state: Mapping, scorer, log: Log) -> dict[str, list[str]]:
+    """The floor gaps left after scoring post hoc each seed arm that lacks a gap's metric (the sweep's
+    GPU is idle between arms, and score_run keeps a record it already has)."""
+    finished = _finished_metrics(arms_state)
+    gaps = _floor_gaps(plan, finished)
+    if not gaps or scorer is None:
+        return gaps
+    wanted = sorted({k for keys in gaps.values() for k in keys})
+    seeds = {
+        n: _run_of(n, arms_state[n])
+        for n in plan.sigma_arms
+        if any(finished[n].get(k) is None for k in wanted)
+    }
+    log(f"scoring {', '.join(seeds)} post hoc for {', '.join(wanted)}, so {', '.join(gaps)} can be judged")
+    _score_arms(seeds, scorer, log)
+    return _floor_gaps(plan, _finished_metrics(arms_state))
+
+
+def _held_reason(plan: AblationPlan, gaps: Mapping[str, Sequence[str]], name: str) -> str:
+    arms = "; ".join(f"{arm} ({', '.join(keys)})" for arm, keys in gaps.items())
+    return (
+        f"not judged for a metric {', '.join(plan.sigma_arms)} lack: {arms}. `blink sweep rescore` "
+        f"scores them post hoc, then `blink sweep ablations` runs {name}"
+    )
+
+
+def _started_with(arm: Arm, arms_state: Mapping[str, Mapping]) -> tuple[str, ...]:
+    """The arms a combined arm was combining when it was stopped partway, if its checkpoints remain."""
+    entry = arms_state.get(arm.name, {})
+    if entry.get("status") != "running":
+        return ()
+    if not checkpoint_steps(paths.home() / "runs" / _run_of(arm.name, entry)):
+        return ()
+    return tuple(entry.get("combined_from") or ())
+
+
+def _plan_combined(plan: AblationPlan, arm: Arm, arms_state, scorer, log: Log) -> tuple[Arm, dict | None]:
+    """(the combined arm, None) to run, or (arm, the entry saying why it does not run).
+
+    A combined arm stopped partway resumes with the arms it started with: its checkpoints hold that
+    set's training, and a rescore since may have changed the adopted set. Before it first starts it is
+    held while a finished arm cannot be judged for a metric only the seeds lack."""
+    arms = {a.name: a for a in plan.arms}
+    started = _started_with(arm, arms_state)
+    if started:
+        adopted = combine_adopted(arms, _judge(plan, arms_state)[1], name=arm.name).combined_from
+        now = "" if adopted == started else f"; the adopted set is now ({', '.join(adopted) or 'none'})"
+        log(f"{arm.name}: resuming with the arms it started with ({', '.join(started)}){now}")
+        return combine_adopted(arms, dict.fromkeys(started, {"adopt": True}), name=arm.name), None
+    gaps = _settle_floor(plan, arms_state, scorer, log)
+    if gaps:
+        return arm, {"name": arm.name, "status": "held", "reason": _held_reason(plan, gaps, arm.name)}
+    combined = combine_adopted(arms, _judge(plan, arms_state)[1], name=arm.name)
+    if not combined.combined_from:
+        return arm, {"name": arm.name, "status": "not run: no arm was adopted"}
+    return combined, None
+
+
+def _plan_arm(plan: AblationPlan, arm: Arm, rate: float, arms_state, slip: bool, log: Log, scorer=None):
     """(entry, request) for one arm; request is None when the arm does not run, and entry says why."""
     if slip and arm.name in plan.slip_cut:
         return {"name": arm.name, "status": "not tested: cut by the slip rule"}, None
     to_run = arm
     if arm.combine:
-        _, decisions = _judge(plan, arms_state)
-        _warn_unscored(decisions, log)
-        to_run = combine_adopted({a.name: a for a in plan.arms}, decisions, name=arm.name)
-        if not to_run.combined_from:
-            return {"name": arm.name, "status": "not run: no arm was adopted"}, None
+        to_run, why = _plan_combined(plan, arm, arms_state, scorer, log)
+        if why is not None:
+            return why, None
     run = f"abl-{arm.name}"
     try:
         config, info = _prepare(run, plan.recipe, to_run, plan.hours, rate, "ablations")
@@ -394,23 +501,19 @@ def _plan_arm(plan: AblationPlan, arm: Arm, rate: float, arms_state, slip: bool,
     return {**entry, "status": "running", "started": time.time()}, request
 
 
-def _warn_unscored(decisions: Mapping[str, Mapping], log: Log) -> None:
-    """Say which arms cannot be judged for a missing metric: arms trained before the checks scored
-    games10k and the mateset need `blink sweep rescore` before the winners are combined."""
-    unjudged = [
-        f"{name} ({d['reason']})" for name, d in decisions.items() if d["reason"].endswith(" missing")
-    ]
-    if unjudged:
-        log(
-            f"not judged for a missing metric: {'; '.join(unjudged)}. `blink sweep rescore` scores the "
-            "finished arms' final checkpoints post hoc"
-        )
-
-
 def run_ablations(
-    plan: AblationPlan, out: Path, rate: float, runner: Runner, log: Log = print, slip: bool = False
+    plan: AblationPlan,
+    out: Path,
+    rate: float,
+    runner: Runner,
+    log: Log = print,
+    slip: bool = False,
+    scorer: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
-    """Run every pending arm in plan order through `runner`, recording each in `out` as it goes."""
+    """Run every pending arm in plan order through `runner`, recording each in `out` as it goes.
+
+    `scorer(run)` (blink.train.posthoc.score_run in the CLI) scores seed arms post hoc before a15 is
+    planned, when a finished arm is judged on a metric they predate; without one, a15 is held instead."""
     state = _load_state(out)
     arms_state = dict(state.get("arms", {}))
     for arm in plan.arms:
@@ -421,47 +524,62 @@ def run_ablations(
             arms_state[name] = entry
             _save_state(out, {**state, "arms": arms_state})
 
-        entry, request = _plan_arm(plan, arm, rate, arms_state, slip, log)
+        entry, request = _plan_arm(plan, arm, rate, arms_state, slip, log, scorer)
         _execute(entry, request, runner, save, log)
     return _report(plan, out, state, arms_state)
 
 
-def _report(plan: AblationPlan, out: Path, state: Mapping, arms_state: Mapping) -> dict[str, Any]:
-    floor, decisions = _judge(plan, arms_state)
+def _recipe(plan: AblationPlan, arms_state: Mapping, floor: Mapping | None, decisions: Mapping) -> dict:
+    """The frozen recipe, from the combined arm as it trained. Its VAA vouches only for the arms it
+    recorded (combined_from); when the adopted set has changed since (a rescore judged an arm anew),
+    the recipe stays D until it reruns."""
     combine = next((arm for arm in plan.arms if arm.combine), None)
-    recipe: dict[str, Any] = {"recipe": "D", "reason": "the plan has no combined arm"}
-    if combine is not None:
-        combined = combine_adopted({a.name: a for a in plan.arms}, decisions, name=combine.name)
-        entry = arms_state.get(combine.name, {})
-        metrics = entry.get("metrics") if entry.get("status") == "finished" else None
-        recipe = recipe_verdict(metrics, floor, combined)
-    report = _jsonable(
-        {
-            **state,
-            "plan": dataclasses.asdict(plan),
-            "arms": {name: _refreshed(entry) for name, entry in arms_state.items()},
-            "noise": floor,
-            "decisions": decisions,
-            "recipe": recipe,
-        }
-    )
+    if combine is None:
+        return {"recipe": "D", "reason": "the plan has no combined arm"}
+    entry = arms_state.get(combine.name, {})
+    if entry.get("status") == "held":
+        return {"recipe": "D", "reason": f"{combine.name} is held: {entry.get('reason')}"}
+    adopted = combine_adopted({a.name: a for a in plan.arms}, decisions, name=combine.name)
+    if entry.get("status") != "finished" or not adopted.combined_from:
+        return recipe_verdict(None, floor, adopted)
+    trained = tuple(entry.get("combined_from") or ())
+    if trained != adopted.combined_from:
+        why = (
+            f"{combine.name} trained with [{', '.join(trained)}] but the adopted set is now "
+            f"[{', '.join(adopted.combined_from)}]: rerun {combine.name} (move runs/"
+            f"{_run_of(combine.name, entry)} aside and delete its entry in ablations.json)"
+        )
+        return {"recipe": "D", "reason": why}
+    return recipe_verdict(entry.get("metrics"), floor, adopted)
+
+
+def judge_ablations(plan: AblationPlan, arms_state: Mapping[str, Mapping]) -> dict[str, Any]:
+    """The arms (with any post-hoc records), the noise floor, every adopt decision and the recipe."""
+    floor, decisions = _judge(plan, arms_state)
+    return {
+        "arms": {name: _refreshed(entry) for name, entry in arms_state.items()},
+        "noise": floor,
+        "decisions": decisions,
+        "recipe": _recipe(plan, arms_state, floor, decisions),
+    }
+
+
+def _report(plan: AblationPlan, out: Path, state: Mapping, arms_state: Mapping) -> dict[str, Any]:
+    report = _jsonable({**state, "plan": dataclasses.asdict(plan), **judge_ablations(plan, arms_state)})
     _save_state(out, report)
     return report
 
 
 def rescore_ablations(plan: AblationPlan, out: Path, scorer: Callable[[str], Any], log: Log = print) -> dict:
     """Score every finished arm in `out` post hoc (`scorer(run)`, blink.train.posthoc.score_run in the
-    CLI), then judge the plan again; an arm that cannot be scored is logged and skipped."""
-    state = _load_state(out)
-    arms_state = dict(state.get("arms", {}))
-    for name, entry in arms_state.items():
-        if entry.get("status") != "finished":
-            continue
-        try:
-            scorer(entry.get("run") or f"abl-{name}")
-        except (ValueError, OSError) as exc:  # posthoc.NotFinished is a ValueError
-            log(f"{name}: not rescored ({exc})")
-    return _report(plan, out, state, arms_state)
+    CLI), then judge the plan from a fresh read of `out`; an arm that cannot be scored is logged.
+
+    Only posthoc.json files are written. Scoring takes minutes and a running sweep may record an arm
+    meanwhile, so ablations.json stays the sweep's alone: its next report reads the records."""
+    arms_state = _load_state(out).get("arms", {})
+    finished = {n: _run_of(n, e) for n, e in arms_state.items() if e.get("status") == "finished"}
+    _score_arms(finished, scorer, log)
+    return _jsonable(judge_ablations(plan, _load_state(out).get("arms", {})))
 
 
 # ---------------------------------------------------------------- the size sweep

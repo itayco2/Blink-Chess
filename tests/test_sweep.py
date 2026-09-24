@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from blink import cli
+from blink import cli, heartbeat
 from blink.train import sweep
 from blink.train.supervise import Outcome
 
@@ -313,38 +313,179 @@ def test_a_posthoc_record_of_another_step_is_not_merged_into_the_final_row(tmp_p
     )
 
 
-def test_rescore_scores_every_finished_arm_then_judges_the_plan_again(tmp_path, monkeypatch):
+def test_rescore_scores_every_finished_arm_and_judges_a_fresh_read_without_writing_ablations_json(
+    tmp_path, monkeypatch
+):
+    """Scoring takes minutes, and the sweep may record an arm meanwhile: rescore writes only posthoc.json
+    files, so it can never put a stale snapshot of ablations.json back over the sweep's."""
     plan, out, report = _frozen_commit_sweep(tmp_path, monkeypatch)
     home, step = tmp_path / "home", report["arms"]["a01"]["steps"]
     state = json.loads(out.read_text(encoding="utf-8"))
-    state["arms"]["a08"]["status"] = "running"  # a killed arm is not scored
+    state["arms"]["a08"]["status"] = "running"  # a running arm is not scored
     out.write_text(json.dumps(state), encoding="utf-8")
+    finished_a08 = json.dumps({**state, "arms": {**state["arms"], "a08": report["arms"]["a08"]}})
     scored, logs = [], []
 
     def scorer(run: str) -> None:
         scored.append(run)
         if run == "abl-a07":
             raise ValueError("abl-a07 has no checkpoint at its last step")
-        if run in FROZEN_SEEDS:
-            _write_posthoc(home, run, step, *FROZEN_SEEDS[run])
+        _write_posthoc(home, run, step, *FROZEN_SEEDS[run])
+        if run == "abl-a03":  # meanwhile the sweep records a08 finished
+            out.write_text(finished_a08, encoding="utf-8")
 
     rescored = sweep.rescore_ablations(plan, out, scorer, log=logs.append)
     assert scored == ["abl-a01", "abl-a02", "abl-a03", "abl-a07"]
     assert any("a07: not rescored" in line and "last step" in line for line in logs)
     assert rescored["decisions"]["a07"]["adopt"] is True  # its own check row still holds games10k_top1
-    assert rescored["decisions"]["a08"]["reason"] == "not judged: running"
-    assert json.loads(out.read_text(encoding="utf-8"))["arms"]["a02"]["games10k_top1"] == 0.41
+    assert "mate_preserving 0.8600 lost more than 2 pt" in rescored["decisions"]["a08"]["reason"]
+    assert rescored["arms"]["a02"]["games10k_top1"] == 0.41
+    assert out.read_text(encoding="utf-8") == finished_a08  # the sweep's record stands
 
 
-def test_the_sweep_says_how_to_score_missing_metrics_before_it_combines_the_winners(tmp_path, monkeypatch):
+WITH_A07 = ["a01", "a02", "a03", "a05", "a07", "a15"]
+
+
+def _final_step(home: Path, run: str) -> int:
+    rows = (home / "runs" / run / "evals.jsonl").read_text(encoding="utf-8").splitlines()
+    return json.loads(rows[-1])["step"]
+
+
+def _seed_scorer(home: Path, scored: list[str], extra: dict[str, tuple] | None = None):
+    """A stand-in for posthoc.score_run: the frozen-commit seeds' records (and `extra` runs')."""
+    records = {**FROZEN_SEEDS, **(extra or {})}
+
+    def scorer(run: str) -> None:
+        scored.append(run)
+        if run in records:
+            _write_posthoc(home, run, _final_step(home, run), *records[run])
+
+    return scorer
+
+
+def test_the_sweep_scores_the_seed_arms_post_hoc_before_it_combines_the_winners(tmp_path, monkeypatch):
+    """a01-a03 predate games10k_top1 and a07 is judged on it: the sweep scores the seeds itself while
+    the GPU is idle between arms, so the unattended a15 does not run without a07."""
     monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
-    plan = sweep.load_plan(_plan(tmp_path, A07_A08, ["a01", "a02", "a03", "a07", "a15"]))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, WITH_A07))
     monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
-    logs = []
-    runner = FakeRunner(tmp_path / "home", extra={"abl-a07": _check_row(0.43, 0.90)})
-    sweep.run_ablations(plan, tmp_path / "abl.json", rate=1000.0, runner=runner, log=logs.append)
-    warned = [line for line in logs if "blink sweep rescore" in line]
-    assert len(warned) == 1 and "a07" in warned[0] and "games10k_top1 missing" in warned[0]
+    home, scored = tmp_path / "home", []
+    runner = FakeRunner(home, extra={"abl-a07": _check_row(0.43, 0.90)})
+    report = sweep.run_ablations(
+        plan, tmp_path / "abl.json", 1000.0, runner, log=lambda _: None, scorer=_seed_scorer(home, scored)
+    )
+    assert scored == ["abl-a01", "abl-a02", "abl-a03"]  # only the floor was missing the metric
+    assert report["decisions"]["a07"]["adopt"] is True
+    a15 = tomllib.loads(runner.requests[-1].config.read_text(encoding="utf-8"))["train"]
+    assert (a15["alpha"], a15["rebalance"]) == (0.0, False)
+    assert report["arms"]["a15"]["combined_from"] == ["a05", "a07"]
+    assert report["recipe"]["recipe"] == "D + a05 + a07"
+
+
+def test_a15_is_held_while_an_arm_holds_a_metric_the_seed_arms_lack(tmp_path, monkeypatch):
+    """Scoring the seeds failed, so a07 cannot be judged: a15 waits instead of running without it, and a
+    later sweep runs it once `blink sweep rescore` has scored them."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, WITH_A07))
+    monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
+    home, out, logs = tmp_path / "home", tmp_path / "abl.json", []
+
+    def out_of_memory(run: str) -> None:
+        raise RuntimeError("CUDA out of memory")
+
+    runner = FakeRunner(home, extra={"abl-a07": _check_row(0.43, 0.90)})
+    report = sweep.run_ablations(plan, out, 1000.0, runner, log=logs.append, scorer=out_of_memory)
+    assert "abl-a15" not in [r.run for r in runner.requests]
+    a15 = report["arms"]["a15"]
+    assert a15["status"] == "held" and "a07 (games10k_top1)" in a15["reason"]
+    assert "blink sweep rescore" in a15["reason"]
+    assert any("a01: not rescored (CUDA out of memory)" in line for line in logs)
+    assert any(line.startswith("a15: held (") for line in logs)
+    assert report["recipe"] == {"recipe": "D", "reason": f"a15 is held: {a15['reason']}"}
+    for run, (games, kept) in FROZEN_SEEDS.items():  # what `blink sweep rescore` writes
+        _write_posthoc(home, run, _final_step(home, run), games, kept)
+    again = FakeRunner(home)
+    report = sweep.run_ablations(plan, out, 1000.0, again, log=lambda _: None)
+    assert [r.run for r in again.requests] == ["abl-a15"]
+    assert report["recipe"]["recipe"] == "D + a05 + a07"
+
+
+def test_a_guard_metric_the_arm_itself_lacks_does_not_hold_a15(tmp_path, monkeypatch):
+    """a08's mate_preserving needs child mate labels today's mateset lacks, so a08's own row has none:
+    no scoring of the seeds can judge a08, and a15 runs with the arms that were judged."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, ["a01", "a02", "a03", "a05", "a08", "a15"]))
+    monkeypatch.setitem(FAKE_VAA, "abl-a08", 0.51)
+    scored = []
+    runner = FakeRunner(tmp_path / "home", extra={"abl-a08": {"games10k_top1": 0.40, "shortest_mate": 0.6}})
+    report = sweep.run_ablations(
+        plan, tmp_path / "abl.json", 1000.0, runner, log=lambda _: None, scorer=scored.append
+    )
+    assert scored == []
+    assert report["decisions"]["a08"]["reason"] == "not judged: mate_preserving missing"
+    assert report["arms"]["a15"]["combined_from"] == ["a05"] and report["recipe"]["recipe"] == "D + a05"
+
+
+def test_a_rescore_after_a15_cannot_put_an_arm_it_never_trained_with_into_the_recipe(tmp_path, monkeypatch):
+    """a07 trained without games10k, so a15 combined a05 alone. Scoring a07 and the seeds afterwards
+    adopts a07, but a15's VAA vouches only for what it trained with: the recipe stays D until a15 reruns."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, WITH_A07))
+    monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
+    home, out = tmp_path / "home", tmp_path / "abl.json"
+    report = sweep.run_ablations(plan, out, 1000.0, FakeRunner(home), log=lambda _: None)
+    assert report["arms"]["a15"]["combined_from"] == ["a05"] and report["recipe"]["recipe"] == "D + a05"
+    scorer = _seed_scorer(home, [], {"abl-a07": (0.43, 0.90)})
+    judged = sweep.rescore_ablations(plan, out, scorer, log=lambda _: None)
+    assert judged["decisions"]["a07"]["adopt"] is True
+    assert judged["recipe"]["recipe"] == "D"
+    stale = "a15 trained with [a05] but the adopted set is now [a05, a07]: rerun a15"
+    assert judged["recipe"]["reason"].startswith(stale)
+    again = FakeRunner(home)
+    recorded = sweep.run_ablations(plan, out, 1000.0, again, log=lambda _: None)
+    assert again.requests == [] and recorded["recipe"] == judged["recipe"]
+
+
+def test_an_interrupted_a15_resumes_with_the_arms_it_started_with(tmp_path, monkeypatch):
+    """Its checkpoints hold that combination's training: resuming them under a set a rescore changed
+    meanwhile would train one a15 on two configs and record it as the new set."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, WITH_A07))
+    monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
+    home, out = tmp_path / "home", tmp_path / "abl.json"
+    with pytest.raises(KeyboardInterrupt):  # killed as a15 started, with a07 not yet judged
+        sweep.run_ablations(plan, out, 1000.0, FakeRunner(home, stop_after=5), log=lambda _: None)
+    (home / "runs" / "abl-a15").mkdir()
+    (home / "runs" / "abl-a15" / "ckpt_000000010.pt").write_bytes(b"")
+    rescore = _seed_scorer(home, [], {"abl-a07": (0.43, 0.90)})
+    for run in ("abl-a01", "abl-a02", "abl-a03", "abl-a07"):  # a rescore while a15 was down
+        rescore(run)
+    logs, second = [], FakeRunner(home)
+    report = sweep.run_ablations(plan, out, 1000.0, second, log=logs.append)
+    request = second.requests[0]
+    assert request.run == "abl-a15" and request.resume is True
+    config = tomllib.loads(request.config.read_text(encoding="utf-8"))["train"]
+    assert config["alpha"] == 0.0 and "rebalance" not in config
+    assert any("a15: resuming with the arms it started with (a05)" in line for line in logs)
+    assert report["decisions"]["a07"]["adopt"] is True
+    assert report["recipe"]["recipe"] == "D" and "rerun a15" in report["recipe"]["reason"]
+
+
+def test_sweep_rescore_will_not_score_on_the_gpu_beside_a_live_training_run(tmp_path, monkeypatch, capsys):
+    """The training arm sized its micro-batch to the free VRAM when it started; two more models and
+    4,096-row chunks beside it could run it out of memory."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = str(_plan(tmp_path, ARMS, ORDER))
+    out = tmp_path / "home" / "eval" / "ablations.json"
+    out.parent.mkdir(parents=True)
+    out.write_text(json.dumps({"arms": {}}), encoding="utf-8")
+    run_dir = tmp_path / "home" / "runs" / "abl-a15"
+    run_dir.mkdir(parents=True)
+    heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 5})
+    assert cli.main(["sweep", "rescore", "--plan", plan]) == 2
+    err = capsys.readouterr().err
+    assert "abl-a15" in err and "--device cpu" in err
+    assert cli.main(["sweep", "rescore", "--plan", plan, "--device", "cpu"]) == 0
 
 
 def _bench(rates: dict[str, float], p99: dict[str, float], budget: float = 5.5) -> dict:

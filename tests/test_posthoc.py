@@ -179,16 +179,19 @@ def test_sweep_rescore_scores_every_finished_arm_so_a07_and_a08_are_judged(home,
     out = home / "eval" / "ablations.json"
     out.parent.mkdir()
     _ablation_state(home, out, {"a01": "frozen", "a02": "frozen", "a03": "frozen", "a07": "current"})
+    recorded = out.read_bytes()
     plan = _rescore_plan(tmp_path / "ablations", finished / "pack")
     assert sweep.load_plan(plan).arms[3].judged_on == "games10k_top1"
     assert cli.main(["sweep", "rescore", "--plan", plan, "--device", "cpu"]) == 0
-    report = json.loads(out.read_text(encoding="utf-8"))
+    printed = capsys.readouterr().out
+    assert out.read_bytes() == recorded  # ablations.json is the sweep's: its next report reads the records
+    report = sweep.judge_ablations(sweep.load_plan(plan), json.loads(recorded)["arms"])
     assert "not judged" not in report["decisions"]["a07"]["reason"]  # the floor has games10k_top1 now
     assert report["decisions"]["a08"]["reason"] == "not judged: not run"
     assert report["noise"]["mate_preserving"]["sigma"] == pytest.approx(0.0)
     assert report["arms"]["a01"]["games10k_top1"] is not None
     for arm in ("a01", "a02", "a03", "a07"):
         assert (home / "runs" / f"abl-{arm}" / posthoc.POSTHOC).is_file()
-    assert "a07:" in capsys.readouterr().out
+    assert "a07: " in printed and "blink sweep ablations" in printed
     assert cli.main(["sweep", "rescore", "--plan", plan, "--device", "cpu"]) == 0  # nothing to redo
     assert "already scored" in capsys.readouterr().out

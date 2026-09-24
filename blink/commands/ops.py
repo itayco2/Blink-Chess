@@ -334,6 +334,7 @@ def _print_arm_plan(plan, rate: float) -> None:
 
 
 def cmd_sweep_ablations(args: argparse.Namespace) -> int:
+    from blink.data import games10k, mateset
     from blink.model.config import compile_mode, read_tables
     from blink.train import sweep
 
@@ -347,7 +348,10 @@ def cmd_sweep_ablations(args: argparse.Namespace) -> int:
         print(f"blink sweep ablations: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     out = _home_eval("ablations.json", args.out)
-    report = sweep.run_ablations(plan, out, rate, sweep.supervised_runner(_say), log=_say, slip=args.slip)
+    # the arms' own inputs (blink train's defaults); the GPU is the sweep's and idle between arms
+    scorer = _posthoc_scorer(games10k.default_path(), plan.data / mateset.OUTPUT, "cuda")
+    runner = sweep.supervised_runner(_say)
+    report = sweep.run_ablations(plan, out, rate, runner, log=_say, slip=args.slip, scorer=scorer)
     noise = report.get("noise") or {}
     sigma = noise.get("vaa", {}).get("sigma")
     _say(f"sigma VAA {sigma}, sigma ok {noise.get('sigma_ok')}; recipe {report['recipe']}")
@@ -357,23 +361,29 @@ def cmd_sweep_ablations(args: argparse.Namespace) -> int:
     return 0
 
 
-def _posthoc_scorer(args: argparse.Namespace, data: Path):
-    """score_run for one arm's run: games10k from --games10k or BLINK_HOME, the mateset of the plan's pack."""
-    from blink.data import games10k, mateset
+def _posthoc_scorer(games: Path, mates: Path, device: str, force: bool = False):
+    """posthoc.score_run for one arm's run under BLINK_HOME/runs, on these games10k and mateset files."""
     from blink.train import posthoc
 
-    games = Path(args.games10k) if args.games10k else games10k.default_path()
-
     def score(run: str) -> None:
-        run_dir = paths.home() / "runs" / run
-        posthoc.score_run(run_dir, games, data / mateset.OUTPUT, args.device, _say, args.force)
+        posthoc.score_run(paths.home() / "runs" / run, games, mates, device, _say, force)
 
     return score
 
 
+def _live_runs() -> list[str]:
+    """Runs whose trainer beat within the last 30 s (blink.train.status)."""
+    from blink.train import status
+
+    return [run.name for run in status.list_runs(paths.home() / "runs") if run.live]
+
+
 def cmd_sweep_rescore(args: argparse.Namespace) -> int:
     """Arms trained before the checks scored games10k and the mateset get them from their final
-    checkpoints, then every arm is judged again, so a07 and a08 meet an a01-a03 floor of their metrics."""
+    checkpoints, then every arm is judged again, so a07 and a08 meet an a01-a03 floor of their metrics.
+
+    Refuses the GPU while a run trains: that run sized its micro-batch to the free VRAM when it started."""
+    from blink.data import games10k, mateset
     from blink.train import sweep
 
     out = _home_eval("ablations.json", args.out)
@@ -381,14 +391,25 @@ def cmd_sweep_rescore(args: argparse.Namespace) -> int:
         plan = sweep.load_plan(_repo_config(args.plan, "ablations/plan.toml"))
         if not out.is_file():
             raise FileNotFoundError(f"no ablations.json at {out}: nothing has run yet")
+        live = _live_runs() if args.device == "cuda" else []
+        if live:
+            raise ValueError(
+                f"{', '.join(live)} is training; scoring on the GPU beside it could run it out of memory. "
+                "Wait for it, or pass --device cpu"
+            )
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep rescore: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    data = Path(args.data) if args.data else plan.data
-    report = sweep.rescore_ablations(plan, out, _posthoc_scorer(args, data), log=_say)
-    for name, decision in report["decisions"].items():
+    games = Path(args.games10k) if args.games10k else games10k.default_path()
+    mates = (Path(args.data) if args.data else plan.data) / mateset.OUTPUT
+    judged = sweep.rescore_ablations(plan, out, _posthoc_scorer(games, mates, args.device, args.force), _say)
+    for name, decision in judged["decisions"].items():
         _say(f"  {name}: {'ADOPT' if decision['adopt'] else 'keep D'} ({decision['reason']})")
-    _say(f"-> {out}")
+    _say(f"recipe {judged['recipe']}")
+    _say(
+        f"posthoc.json files written; {out} is the sweep's: a running sweep reads them for a15 and its "
+        "final report, else `blink sweep ablations` records them (and runs any pending or held arm)"
+    )
     return 0
 
 
@@ -476,7 +497,9 @@ def _register_sweep(sub: argparse._SubParsersAction) -> None:
     rescore.add_argument("--out", help="ablations.json (default BLINK_HOME/eval/ablations.json)")
     rescore.add_argument("--data", help="the pack whose mateset.npz is scored (default: the plan's data)")
     rescore.add_argument("--games10k", help="default: BLINK_HOME/data/games10k.npy")
-    rescore.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    rescore.add_argument(
+        "--device", choices=("cuda", "cpu"), default="cuda", help="cuda is refused while a run is training"
+    )
     rescore.add_argument("--force", action="store_true", help="score again even when already scored")
     rescore.set_defaults(func=cmd_sweep_rescore)
     for parser in (abl, sizes, choose):
