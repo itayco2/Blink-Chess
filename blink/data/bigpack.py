@@ -44,8 +44,9 @@ BUFFER_BYTES = 8 << 20
 BUCKET_DIR = "buckets"
 EVAL_HASHES = "eval_hashes.npy"
 DEFAULT_SEED = pack.DEFAULT_SEED
-SPLITS = ("train", "val", "test_iid", "test_grouped")
-TRAIN, VAL, TEST_IID, TEST_GROUPED = range(4)
+SPLITS = (*split.SPLITS, "test_grouped")  # index = split code; test_grouped extends blink.data.split
+TRAIN, VAL, TEST_IID = split.TRAIN_CODE, split.VAL_CODE, split.TEST_IID_CODE
+TEST_GROUPED = len(split.SPLITS)
 EVAL_SPLITS = SPLITS[1:]
 KINDS = ("roots", "children")
 DTYPES = {"roots": ROOT_DTYPE, "children": CHILD_DTYPE}

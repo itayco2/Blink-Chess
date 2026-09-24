@@ -281,3 +281,14 @@ def test_two_spawned_workers_pack_the_same_bytes_as_one(tmp_path, source, blockl
     assert {k: v["sha256"] for k, v in two["shards"].items()} == {
         k: v["sha256"] for k, v in packed[1]["shards"].items()
     }
+
+
+def test_bigpack_split_codes_extend_the_split_module_codes():
+    for code, name in enumerate(split.SPLITS):
+        assert bigpack.SPLITS[code] == name
+    assert (bigpack.TRAIN, bigpack.VAL, bigpack.TEST_IID) == (
+        split.TRAIN_CODE,
+        split.VAL_CODE,
+        split.TEST_IID_CODE,
+    )
+    assert bigpack.SPLITS[bigpack.TEST_GROUPED] == "test_grouped" == bigpack.SPLITS[-1]
