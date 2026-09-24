@@ -1,0 +1,92 @@
+name: pages
+
+# The browser page on GitHub Pages. Nothing runs until the repository variable PAGES_ENABLED is "true"
+# (set at gate G8, together with the model-v1 release and enabling Pages with the Actions source).
+# onnxruntime-web and chess.js come from npm (site/package-lock.json, exact versions and integrity);
+# `blink site stage` copies the page plus exactly the npm files blink/site/layout.py lists:
+# vendor/ort/{ort.wasm.bundle.min.mjs, ort-wasm-simd-threaded.wasm, ort-wasm-simd-threaded.mjs} and
+# vendor/chess.js/{chess.js, LICENSE}. The model is the model-v1 release's .onnx (the int8 browser model,
+# named model.onnx) and its card model.json, copied into the site because release assets send no CORS
+# headers (PF32). Neither the npm files nor the model is ever tracked in git.
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "blink/site/**"
+      - ".github/workflows/pages.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: stage the page, the npm runtime files and the model-v1 release
+    if: ${{ vars.PAGES_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install the pinned site packages (onnxruntime-web, chess.js, cm-chessboard)
+        run: npm ci --prefix site --no-audit --no-fund
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Install blink without torch
+        run: uv sync --locked --no-group train --no-group compile
+      - name: Stage the page with the ORT wasm entry and chess.js's ESM build into _site
+        run: uv run --no-sync blink site stage --out _site
+      - name: Fetch the browser model and its card from the model-v1 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download model-v1 -p "*.onnx" -p "model.json" -D _site/models
+          ls -l _site/models _site/vendor/ort _site/vendor/chess.js
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  smoke:
+    name: post-deploy smoke (Edge loads ?selftest=1 and plays 10 moves)
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Install blink without torch (Playwright comes with the dev group)
+        run: uv sync --locked --no-group train --no-group compile
+      - name: Microsoft Edge (preinstalled on GitHub's Ubuntu runners; installed only if missing)
+        run: command -v microsoft-edge-stable || uv run --no-sync playwright install --with-deps msedge
+      - name: The live page must set __blinkSelfTest.ok, play legal replies and log no console errors
+        run: uv run --no-sync blink site smoke --url "${{ needs.deploy.outputs.page_url }}?selftest=1" --selftest --timeout 120
