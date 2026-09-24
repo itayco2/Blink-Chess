@@ -1,0 +1,92 @@
+{
+  "name": "Blink example-ema",
+  "selector": "run:example:ema",
+  "mode": "policy",
+  "label": "one look, int8 WASM",
+  "backend": "wasm",
+  "threads": 1,
+  "file": "model.onnx",
+  "bytes": 419787,
+  "sha256": "5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c5a3c",
+  "precision": "int8",
+  "parameters": 339456,
+  "opset": 20,
+  "quantization": {
+    "method": "dynamic, int8 weights per output channel",
+    "fp32_bytes": 1576222,
+    "fp32_sha256": "0eb4a4240c68e2049e4408a151a6769571d2ced20124d8828e3264f896016d50",
+    "gate": {
+      "runtime": "onnxruntime-web 1.30.0, wasm, 1 thread (Node v22.14.0)",
+      "positions_source": "games10k",
+      "positions": 10000,
+      "batch_size": 1,
+      "top1_agreement": 0.9931,
+      "mean_abs_dwin_pt": 0.21,
+      "max_abs_dwin_pt": 2.4,
+      "disagreement_margin_p50_pt": 3.1,
+      "puzzles": {
+        "set": "lichess_bands.csv",
+        "set_rows": 5281,
+        "overall": {
+          "n": 5281,
+          "fp32_correct": 1670,
+          "int8_correct": 1667,
+          "fp32_pct": 31.622798712365082,
+          "int8_pct": 31.565991289528498,
+          "drop_pt": 0.056807422836584465
+        },
+        "bands": {
+          "<1000": {
+            "n": 1007,
+            "fp32_correct": 700,
+            "int8_correct": 699,
+            "fp32_pct": 69.5134061569017,
+            "int8_pct": 69.41410129096326,
+            "drop_pt": 0.09930486593843568
+          },
+          "1000-1500": {
+            "n": 1243,
+            "fp32_correct": 500,
+            "int8_correct": 499,
+            "fp32_pct": 40.22526146419952,
+            "int8_pct": 40.14481094127112,
+            "drop_pt": 0.08045052292840182
+          },
+          "1500-2000": {
+            "n": 1257,
+            "fp32_correct": 300,
+            "int8_correct": 300,
+            "fp32_pct": 23.86634844868735,
+            "int8_pct": 23.86634844868735,
+            "drop_pt": 0.0
+          },
+          "2000-2500": {
+            "n": 1409,
+            "fp32_correct": 150,
+            "int8_correct": 149,
+            "fp32_pct": 10.645848119233499,
+            "int8_pct": 10.574875798438608,
+            "drop_pt": 0.07097232079489046
+          },
+          "2500+": {
+            "n": 365,
+            "fp32_correct": 20,
+            "int8_correct": 20,
+            "fp32_pct": 5.47945205479452,
+            "int8_pct": 5.47945205479452,
+            "drop_pt": 0.0
+          }
+        }
+      },
+      "thresholds": {
+        "min_top1_agreement": 0.99,
+        "max_puzzle_drop_pt": 0.5,
+        "max_mean_abs_dwin_pt": 1.0
+      },
+      "failures": [],
+      "deviations": [],
+      "exploratory": false,
+      "passed": true
+    }
+  }
+}

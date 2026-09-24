@@ -193,6 +193,14 @@ export function policyTopK(legal, policyLogits, k) {
     .slice(0, k);
 }
 
+// The value head's distribution for the side to move: a softmax over the 128 bins (for the histogram).
+export function valueProbabilities(valueLogits) {
+  const max = Math.max(...valueLogits);
+  const exps = Array.from(valueLogits, (logit) => Math.exp(logit - max));
+  const total = exps.reduce((sum, x) => sum + x, 0);
+  return exps.map((x) => x / total);
+}
+
 // Expected win probability for the side to move: softmax over the value bins times the bin centres.
 export function winProbability(valueLogits) {
   const n = valueLogits.length;

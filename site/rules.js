@@ -92,7 +92,7 @@ export async function decide(vocab, game, ChessClass, evaluate, k) {
   const kids = children(vocab, game, ChessClass);
   const mate = mateNow(kids);
   if (mate) {
-    return Object.freeze({ turn, move: mate, rule: "R2", draw: null, calls: 0, top: [], win: 1, ms: 0, legalCount: kids.length });
+    return Object.freeze({ turn, move: mate, rule: "R2", draw: null, calls: 0, top: [], win: 1, bins: null, ms: 0, legalCount: kids.length });
   }
   const started = performance.now();
   const out = await evaluate(tok.encodeBoard(vocab, game));
@@ -110,6 +110,7 @@ export async function decide(vocab, game, ChessClass, evaluate, k) {
     calls: 1,
     top: ranked.slice(0, k),
     win,
+    bins: tok.valueProbabilities(out.value),
     ms,
     runMs: out.runMs,
     legalCount: kids.length,

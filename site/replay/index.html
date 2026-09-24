@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blink: training replay</title>
+    <meta name="description" content="How Blink learned: its training curves, frozen at one row per 2,000 steps, replayed step by step." />
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        --bg: #0b0e13;
+        --panel: #121720;
+        --line: #1f2633;
+        --text: #d7dde6;
+        --muted: #7d8795;
+        --accent: #ffd54a;
+        --val: #8ab4f8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      header { padding: 16px 20px 8px; border-bottom: 1px solid var(--line); }
+      h1 { margin: 0; font-size: 18px; letter-spacing: 0.02em; }
+      h1 span { color: var(--accent); }
+      a { color: var(--val); }
+      .about { margin: 4px 0 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+      .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 20px; }
+      .controls button {
+        background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 999px;
+        padding: 4px 14px; font: inherit; cursor: pointer;
+      }
+      .controls input[type="range"] { flex: 1 1 240px; accent-color: var(--accent); }
+      #cursor-label { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 12ch; }
+      main {
+        display: grid; gap: 14px; padding: 4px 20px 28px;
+        grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+      .card h2 {
+        margin: 0; font-size: 12px; font-weight: 600; color: var(--muted);
+        text-transform: uppercase; letter-spacing: 0.06em;
+      }
+      .value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0 6px; }
+      canvas { width: 100%; height: 150px; display: block; }
+      .caption { margin-top: 6px; font-size: 13px; color: var(--muted); }
+      .legend { font-size: 12px; color: var(--muted); }
+      .legend i { display: inline-block; width: 10px; height: 3px; vertical-align: middle; margin: 0 4px 0 10px; }
+      footer { padding: 0 20px 20px; color: var(--muted); font-size: 12px; }
+      @media (max-width: 480px) {
+        header, .controls, main, footer { padding-left: 16px; padding-right: 16px; }
+        main { grid-template-columns: 1fr; }
+      }
+    </style>
+    <script type="module" src="replay.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Blink <span>replay</span></h1>
+      <p class="about" id="about">Loading the frozen run</p>
+    </header>
+    <div class="controls">
+      <button type="button" id="play">Play</button>
+      <input type="range" id="cursor" min="0" max="1" value="1" step="1" aria-label="Training step" />
+      <span id="cursor-label">step -</span>
+    </div>
+    <main>
+      <section class="card" data-chart="policy">
+        <h2>Policy CE</h2><div class="value">-</div><canvas></canvas>
+        <div class="legend"><i style="background:#ffd54a"></i>train<i style="background:#8ab4f8"></i>val</div>
+        <div class="caption">starts at ln 1880 = 7.54: a network that knows nothing</div>
+      </section>
+      <section class="card" data-chart="value">
+        <h2>Value CE</h2><div class="value">-</div><canvas></canvas>
+        <div class="legend"><i style="background:#ffd54a"></i>train<i style="background:#8ab4f8"></i>val</div>
+        <div class="caption">starts at ln 128 = 4.85</div>
+      </section>
+      <section class="card" data-chart="top1">
+        <h2>Val top-1 (legal moves)</h2><div class="value">-</div><canvas></canvas>
+        <div class="legend"><i style="background:#8ab4f8"></i>raw<i style="background:#ffd54a"></i>EMA</div>
+        <div class="caption">a random legal move scores about 3%</div>
+      </section>
+      <section class="card" data-chart="speed">
+        <h2>Samples / s</h2><div class="value">-</div><canvas></canvas>
+        <div class="caption">one home RTX 3070</div>
+      </section>
+      <section class="card" data-chart="lr">
+        <h2>Learning rate</h2><div class="value">-</div><canvas></canvas>
+        <div class="caption">warmup, stable, then cooldown</div>
+      </section>
+      <section class="card" data-chart="grad">
+        <h2>Gradient norm</h2><div class="value">-</div><canvas></canvas>
+        <div class="caption">before clipping</div>
+      </section>
+    </main>
+    <footer>
+      A frozen copy of the live training dashboard: static files, no server. <a href="../">Play Blink</a>.
+    </footer>
+  </body>
+</html>

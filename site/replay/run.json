@@ -1,0 +1,11 @@
+{
+  "run": "skeleton",
+  "world": "ad74c28e50ef",
+  "parameters": 339456,
+  "steps": 3000,
+  "every": 2000,
+  "metrics_rows": 3,
+  "evals_rows": 3,
+  "source_metrics_rows": 61,
+  "source_evals_rows": 13
+}

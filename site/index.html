@@ -25,6 +25,10 @@
           <div class="winbar-white" id="win-white"></div>
         </div>
         <div class="winbar-labels"><span id="win-label-white">White</span><span id="win-label-black">Black</span></div>
+        <figure class="value-figure">
+          <svg id="value-hist" class="value-hist" viewBox="0 0 128 32" preserveAspectRatio="none" role="img" aria-label="Blink's value head: 128 bins of White's win chance, White's side on the left"></svg>
+          <figcaption class="small muted" id="hist-note">The value head's 128 bins of White's win chance appear after Blink's first look.</figcaption>
+        </figure>
         <p id="status" class="status" role="status" aria-live="polite">Loading the model</p>
       </section>
 
@@ -32,9 +36,10 @@
         <section class="card">
           <h2>Blink's last look</h2>
           <p class="timing"><span id="ms-last">-</span> ms per move <span class="muted" id="ms-median"></span></p>
+          <p class="small" id="backend">Backend: loading</p>
           <ol id="top-moves" class="top-moves"></ol>
           <p class="small" id="rule-note" role="status" aria-live="polite"></p>
-          <p class="muted small" id="mode-label">One look (policy): the legal move with the highest probability, from one forward pass. Like the bot, Blink plays a mate in one without looking, and avoids draws by rule when clearly winning but takes them when clearly losing. onnxruntime-web, WASM, 1 thread.</p>
+          <p class="muted small" id="mode-label">One look (policy): the legal move with the highest probability, from one forward pass. Like the bot, Blink plays a mate in one without looking, and avoids draws by rule when clearly winning but takes them when clearly losing. onnxruntime-web, WASM, 1 thread; value mode is not run in the browser.</p>
         </section>
 
         <section class="card controls">
@@ -68,8 +73,9 @@
 
         <section class="card">
           <h2>Model</h2>
-          <p id="model-card" class="small">Loading</p>
-          <p class="small">Lichess rating: <strong id="rating">rating accruing</strong></p>
+          <div id="model-card" class="small">Loading</div>
+          <p class="small">Lichess rating: <strong id="rating">rating accruing</strong> <span class="muted" id="rating-note"></span></p>
+          <p class="small"><a href="replay/index.html">How it learned: the training replay</a></p>
         </section>
       </aside>
     </main>
