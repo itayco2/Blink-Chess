@@ -119,7 +119,7 @@ def run_dm_block(
 # ------------------------------------------------------------------------------ the blocks (fastchess)
 
 
-def anchor_tc(ctx, state: dict) -> str | None:
+def anchor_control(ctx, state: dict) -> str | None:
     """None when the anchors play st=0.1; FALLBACK_TC when E0's SF self-check failed."""
     from blink.eval.orchestrate import earlier_report
 
@@ -164,7 +164,7 @@ def e5_block(ctx, state: dict) -> dict:
 
     for mode in MODES:
         fastchess.check_distinct_names([ctx.model, *ctx.side_models], mode)
-    tc = anchor_tc(ctx, state)
+    tc = anchor_control(ctx, state)
     modes, side_models = ((shipped_mode(ctx, state),), ()) if tc else (MODES, ctx.side_models)
     grid = rating.read_anchors()
     final = {
@@ -212,7 +212,7 @@ def e7_block(ctx, state: dict) -> dict:
     def play_blink(games: int) -> Report:
         return match.play_inprocess(blink, deepmind, games, "final", ctx.out_dir / "E7")
 
-    tc = anchor_tc(ctx, state)
+    tc = anchor_control(ctx, state)
     result = run_dm_block(
         fastchess_player(ctx, dm, "policy", "E7", tc),
         play_blink,
