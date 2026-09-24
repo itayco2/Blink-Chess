@@ -24,6 +24,9 @@ from blink.play.factory import RANDOM_SELECTORS
 BLINK_ST, BLINK_MARGIN_MS = 1.0, 500
 SF_ST, SF_MARGIN_MS = 0.1, 100
 MAX_MOVES = 300
+# fastchess waits 10 s for uciok/readyok by default; several torch+CUDA engines starting together on a
+# loaded machine can need longer (PF55). Blink's strength does not depend on this wait.
+STARTUP_MS = 60_000
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SUMMARY = re.compile(
     r"Games: (\d+), Wins: (\d+), Losses: (\d+), Draws: (\d+), Points: ([\d.]+)",
@@ -121,6 +124,8 @@ def build_command(exe: Path, blink_spec: EngineSpec, anchor: EngineSpec, plan: G
         str(plan.concurrency),
         "-maxmoves",
         str(plan.max_moves),
+        "-startup-ms",
+        str(STARTUP_MS),
         "-recover",
         "-pgnout",
         f"file={plan.pgn_out}",

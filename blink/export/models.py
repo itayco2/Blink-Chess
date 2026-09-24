@@ -1,8 +1,7 @@
 """Model selectors for export: `stand-in`, a path to an .onnx file, or the train area's selectors.
 
 The train area owns `blink.model.loading` (selector = run:<name>[:ema] | ship | release:<tag> | <.pt path>).
-Export needs the torch module itself, so it asks that module for `load_module(selector, device)` and
-falls back to the `.module` of the Evaluator that `load_evaluator(selector, device)` returns.
+Export needs the torch module itself, which `load_model(selector, device)` returns.
 """
 
 import importlib
@@ -44,17 +43,7 @@ def load_module(selector: str):
         from blink.export import standin
 
         return standin.build(seed=0)
-    loading = _loading()
-    if hasattr(loading, "load_module"):
-        return loading.load_module(selector, device="cpu").eval()
-    evaluator = loading.load_evaluator(selector, device="cpu")
-    module = getattr(evaluator, "module", None)
-    if module is None:
-        raise ModelUnavailable(
-            f"{LOADING_MODULE}.load_evaluator({selector!r}) returned {type(evaluator).__name__} without a "
-            "`.module`; export needs load_module(selector, device) or an Evaluator exposing .module"
-        )
-    return module.eval()
+    return _loading().load_model(selector, device="cpu").eval()
 
 
 def load_evaluator(selector: str) -> Evaluator:

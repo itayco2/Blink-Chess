@@ -29,6 +29,20 @@ jobs:
       - name: Tests with coverage
         run: uv run --no-sync pytest -q --cov=blink --cov-report=term-missing:skip-covered --cov-fail-under=80
 
+  node:
+    name: browser tokenizer parity (Node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install the pinned site packages
+        run: npm ci --prefix site --no-audit --no-fund
+      - name: JS tokenizer and rules equal Python on the golden positions
+        run: npm test --prefix site
+
   windows:
     name: windows (torch-free tier)
     runs-on: windows-latest

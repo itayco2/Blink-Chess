@@ -59,6 +59,15 @@ def test_the_gauntlet_command_uses_per_engine_time_controls(tmp_path):
     assert "-resign" not in command and "-draw" not in command
 
 
+def test_the_gauntlet_gives_engines_a_minute_to_start():
+    """PF55: fastchess waits 10 s for uciok/readyok by default, and a loaded machine starting several
+    torch+CUDA engines at once needed longer, so 3 of 20 skeleton games were scored as crashes."""
+    blink = fastchess.blink_engine("run:skeleton", mode="policy", device="cuda")
+    anchor = fastchess.stockfish_anchor(1320, Path("sf.exe"))
+    command = fastchess.build_command(Path("fastchess.exe"), blink, anchor, plan(Path("out")))
+    assert int(command[command.index("-startup-ms") + 1]) >= 60_000
+
+
 def test_a_random_blink_is_the_uci_engine_with_the_random_flag():
     blink = fastchess.blink_engine("random", mode="policy", device="cpu")
     assert blink.args == ("-m", "blink.uci", "--random", "--mode=policy", "--device=cpu")
