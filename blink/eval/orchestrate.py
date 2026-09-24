@@ -360,7 +360,7 @@ def e1_block(ctx: EvalContext, state: dict) -> dict:
     if (data / "valprobe.npz").is_file():
         with np.load(data / "valprobe.npz") as arrays:
             probe = {k: arrays[k] for k in arrays.files}
-    frames = [_film_row(ctx, p, val, probe) for p in ladder.film_frames(paths.home() / "runs" / ctx.film_run)]
+    frames = [_film_row(ctx, p, val, probe) for p in ladder.film_frames(ladder.film_run_dir(ctx.film_run))]
     film = _write_json(ctx.out_dir / "film.json", {"run": ctx.film_run, "frames": frames})
     return {"frames": frames, "film_json": str(film), "games": 0, "pgns": []}
 

@@ -92,6 +92,14 @@ def film_frames(run_dir: Path) -> list[Path]:
     return sorted((Path(run_dir) / "film").glob("frame_*.pt"), key=lambda p: int(p.stem.split("_")[1]))
 
 
+def film_run_dir(film_run: str) -> Path:
+    """A run's folder: a run name under BLINK_HOME/runs, or a folder given as a path."""
+    from blink import paths
+
+    given = Path(film_run)
+    return given if given.is_dir() else paths.home() / "runs" / film_run
+
+
 def pick_checkpoints(frames: Sequence[Path], count: int = FILM_CHECKPOINTS) -> list[Path]:
     """`count` frames evenly spaced from the first to the last (all of them when there are fewer)."""
     if len(frames) <= count:
@@ -158,14 +166,13 @@ def crossover_nodes(state: dict) -> tuple[int, str | None]:
 
 
 def e4b_block(ctx, state: dict) -> dict:
-    from blink import paths
     from blink.eval.orchestrate import shipped_mode
     from blink.play import factory
 
     if not ctx.film_run:
         return {"skipped": "no --film-run given", "games": 0, "pgns": []}
     mode, (nodes, flag) = shipped_mode(ctx, state), crossover_nodes(state)
-    checkpoints = pick_checkpoints(film_frames(paths.home() / "runs" / ctx.film_run))
+    checkpoints = pick_checkpoints(film_frames(film_run_dir(ctx.film_run)))
 
     def play(selector: str, at: int, games: int) -> Report:
         agent = factory.make_agent(mode, factory.load_evaluator(selector, device=ctx.device))
