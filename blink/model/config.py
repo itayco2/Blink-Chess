@@ -14,6 +14,7 @@ from typing import Any
 
 AUTO = "auto"
 HOUR_S = 3600.0
+COMPILE_MODES = ("off", "inductor")  # the cudagraphs backend measured no faster than eager (PF64)
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class TrainConfig:
     beta1: float = 0.9
     beta2: float = 0.95
     clip_norm: float | str = 1.0  # or "auto": 2 x the 95th percentile of the warmup gradient norms
+    compile: str = "off"  # or "inductor": torch.compile the training forward (P4 bench)
     ema_max: float = 0.9999
     alpha: float = 0.5  # soft policy target mixing weight
     tau: float = 0.05  # soft policy target temperature over win-probability gaps
@@ -82,6 +84,8 @@ class TrainConfig:
             raise ValueError(f"child_frac must be in [0, 1), got {self.child_frac}")
         self._check_micro_batch()
         self._check_clip()
+        if self.compile not in COMPILE_MODES:
+            raise ValueError(f"train.compile must be one of {COMPILE_MODES}, got {self.compile!r}")
 
     def _check_positive(self) -> None:
         positive = (

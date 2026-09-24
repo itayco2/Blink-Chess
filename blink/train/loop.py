@@ -83,6 +83,8 @@ class _Run:
     micro: int
     vram: dict[str, Any]
     probe: vaa.Probe | None = None
+    # the training forward: `model` itself, or its torch.compile wrapper
+    forward: torch.nn.Module | None = None
     reference: vaa.Reference | None = None
     checks: dict[int, str] = field(default_factory=dict)
     film_plan: dict[int, str] = field(default_factory=dict)
@@ -130,6 +132,12 @@ def _choose_micro(cfg: TrainConfig, model: BlinkNet, device: torch.device, free:
     return micro, {**info, "micro_batch": micro, "probes": probes}
 
 
+def _training_forward(model: BlinkNet, mode: str) -> torch.nn.Module:
+    """The module the training step calls. A compile wrapper shares the model's parameters, so the
+    optimizer, EMA, clip, evaluation and checkpoints keep using the plain model (no `_orig_mod.` keys)."""
+    return model if mode == "off" else torch.compile(model)
+
+
 def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -> _Run:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -147,6 +155,7 @@ def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -
     micro, vram_info = _choose_micro(cfg, model, device, free, log)
     clip = GradClip(cfg.clip_norm, cfg.warmup_steps)
     run = _Run(cfg, spec, model, ema, optimizer, device, val_set, log, clip, micro, vram_info, probe)
+    run.forward = _training_forward(model, cfg.compile)
     if probe is not None:
         run.checks = vaa.check_steps(cfg.steps, preview=spec.preview)
     if cfg.vaa_checks and cfg.vaa_reference:
@@ -203,7 +212,7 @@ def _train_step(run: _Run, data: StepData, lr: float) -> tuple[torch.Tensor, ...
     for group in run.optimizer.param_groups:
         group["lr"] = lr
     run.optimizer.zero_grad(set_to_none=True)
-    out = step.accumulate(run.model, data, run.device, run.micro, cfg.alpha, cfg.tau, cfg.lambda_v)
+    out = step.accumulate(run.forward, data, run.device, run.micro, cfg.alpha, cfg.tau, cfg.lambda_v)
     grad_norm = torch.nn.utils.clip_grad_norm_(run.model.parameters(), run.clip.limit())
     if run.clip.measuring:
         message = run.clip.observe(run.step, grad_norm.detach())  # read back once, at the warmup's end

@@ -104,6 +104,15 @@ def test_clip_norm_is_a_positive_number_or_auto():
             TrainConfig(clip_norm=bad)
 
 
+def test_compile_is_off_by_default_or_inductor():
+    """The P4 bench measured inductor 1.5-1.8x faster than eager and the cudagraphs backend no faster."""
+    assert TrainConfig().compile == "off"
+    assert TrainConfig(compile="inductor").compile == "inductor"
+    for bad in ("cudagraphs", "fast", True, ""):
+        with pytest.raises(ValueError, match="train.compile"):
+            TrainConfig(compile=bad)
+
+
 def test_auto_clip_needs_warmup_steps_to_measure():
     with pytest.raises(ValueError, match="warmup"):
         TrainConfig(clip_norm="auto", warmup_steps=0)

@@ -232,6 +232,33 @@ def test_a_step_data_source_trains_children_with_the_roots(tmp_path):
     assert all(np.isfinite(r["loss_value"]) for r in _rows(tmp_path / "run" / "metrics.jsonl"))
 
 
+def test_compile_wraps_only_the_training_forward_and_the_plain_module_is_what_is_saved(tmp_path):
+    """torch.compile is lazy, so this runs on CPU: the wrapper shares the parameters, nothing compiles."""
+    for mode in ("off", "inductor"):
+        cfg = tiny_train_config(steps=20, batch_size=16, compile=mode)
+        run = loop._build(cfg, _spec(tmp_path / mode), None, None, lambda _: None)
+        if mode == "off":
+            assert run.forward is run.model
+        else:
+            assert run.forward is not run.model and run.forward._orig_mod is run.model
+
+
+@pytest.mark.cuda
+def test_an_inductor_run_trains_like_eager_and_saves_plain_weights(tmp_path):
+    """The P4 rule adopts compile only if its loss stays within 1% of eager; here a short CUDA check."""
+    losses = {}
+    for mode in ("off", "inductor"):
+        cfg = tiny_train_config(steps=30, warmup_steps=5, batch_size=16, micro_batch=8, compile=mode)
+        loop.train(cfg, _spec(tmp_path / mode, device="cuda"), _repeat(fixture_records()[:16]), **_quiet())
+        rows = _rows(tmp_path / mode / "metrics.jsonl")
+        losses[mode] = rows[-1]["loss_policy"] + rows[-1]["loss_value"]
+        state = load_checkpoint(latest_checkpoint(tmp_path / mode))
+        assert not any("_orig_mod" in name for name in state["model"])
+    saved = json.loads((tmp_path / "inductor" / "config.json").read_text(encoding="utf-8"))
+    assert saved["config"]["compile"] == "inductor"
+    assert abs(losses["inductor"] - losses["off"]) <= 0.02 * losses["off"], losses
+
+
 @pytest.mark.cuda
 def test_the_full_recipe_runs_on_cuda_with_a_measured_micro_batch(tmp_path):
     from train_helpers import tiny_model_config

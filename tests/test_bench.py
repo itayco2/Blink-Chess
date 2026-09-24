@@ -106,7 +106,7 @@ def test_the_cudagraphs_backend_trains_several_steps_in_the_bench(tiny_config):
     )
     row = bench.measure_throughput(spec)
     assert row["error"] is None, row["error"]
-    assert row["spilled"] is False and 0 < row["peak_reserved_gb"] < row["vram_total_gb"]
+    assert row["spilled"] is False and 0 < row["peak_reserved_gb"] < row["vram_free_gb"]
 
 
 @pytest.mark.cuda
@@ -134,11 +134,11 @@ def test_cuda_graph_gradients_over_accumulated_micro_batches_match_eager_ones(ti
         torch.testing.assert_close(b.grad, a.grad, rtol=2e-2, atol=1e-4, msg=name)
 
 
-def test_a_peak_above_the_cards_vram_is_a_spill_into_system_memory():
-    """PF64: with the driver's sysmem fallback a row that should OOM runs slowly instead (16.7 GiB on 8)."""
-    assert bench.spilled(peak_gb=16.66, total_gb=8.0) is True
-    assert bench.spilled(peak_gb=7.9, total_gb=8.0) is False
-    assert bench.spilled(peak_gb=None, total_gb=8.0) is False
+def test_a_peak_above_the_free_vram_is_a_spill_into_system_memory():
+    """PF64: past the free VRAM the driver pages to system RAM: M at micro 512 ran 453/s, not 1,748/s."""
+    assert bench.spilled(peak_gb=7.19, free_gb=6.9) is True
+    assert bench.spilled(peak_gb=6.0, free_gb=6.9) is False
+    assert bench.spilled(peak_gb=None, free_gb=6.9) is False
 
 
 def test_best_rates_never_pick_a_spilled_row_even_without_a_budget():

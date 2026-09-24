@@ -189,9 +189,10 @@ def _release() -> None:
     torch._dynamo.reset()
 
 
-def spilled(peak_gb: float | None, total_gb: float) -> bool:
-    """Reserved past the card's own VRAM: the driver's sysmem fallback paged it to system RAM (PF64)."""
-    return peak_gb is not None and peak_gb > total_gb
+def spilled(peak_gb: float | None, free_gb: float) -> bool:
+    """Reserved past the VRAM that was free when the row started (the desktop and other processes hold
+    the rest): the driver's sysmem fallback paged the excess to system RAM instead of raising OOM (PF64)."""
+    return peak_gb is not None and peak_gb > free_gb
 
 
 def measure_throughput(spec: ThroughputSpec) -> dict[str, Any]:
@@ -212,14 +213,14 @@ def measure_throughput(spec: ThroughputSpec) -> dict[str, Any]:
     if on_cuda:
         _release()
         torch.cuda.reset_peak_memory_stats()
+        row["vram_free_gb"] = torch.cuda.mem_get_info()[0] / GIB
     try:
         row.update(_timed_steps(spec))
     except Exception as exc:  # noqa: BLE001 - every failure is recorded in its row; the sweep goes on
         row.update(oom=_is_oom(exc), error=f"{type(exc).__name__}: {exc}"[:300], samples_per_s=0.0)
     finally:
         row["peak_reserved_gb"] = torch.cuda.max_memory_reserved() / GIB if on_cuda else None
-        row["vram_total_gb"] = torch.cuda.get_device_properties(0).total_memory / GIB if on_cuda else None
-        row["spilled"] = on_cuda and spilled(row["peak_reserved_gb"], row["vram_total_gb"])
+        row["spilled"] = on_cuda and spilled(row["peak_reserved_gb"], row["vram_free_gb"])
         _release()
     return row
 
