@@ -163,10 +163,16 @@ def _book_start(book: str, pairs: int) -> tuple[Path, int]:
 
 
 def run_fastchess(command: Sequence[str], log: Path) -> int:
+    """Run fastchess from the log's folder: it autosaves its tournament state as config.json in its cwd."""
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "w", encoding="utf-8", errors="replace") as handle:
         proc = subprocess.run(
-            list(command), stdout=handle, stderr=subprocess.STDOUT, env=_engine_env(), check=False
+            list(command),
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=_engine_env(),
+            cwd=log.parent,
+            check=False,
         )
     return proc.returncode
 
@@ -199,6 +205,7 @@ def prepare_gauntlet(
     if tc:
         blink_spec, anchor_spec = with_tc(blink_spec, tc), with_tc(anchor_spec, tc)
     book_path, start = _book_start(book, games // 2)
+    book_path, out_dir = book_path.resolve(), out_dir.resolve()
     pgn = out_dir / f"{blink_spec.name}_vs_{anchor_spec.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn"
     return Gauntlet(
         blink_spec, anchor_spec, GauntletPlan(games, book_path, start, concurrency, pgn, max_moves)

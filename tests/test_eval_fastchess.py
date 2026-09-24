@@ -114,3 +114,18 @@ def test_a_two_game_gauntlet_against_stockfish_is_clean(tmp_path):
     assert report["audit"]["violations"] == []
     assert report["audit"]["decisions"] > 10
     assert report["blink_forfeits"] == {}
+
+
+def test_fastchess_runs_in_the_output_folder_so_its_autosave_lands_there(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen.update(kwargs)
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(fastchess.subprocess, "run", fake_run)
+    assert fastchess.run_fastchess(["fastchess.exe"], tmp_path / "games" / "g.log") == 0
+    assert seen["cwd"] == tmp_path / "games"
+    assert seen["env"]["PYTHONPATH"].split(fastchess.os.pathsep)[0] == str(
+        Path(fastchess.blink.__file__).parents[1]
+    )
