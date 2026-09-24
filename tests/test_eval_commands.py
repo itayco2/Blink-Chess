@@ -62,7 +62,7 @@ def test_eval_endgames_screens_with_cached_labels(tmp_path, monkeypatch, capsys)
     def analyse(board, nodes, move):
         return sflabel.SfLabel(int(100 * pawns.get(board.fen(), 0.2)), None, 20, None)
 
-    def fake(nodes, exe=None, cache_path=None, analyse_=None):
+    def fake(nodes, exe=None, cache_path=None, analyse_=None, procs=1):
         return real(nodes, cache_path=tmp_path / f"c{nodes}.jsonl", analyse=analyse)
 
     monkeypatch.setattr(sflabel, "SfLabeler", fake)
