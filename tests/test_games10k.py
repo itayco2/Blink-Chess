@@ -59,3 +59,9 @@ def test_workers_are_spawn_safe_and_skip_nothing_when_resumed(tmp_path):
     assert games10k.default_procs(cpu_count=12) == 5  # capped at 5 on the 12-thread build machine
     assert games10k.default_procs(cpu_count=None) == 1
     assert os.cpu_count() is None or games10k.default_procs() <= os.cpu_count()
+
+
+def test_the_trainer_finds_games10k_where_the_labeller_writes_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    assert games10k.default_path() == tmp_path / "home" / "data" / games10k.OUTPUT
+    assert games10k.OUTPUT == "games10k.npy"

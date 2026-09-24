@@ -7,6 +7,9 @@ train_000.bin shards and val.bin, roots only. Each optimizer step draws cfg.root
 cfg.children_per_step children from two ShardLoaders started at that step, so a resume is exact.
 
 --source-raw PATH parses the first --max-lines lines of a raw eval-DB file (roots only).
+
+The checks also score two held-out sets when they exist (blink.train.checksets): games10k from
+--games10k, else BLINK_HOME/data/games10k.npy, and a pack's own mateset.npz (a raw source has none).
 """
 
 import argparse
@@ -43,6 +46,8 @@ class DataPlan:
     world: str
     description: dict[str, Any]
     probe: Any = None  # blink.train.vaa.Probe | None
+    games10k: Path | None = None  # scored at the checks when the file exists
+    mateset: Path | None = None
 
 
 def _probe(args: argparse.Namespace, root: Path | None):
@@ -56,6 +61,19 @@ def _probe(args: argparse.Namespace, root: Path | None):
     probe = vaa.load_probe(path)
     print(f"valprobe: {probe.n_roots:,} roots, {len(probe.child_board):,} children from {path}", flush=True)
     return probe
+
+
+def _games10k(args: argparse.Namespace) -> Path:
+    from blink.data import games10k
+
+    chosen = getattr(args, "games10k", None)
+    return Path(chosen) if chosen else games10k.default_path()
+
+
+def _mateset(root: Path) -> Path:
+    from blink.data import mateset
+
+    return root / mateset.OUTPUT
 
 
 def _require_roots_only(cfg: TrainConfig, where: str) -> None:
@@ -90,7 +108,8 @@ def _raw_plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
     print(f"source-raw: {len(train):,} train, {len(val):,} val records (hash split {SPLIT_RULE})", flush=True)
     batches = InMemorySource(train, cfg.batch_size, cfg.seed).batches
     world = world_id(f"raw:{raw.sha1}")
-    return DataPlan(batches, val if len(val) else None, world, description, _probe(args, None))
+    probe = _probe(args, None)
+    return DataPlan(batches, val if len(val) else None, world, description, probe, _games10k(args))
 
 
 def _weigher(manifest: dict[str, Any], cfg: TrainConfig):
@@ -168,7 +187,9 @@ def _shard_plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
         "val_records": 0 if val is None else len(val),
     }
     source = mixed_source(root_stream, child_stream, _weigher(manifest, cfg))
-    return DataPlan(source, val, pack_world(manifest_bytes, manifest), description, _probe(args, root))
+    world = pack_world(manifest_bytes, manifest)
+    probe = _probe(args, root)
+    return DataPlan(source, val, world, description, probe, _games10k(args), _mateset(root))
 
 
 def plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
