@@ -7,7 +7,7 @@ import pytest
 
 from blink import paths
 from blink.board import encode, moves
-from blink.data import frames, grouped, parse, rows, zst
+from blink.data import canon, frames, grouped, parse, rows, zst
 from blink.data.record import ROOT_DTYPE
 
 PREFIX = paths.home() / "data" / "raw" / "prefix-342M.jsonl.zst"
@@ -51,6 +51,21 @@ def test_real_children_equal_python_chess_on_3000_prefix_lines():
         assert kids["fen_hash"].tolist() == _python_chess_children(line)
         checked += len(kids)
     assert checked > 3000
+
+
+@pytest.mark.local
+@needs_prefix
+def test_real_canonical_epd_equals_python_chess_epd_on_3000_prefix_lines():
+    checked = 0
+    for line in first_frame_lines()[:3000]:
+        try:
+            record = rows.parse_root(line)
+        except parse.Rejected:
+            continue
+        board = chess.Board(orjson.loads(line)["fen"] + " 0 1")
+        assert canon.canonical_epd(encode.unpack(record["board"]), board.turn) == board.epd(), line[:80]
+        checked += 1
+    assert checked > 2900
 
 
 @pytest.mark.local
