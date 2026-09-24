@@ -14,11 +14,14 @@ cannot hide a tab or a stray anchor). They never hold the token: lichess-bot tak
 LICHESS_BOT_TOKEN, which only Itay's start-bot.ps1 sets.
 
 `problems()` is the one check behind check-config, the generator and the tests: every lookup off
-(config_check), abort_time 30, concurrency under challenge, only UCI options blink-uci declares,
-engine options blink-uci accepts, a decision log per engine process when games run at once (lichess-bot
-starts one blink-uci per game with the same flags), the plan's rated or casual settings, and (rated
-only) the shipped sha and mode. The casual smoke runs the preview model during P7, so it is exempt
-from the ship check.
+(config_check); where the token and the engine go (lichess-bot sends the token to `url` and runs
+`interpreter interpreter_options dir/name` in working_dir with the token in its environment, so url,
+engine.dir and working_dir are pinned, interpreter and matchmaking.overrides must be empty, and no
+engine key outside the template's is allowed); abort_time 30, concurrency under challenge, only UCI
+options blink-uci declares, engine options blink-uci accepts, a decision log per engine process when
+games run at once (lichess-bot starts one blink-uci per game with the same flags), the plan's rated
+or casual settings, and (rated only) the shipped sha and mode. The casual smoke runs the preview
+model during P7, so it is exempt from the ship check.
 
 `check_file()` is the gate before the bot starts, so it fails closed: what it cannot verify is a
 problem, not a note. The engine exe must exist, and for the rated config the weights file must be
@@ -53,7 +56,30 @@ SHA = re.compile(r"^[0-9a-f]{7,64}$")  # --sha may be a prefix of the weights fi
 FULL_SHA = re.compile(r"^[0-9a-f]{64}$")  # a rated config records all of it
 TOKEN = re.compile(r"(lip|lio)_[A-Za-z0-9]{16,}")
 
+LICHESS_URL = "https://lichess.org/"
+ENGINE_DIRS = {"rated": "C:/dev/blink-chess/.venv/Scripts", "casual": "C:/dev/blink-chess/.venv/Scripts"}
+ENGINE_KEYS = frozenset(
+    {
+        "dir",
+        "name",
+        "working_dir",
+        "protocol",
+        "ponder",
+        "uci_ponder",
+        "engine_options",
+        "polyglot",
+        "draw_or_resign",
+        "online_moves",
+        "lichess_bot_tbs",
+        "uci_options",
+        "silence_stderr",
+    }
+)
+EMPTY_ENGINE_KEYS = ("interpreter", "interpreter_options")  # lichess-bot would run the engine through them
+
 COMMON_RULES: dict[tuple[str, ...], object] = {
+    ("url",): LICHESS_URL,
+    ("engine", "working_dir"): "",
     ("abort_time",): 30,
     ("engine", "protocol"): "uci",
     ("engine", "name"): "blink-uci.exe",
@@ -64,6 +90,7 @@ COMMON_RULES: dict[tuple[str, ...], object] = {
 }
 RATED_RULES = {
     **COMMON_RULES,
+    ("engine", "dir"): ENGINE_DIRS["rated"],
     ("engine", "engine_options", "device"): "cuda",
     ("challenge", "concurrency"): 2,
     ("challenge", "games_reserved_for_humans"): 1,
@@ -85,6 +112,7 @@ RATED_RULES = {
 }
 CASUAL_RULES = {
     **COMMON_RULES,
+    ("engine", "dir"): ENGINE_DIRS["casual"],
     ("engine", "engine_options", "device"): "cpu",
     ("challenge", "allow_list"): ["itayco2"],
     ("challenge", "concurrency"): 1,
@@ -211,6 +239,27 @@ def _placement_problems(config: Mapping) -> list[str]:
     ]
 
 
+def _redirect_problems(config: Mapping) -> list[str]:
+    """Keys that would run another program with the token in its environment, or rewrite a challenge."""
+    engine = _section(config, "engine")
+    found = [
+        f"engine.{key} must be absent or empty: lichess-bot would start the engine through {engine[key]!r}"
+        for key in EMPTY_ENGINE_KEYS
+        if engine.get(key)
+    ]
+    found += [
+        f"engine.{key} is not a key the template sets"
+        for key in engine
+        if key not in ENGINE_KEYS and key not in EMPTY_ENGINE_KEYS
+    ]
+    overrides = _section(config, "matchmaking").get("overrides")
+    if overrides:
+        found.append(
+            f"matchmaking.overrides must be absent or empty: they replace the plan's settings ({overrides})"
+        )
+    return found
+
+
 def _uci_option_problems(config: Mapping, declared: frozenset[str]) -> list[str]:
     options = _section(config, "engine", "uci_options")
     return [
@@ -301,6 +350,7 @@ def problems(
     found += _token_problems(config)
     found += _placement_problems(config)
     found += _rule_problems(config, RULES[kind])
+    found += _redirect_problems(config)
     found += _uci_option_problems(config, declared)
     found += _engine_flag_problems(config)
     found += _log_problems(config)

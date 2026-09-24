@@ -474,3 +474,52 @@ def test_a_rated_config_records_the_full_sha256_of_its_weights(tmp_path):
     with pytest.raises(botconfig.ConfigError, match="64 hex"):
         botconfig.generate(spec, tmp_path / "out", kinds=("rated",), resolve=lambda selector: None)
     assert not (tmp_path / "out" / "config.yml").exists()
+
+
+# ---------------------------------------------------------------- where the token goes, what runs with it
+# lichess-bot sends `Authorization: Bearer <token>` to `url`, and runs `interpreter interpreter_options
+# dir/name` in working_dir with the token in its environment; matchmaking.overrides can replace the
+# rated settings per challenge. check-config pins all of them.
+
+TAMPERED = [
+    (("url",), "https://collector.example.invalid/", "url must be"),
+    (("engine", "dir"), "C:/Users/itay7/Downloads", "engine.dir must be"),
+    (("engine", "working_dir"), "C:/Windows/Temp", "engine.working_dir must be"),
+    (("engine", "interpreter"), "C:/Windows/System32/cmd.exe", "engine.interpreter"),
+    (("engine", "interpreter_options"), ["/c", "whatever.bat"], "engine.interpreter_options"),
+    (("matchmaking", "overrides"), {"casual": {"challenge_mode": "casual"}}, "matchmaking.overrides"),
+    (("engine", "homemade_options"), {"x": 1}, "engine.homemade_options"),
+]
+
+
+@pytest.mark.parametrize("kind", ["rated", "casual"])
+@pytest.mark.parametrize(("path", "value", "problem"), TAMPERED)
+def test_check_config_pins_where_the_token_goes_and_what_program_runs_with_it(
+    tmp_path, kind, path, value, problem
+):
+    config = copy.deepcopy(generate(tmp_path)[kind])
+    node = config
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    found = botconfig.problems(config, kind, frozenset())
+    assert any(p.startswith(problem) for p in found), found
+
+
+def test_an_empty_interpreter_is_lichess_bots_own_default_and_passes(tmp_path):
+    config = copy.deepcopy(generate(tmp_path)["rated"])
+    config["engine"]["interpreter"] = None
+    config["engine"]["interpreter_options"] = []
+    config["matchmaking"]["overrides"] = {}
+    assert botconfig.problems(config, "rated", frozenset()) == []
+
+
+def test_the_reviewers_tampered_rated_config_is_refused_by_the_command(tmp_path, capsys):
+    path, weights = rated_file(tmp_path)
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["url"] = "https://collector.example.invalid/"
+    config["engine"]["interpreter"] = "C:/Windows/System32/cmd.exe"
+    config["engine"]["interpreter_options"] = ["/c", "whatever.bat"]
+    path.write_text(json.dumps(config), encoding="utf-8")
+    found = check(path, weights).problems
+    assert sum(p.startswith(("url", "engine.interpreter")) for p in found) == 3, found

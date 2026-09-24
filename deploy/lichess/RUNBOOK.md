@@ -84,6 +84,13 @@ Both switch off every lookup lichess-bot could make for the engine (polyglot boo
 the default `uci_options` (blink-uci declares none), and set `abort_time: 30` explicitly (the code
 default for a missing key is 20).
 
+lichess-bot sends the token to `url` and starts `interpreter interpreter_options dir
+ame` in
+`working_dir` with the token in its environment, so `check-config` pins those too: `url` is
+`https://lichess.org/`, `engine.dir` is the engine's install folder, `working_dir` is empty,
+`interpreter`, `interpreter_options` and `matchmaking.overrides` are absent or empty, and no engine
+key outside the template's is allowed.
+
 lichess-bot starts one `blink-uci` per game with the same flags, and the rated bot can run two games
 at once, so the decision log path holds `{process}`: each engine writes its own file,
 `D:\blink\lichess\decisions\<UTC start>-<PID>.jsonl` (casual: `D:\blink\lichess\decisions-casual\`),
