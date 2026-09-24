@@ -10,7 +10,9 @@ resumes the one that was running. Judging, after every arm has cooled down:
 - adopt an arm when its metric >= D + 2 sigma and its policy top-1 >= D_top1 - 2 sigma_top1
   (a08 also must not lose more than 2 pt of mate preservation);
 - a15 runs the adopted arms combined; the recipe becomes D plus them only if a15 >= D - 1 sigma.
-VAA and top-1 are fractions in [0, 1], as evals.jsonl writes top1; 1 pt is 0.01.
+VAA and top-1 are fractions in [0, 1], as evals.jsonl writes top1; 1 pt is 0.01. An arm's metrics are
+its last evals row plus, for an arm trained before the checks scored games10k and the mateset, the
+post-hoc record `blink sweep rescore` writes (blink.train.posthoc), read afresh whenever arms are judged.
 
 Sizes. S, M and M12 run for the same wall-clock hours; a conditional size (L) runs only if its
 measured rate passes the epoch floor. `choose` then applies the pre-registered precedence:
@@ -30,6 +32,7 @@ from typing import Any
 
 from blink import paths
 from blink.model.config import compile_mode, config_from_dict, read_tables
+from blink.train import posthoc
 from blink.train.atomic import write_text_atomic
 from blink.train.bench import best_rates
 from blink.train.supervise import Outcome, checkpoint_steps, read_jsonl
@@ -42,6 +45,9 @@ DEADLINE_FACTOR = 1.5  # a supervised arm is stopped at 1.5x its planned hours p
 COMPILE_ALLOWANCE_S = 1800.0
 TOLERANCE = 1e-9
 TABLES = ("model", "train")
+# the final check row's metrics an arm's entry repeats: what the arms are judged on (a07 games10k,
+# a08 its mate_preserving guard) and what FINDINGS reports beside them
+PICKED = ("vaa", "top1", "value_ce", "games10k_top1", "mate_preserving", "shortest_mate")
 
 Log = Callable[[str], None]
 
@@ -189,8 +195,9 @@ def validate(config: Mapping[str, Mapping[str, Any]]) -> None:
 
 
 def final_metrics(run_dir: Path) -> dict[str, Any] | None:
+    """The run's last evals row, with its post-hoc record (posthoc.json) merged when of the same step."""
     rows = read_jsonl(Path(run_dir) / "evals.jsonl")
-    return rows[-1] if rows else None
+    return posthoc.merge(rows[-1], posthoc.read(run_dir)) if rows else None
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -321,8 +328,18 @@ def _request(run: str, config: Path, data: Path, rate: float, hours: float, disa
 
 def _finish_entry(entry: Mapping[str, Any], outcome: Outcome, run: str) -> dict[str, Any]:
     metrics = final_metrics(paths.home() / "runs" / run) or {}
-    picked = {k: metrics.get(k) for k in ("vaa", "top1", "value_ce", "games10k_top1")}
+    picked = {k: metrics.get(k) for k in PICKED}
     return {**entry, **picked, "status": outcome.status, "metrics": metrics, "finished": time.time()}
+
+
+def _refreshed(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """A finished arm's entry with its run's post-hoc record merged in, which `blink sweep rescore` may
+    have written since the arm finished (even while this sweep runs other arms)."""
+    if entry.get("status") != "finished" or not entry.get("run"):
+        return dict(entry)
+    record = posthoc.read(paths.home() / "runs" / entry["run"])
+    metrics = posthoc.merge(entry.get("metrics") or {}, record)
+    return {**entry, **{k: metrics.get(k) for k in PICKED}, "metrics": metrics}
 
 
 def _execute(entry: dict[str, Any], request: RunRequest | None, runner: Runner, save, log: Log) -> dict:
@@ -342,7 +359,7 @@ def _execute(entry: dict[str, Any], request: RunRequest | None, runner: Runner, 
 
 
 def _judge(plan: AblationPlan, arms_state: Mapping[str, Mapping]) -> tuple[dict | None, dict[str, dict]]:
-    finished = {n: e.get("metrics") or {} for n, e in arms_state.items() if e.get("status") == "finished"}
+    finished = {n: _refreshed(e)["metrics"] for n, e in arms_state.items() if e.get("status") == "finished"}
     floor = noise_floor(finished, plan.sigma_arms)
     decisions = {}
     for arm in plan.arms:
@@ -363,6 +380,7 @@ def _plan_arm(plan: AblationPlan, arm: Arm, rate: float, arms_state, slip: bool,
     to_run = arm
     if arm.combine:
         _, decisions = _judge(plan, arms_state)
+        _warn_unscored(decisions, log)
         to_run = combine_adopted({a.name: a for a in plan.arms}, decisions, name=arm.name)
         if not to_run.combined_from:
             return {"name": arm.name, "status": "not run: no arm was adopted"}, None
@@ -374,6 +392,19 @@ def _plan_arm(plan: AblationPlan, arm: Arm, rate: float, arms_state, slip: bool,
     entry = {**info, "name": arm.name, "change": to_run.change, "combined_from": list(to_run.combined_from)}
     request = _request(run, config, plan.data, rate, plan.hours, plan.disable)
     return {**entry, "status": "running", "started": time.time()}, request
+
+
+def _warn_unscored(decisions: Mapping[str, Mapping], log: Log) -> None:
+    """Say which arms cannot be judged for a missing metric: arms trained before the checks scored
+    games10k and the mateset need `blink sweep rescore` before the winners are combined."""
+    unjudged = [
+        f"{name} ({d['reason']})" for name, d in decisions.items() if d["reason"].endswith(" missing")
+    ]
+    if unjudged:
+        log(
+            f"not judged for a missing metric: {'; '.join(unjudged)}. `blink sweep rescore` scores the "
+            "finished arms' final checkpoints post hoc"
+        )
 
 
 def run_ablations(
@@ -408,7 +439,7 @@ def _report(plan: AblationPlan, out: Path, state: Mapping, arms_state: Mapping) 
         {
             **state,
             "plan": dataclasses.asdict(plan),
-            "arms": dict(arms_state),
+            "arms": {name: _refreshed(entry) for name, entry in arms_state.items()},
             "noise": floor,
             "decisions": decisions,
             "recipe": recipe,
@@ -416,6 +447,21 @@ def _report(plan: AblationPlan, out: Path, state: Mapping, arms_state: Mapping) 
     )
     _save_state(out, report)
     return report
+
+
+def rescore_ablations(plan: AblationPlan, out: Path, scorer: Callable[[str], Any], log: Log = print) -> dict:
+    """Score every finished arm in `out` post hoc (`scorer(run)`, blink.train.posthoc.score_run in the
+    CLI), then judge the plan again; an arm that cannot be scored is logged and skipped."""
+    state = _load_state(out)
+    arms_state = dict(state.get("arms", {}))
+    for name, entry in arms_state.items():
+        if entry.get("status") != "finished":
+            continue
+        try:
+            scorer(entry.get("run") or f"abl-{name}")
+        except (ValueError, OSError) as exc:  # posthoc.NotFinished is a ValueError
+            log(f"{name}: not rescored ({exc})")
+    return _report(plan, out, state, arms_state)
 
 
 # ---------------------------------------------------------------- the size sweep

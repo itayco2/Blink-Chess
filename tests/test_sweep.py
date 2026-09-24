@@ -158,10 +158,13 @@ FAKE_VAA = {
 
 
 class FakeRunner:
-    """Writes a final evals.jsonl row per run; can stop the sweep partway like a killed process."""
+    """Writes a final evals.jsonl row per run; can stop the sweep partway like a killed process.
 
-    def __init__(self, home: Path, stop_after: int | None = None):
+    `extra` adds metrics to a run's final row, as the trainer's last check row carries them."""
+
+    def __init__(self, home: Path, stop_after: int | None = None, extra: dict[str, dict] | None = None):
         self.home, self.stop_after, self.requests = home, stop_after, []
+        self.extra = extra or {}
 
     def __call__(self, request: sweep.RunRequest) -> Outcome:
         if self.stop_after is not None and len(self.requests) == self.stop_after:
@@ -171,6 +174,7 @@ class FakeRunner:
         run_dir = self.home / "runs" / request.run
         run_dir.mkdir(parents=True, exist_ok=True)
         row = {"step": config["train"]["steps"], "vaa": FAKE_VAA[request.run], "top1": 0.30}
+        row.update(self.extra.get(request.run, {}))
         (run_dir / "evals.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
         return Outcome("finished", "finished", 0)
 
@@ -207,6 +211,140 @@ def test_the_slip_rule_drops_the_cut_arms_and_an_invalid_arm_does_not_stop_the_s
     assert report["arms"]["a05"]["status"].startswith("invalid: ")
     assert report["arms"]["a15"]["status"] == "not run: no arm was adopted"
     assert report["recipe"]["recipe"] == "D"
+
+
+def _check_row(games: float, kept: float, shortest: float = 0.6) -> dict[str, float]:
+    return {"games10k_top1": games, "mate_preserving": kept, "shortest_mate": shortest, "check": "100%"}
+
+
+def test_a07_and_a08_are_judged_on_the_games10k_and_mateset_metrics_of_their_last_check(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    arms = {
+        **ARMS,
+        "a07": 'judged_on = "games10k_top1"\n[train]\nrebalance = false\n',
+        "a08": 'guard = "mate_preserving"\n[train]\nseed = 8\n',
+    }
+    plan = sweep.load_plan(_plan(tmp_path, arms, ["a01", "a02", "a03", "a07", "a08"]))
+    extra = {
+        "abl-a01": _check_row(0.40, 0.90),
+        "abl-a02": _check_row(0.41, 0.91),
+        "abl-a03": _check_row(0.39, 0.89),
+        "abl-a07": _check_row(0.43, 0.90),  # VAA 0.49 is below D + 2 sigma, but a07 is judged on games10k
+        "abl-a08": _check_row(0.40, 0.86),  # VAA passes; mate preservation fell 4 pt from D
+    }
+    monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
+    monkeypatch.setitem(FAKE_VAA, "abl-a08", 0.51)
+    runner = FakeRunner(tmp_path / "home", extra=extra)
+    report = sweep.run_ablations(plan, tmp_path / "abl.json", rate=1000.0, runner=runner, log=lambda _: None)
+    assert report["noise"]["games10k_top1"]["d"] == pytest.approx(0.40)
+    assert report["noise"]["mate_preserving"]["sigma"] == pytest.approx(0.01)
+    a07, a08 = report["decisions"]["a07"], report["decisions"]["a08"]
+    assert a07["adopt"] is True and a07["metric"] == "games10k_top1" and a07["value"] == 0.43
+    assert a08["adopt"] is False and "mate_preserving 0.8600 lost more than 2 pt" in a08["reason"]
+    entry = report["arms"]["a08"]
+    assert (entry["games10k_top1"], entry["mate_preserving"], entry["shortest_mate"]) == (0.40, 0.86, 0.6)
+
+
+A07_A08 = {
+    **ARMS,
+    "a07": 'judged_on = "games10k_top1"\n[train]\nrebalance = false\n',
+    "a08": 'guard = "mate_preserving"\n[train]\nseed = 8\n',
+}
+FROZEN_SEEDS = {"abl-a01": (0.40, 0.90), "abl-a02": (0.41, 0.91), "abl-a03": (0.39, 0.89)}
+
+
+def _write_posthoc(home: Path, run: str, step: int, games: float, kept: float) -> None:
+    """What `blink eval arm-metrics` writes for a finished run (blink.train.posthoc)."""
+    metrics = {"games10k_top1": games, "mate_preserving": kept, "shortest_mate": 0.6}
+    record = {"step": step, "checkpoint": f"ckpt_{step:09d}.pt", "inputs": {}, "metrics": metrics}
+    (home / "runs" / run / "posthoc.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def _frozen_commit_sweep(tmp_path: Path, monkeypatch) -> tuple[sweep.AblationPlan, Path, dict]:
+    """a01-a03 finished by a commit whose checks had no games10k or mateset; a07 and a08 by one with them."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, ["a01", "a02", "a03", "a07", "a08"]))
+    extra = {"abl-a07": _check_row(0.43, 0.90), "abl-a08": _check_row(0.40, 0.86)}
+    monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
+    monkeypatch.setitem(FAKE_VAA, "abl-a08", 0.51)
+    out = tmp_path / "abl.json"
+    report = sweep.run_ablations(
+        plan, out, rate=1000.0, runner=FakeRunner(tmp_path / "home", extra=extra), log=lambda _: None
+    )
+    return plan, out, report
+
+
+def test_arms_that_predate_the_metrics_leave_a07_and_a08_unjudged_until_scored_post_hoc(
+    tmp_path, monkeypatch
+):
+    plan, out, report = _frozen_commit_sweep(tmp_path, monkeypatch)
+    assert report["decisions"]["a07"]["reason"] == "not judged: games10k_top1 missing"
+    home, step = tmp_path / "home", report["arms"]["a01"]["steps"]
+    for run, (games, kept) in FROZEN_SEEDS.items():
+        _write_posthoc(home, run, step, games, kept)
+    again = sweep.run_ablations(plan, out, rate=1000.0, runner=FakeRunner(home), log=lambda _: None)
+    assert again["noise"]["games10k_top1"]["d"] == pytest.approx(0.40)
+    a07, a08 = again["decisions"]["a07"], again["decisions"]["a08"]
+    assert a07["adopt"] is True and a07["value"] == 0.43
+    assert a08["adopt"] is False and "mate_preserving 0.8600 lost more than 2 pt" in a08["reason"]
+    a01 = again["arms"]["a01"]
+    assert (a01["games10k_top1"], a01["metrics"]["mate_preserving"], a01["metrics"]["vaa"]) == (
+        0.40,
+        0.90,
+        0.5,
+    )
+    assert json.loads(out.read_text(encoding="utf-8"))["decisions"]["a07"]["adopt"] is True
+    evals = home / "runs" / "abl-a01" / "evals.jsonl"
+    assert "games10k_top1" not in evals.read_text(encoding="utf-8")  # the history is never rewritten
+
+
+def test_a_posthoc_record_of_another_step_is_not_merged_into_the_final_row(tmp_path):
+    run_dir = tmp_path / "runs" / "abl-a01"
+    run_dir.mkdir(parents=True)
+    (run_dir / "evals.jsonl").write_text(json.dumps({"step": 100, "vaa": 0.5}) + "\n", encoding="utf-8")
+    _write_posthoc(tmp_path, "abl-a01", 90, 0.4, 0.9)  # scored from an older checkpoint
+    assert sweep.final_metrics(run_dir) == {"step": 100, "vaa": 0.5}
+    _write_posthoc(tmp_path, "abl-a01", 100, 0.4, 0.9)
+    merged = sweep.final_metrics(run_dir)
+    assert (
+        merged["games10k_top1"] == 0.4 and merged["vaa"] == 0.5 and merged["posthoc"] == "ckpt_000000100.pt"
+    )
+
+
+def test_rescore_scores_every_finished_arm_then_judges_the_plan_again(tmp_path, monkeypatch):
+    plan, out, report = _frozen_commit_sweep(tmp_path, monkeypatch)
+    home, step = tmp_path / "home", report["arms"]["a01"]["steps"]
+    state = json.loads(out.read_text(encoding="utf-8"))
+    state["arms"]["a08"]["status"] = "running"  # a killed arm is not scored
+    out.write_text(json.dumps(state), encoding="utf-8")
+    scored, logs = [], []
+
+    def scorer(run: str) -> None:
+        scored.append(run)
+        if run == "abl-a07":
+            raise ValueError("abl-a07 has no checkpoint at its last step")
+        if run in FROZEN_SEEDS:
+            _write_posthoc(home, run, step, *FROZEN_SEEDS[run])
+
+    rescored = sweep.rescore_ablations(plan, out, scorer, log=logs.append)
+    assert scored == ["abl-a01", "abl-a02", "abl-a03", "abl-a07"]
+    assert any("a07: not rescored" in line and "last step" in line for line in logs)
+    assert rescored["decisions"]["a07"]["adopt"] is True  # its own check row still holds games10k_top1
+    assert rescored["decisions"]["a08"]["reason"] == "not judged: running"
+    assert json.loads(out.read_text(encoding="utf-8"))["arms"]["a02"]["games10k_top1"] == 0.41
+
+
+def test_the_sweep_says_how_to_score_missing_metrics_before_it_combines_the_winners(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, ["a01", "a02", "a03", "a07", "a15"]))
+    monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
+    logs = []
+    runner = FakeRunner(tmp_path / "home", extra={"abl-a07": _check_row(0.43, 0.90)})
+    sweep.run_ablations(plan, tmp_path / "abl.json", rate=1000.0, runner=runner, log=logs.append)
+    warned = [line for line in logs if "blink sweep rescore" in line]
+    assert len(warned) == 1 and "a07" in warned[0] and "games10k_top1 missing" in warned[0]
 
 
 def _bench(rates: dict[str, float], p99: dict[str, float], budget: float = 5.5) -> dict:

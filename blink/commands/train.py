@@ -1,14 +1,16 @@
 """`blink train` and `blink status`.
 
 blink train --config configs/s.toml --run NAME (--data DIR | --source-raw PATH [--max-lines N])
-            [--valprobe FILE] [--resume [--lr-scale F]] [--max-steps N] [--device cuda|cpu]
+            [--valprobe FILE] [--games10k FILE] [--resume [--lr-scale F]] [--max-steps N]
+            [--device cuda|cpu]
 blink train --run NAME --data DIR --preview-cooldown 3h --from-step N    (writes runs/NAME-preview)
 
 A v1 pack directory holds train_r*.bin roots, train_c*.bin children, val_roots.bin, valprobe.npz
-and manifest.json (with the rebalancing weights); the P1 skeleton layout (train_000.bin, val.bin)
-still works for roots-only configs. `blink status --run NAME` prints the run's state and exits 1
-when the run is stale, crashed or has a NaN loss. Torch is imported only when a command runs, so
-`blink --help` stays fast and works on the torch-free CI leg.
+and manifest.json (with the rebalancing weights), plus mateset.npz, which the checks score with
+games10k (BLINK_HOME/data/games10k.npy unless --games10k names another); the P1 skeleton layout
+(train_000.bin, val.bin) still works for roots-only configs. `blink status --run NAME` prints the
+run's state and exits 1 when the run is stale, crashed or has a NaN loss. Torch is imported only
+when a command runs, so `blink --help` stays fast and works on the torch-free CI leg.
 """
 
 import argparse
@@ -96,6 +98,8 @@ def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path
         lr_scale=args.lr_scale,
         init_from=None if args.resume else branch_from,
         preview=is_preview,
+        games10k=plan.games10k,
+        mateset=plan.mateset,
     )
 
 
@@ -138,6 +142,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     train.add_argument("--max-lines", type=int, default=train_data.DEFAULT_MAX_LINES)
     train.add_argument("--workers", type=int, default=train_data.DEFAULT_WORKERS, help="parser processes")
     train.add_argument("--valprobe", help="a valprobe .npz for VAA (default: DATA/valprobe.npz when present)")
+    train.add_argument(
+        "--games10k", help="games10k .npy scored at the checks (default: BLINK_HOME/data/games10k.npy)"
+    )
     train.add_argument("--resume", action="store_true", help="continue from the run's latest checkpoint")
     train.add_argument(
         "--lr-scale", type=float, help="with --resume: the LR scale from here on (replaces the checkpoint's)"

@@ -9,15 +9,16 @@ and EMA) and the EMA's VAA on the fixed first `vaa_subset` roots of the valprobe
 and the EMA (ema_vaa), and the same passes give the EMA's subset VAA (ema_vaa_subset). The 5% rule
 compares root set with root set, each with its own noise floor: full rows with vaa_sigma, and subset
 rows only once vaa_sigma_subset has been measured. With `vaa_checks` the check's rule is applied; a
-failed rule sets `vaa_check_failed` True in the row, which the supervisor reads. `eval_s` records the
-row's cost so the overhead can be measured.
+failed rule sets `vaa_check_failed` True in the row, which the supervisor reads. A check row also
+scores games10k top-1 and the mateset's mate rates when the run has those files (blink.train.checksets:
+arms a07 and a08 are judged on them). `eval_s` records the row's cost so the overhead can be measured.
 """
 
 import time
 from collections.abc import Callable
 from typing import Any
 
-from blink.train import telemetry, vaa
+from blink.train import checksets, telemetry, vaa
 
 EVAL_ROWS_PER_TRAIN_ROW = 2
 
@@ -30,10 +31,20 @@ def _val_metrics(run) -> dict[str, Any]:
     return {**raw, **{f"ema_{k}": v for k, v in ema.items() if k != "n"}}
 
 
+def check_chunk(micro: int) -> int:
+    """Rows per no-grad forward pass for a run training `micro` rows at a time (no-grad rows cost far
+    less VRAM). Post-hoc scoring uses the run's own value, so its rows match the check rows exactly."""
+    return min(vaa.VAA_CHUNK, EVAL_ROWS_PER_TRAIN_ROW * micro)
+
+
+def _chunk(run) -> int:
+    return check_chunk(run.micro)
+
+
 def _vaa_metrics(run, label: str | None, tick: Callable[[], None] | None) -> dict[str, Any]:
     if run.probe is None:
         return {}
-    chunk = min(vaa.VAA_CHUNK, EVAL_ROWS_PER_TRAIN_ROW * run.micro)  # no-grad rows cost far less VRAM
+    chunk = _chunk(run)
     subset = run.cfg.vaa_subset
     if label is None:
         ema = vaa.evaluate_vaa(run.ema.module, run.probe.subset(subset), run.device, chunk, tick=tick)
@@ -79,6 +90,11 @@ def _describe(record: dict[str, Any]) -> str:
         parts.append(f"VAA {record['vaa']:.3f} (ema {record['ema_vaa']:.3f}, {record['vaa_set']})")
     elif "ema_vaa" in record:
         parts.append(f"VAA ema {record['ema_vaa']:.3f} ({record['vaa_set']} of {record['vaa_n']})")
+    for key, name in (("games10k_top1", "games10k top-1"), ("shortest_mate", "shortest mate")):
+        if key in record:
+            parts.append(f"{name} {record[key]:.3f} (ema {record['ema_' + key]:.3f})")
+    if "mate_preserving" in record:
+        parts.append(f"mate kept {record['mate_preserving']:.3f} (ema {record['ema_mate_preserving']:.3f})")
     if "vaa_check_failed" in record:
         parts.append(f"CHECK {record['check']} FAILED: {record['check_failure']}")
     elif "check" in record:
@@ -95,6 +111,8 @@ def evaluate(run, label: str | None = None, tick: Callable[[], None] | None = No
     metrics = {**_val_metrics(run), **_vaa_metrics(run, label, tick)}
     if not metrics:
         return
+    if label is not None:
+        metrics.update(checksets.metrics(run, _chunk(run), tick))
     record = {"step": run.step, "samples": run.step * run.cfg.batch_size, **metrics}
     if label is not None:
         record.update(_check(run, label, record))

@@ -6,7 +6,8 @@ gradient (a fixed norm, or "auto" measured over the warmup) and updates the EMA.
 
 Everything a run writes lives in its run directory: config.json (world id, config, parameter counts,
 VRAM budget), metrics.jsonl every `metrics_every` steps (with the window's phase: train, eval or
-ckpt), evals.jsonl every `eval_every` steps plus the full-valprobe checks at 5/25/30/50/100%,
+ckpt), evals.jsonl every `eval_every` steps plus the full-valprobe checks at 5/25/30/50/100% (which
+also score games10k and the pack's mateset when the run has them),
 heartbeat.json every `heartbeat_s` seconds, film/ frames when `film` is on, and atomic checkpoints
 ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the straight run, because the batch
 source is seeked to the checkpoint's step.
@@ -27,7 +28,7 @@ import torch
 from blink import heartbeat
 from blink.model.config import AUTO, TrainConfig, config_to_dict
 from blink.model.transformer import BlinkNet, parameter_report
-from blink.train import evals, film, resume, step, telemetry, vaa, vram
+from blink.train import checksets, evals, film, resume, step, telemetry, vaa, vram
 from blink.train.atomic import write_text_atomic
 from blink.train.checkpoint import list_checkpoints, save_checkpoint
 from blink.train.clipping import GradClip
@@ -53,6 +54,9 @@ class RunSpec:
     lr_scale: float | None = None  # on resume: the LR scale from here on (None keeps the checkpoint's)
     init_from: Path | None = None  # start a new run from another run's checkpoint (preview cooldown)
     preview: bool = False  # a preview branch checks only its own end, against the reference's final VAA
+    # held-out sets the checks also score (blink.train.checksets); None scores nothing, as before
+    games10k: Path | None = None  # games10k.npy for games10k_top1 (blink train: BLINK_HOME/data)
+    mateset: Path | None = None  # the pack's mateset.npz for shortest_mate and mate_preserving
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,7 @@ class _Run:
     # the training forward: `model` itself, or its torch.compile wrapper
     forward: torch.nn.Module | None = None
     reference: vaa.Reference | None = None
+    sets: checksets.CheckSets = field(default_factory=checksets.CheckSets)  # each loaded at the first check
     checks: dict[int, str] = field(default_factory=dict)
     film_plan: dict[int, str] = field(default_factory=dict)
     step: int = 0
@@ -158,6 +163,7 @@ def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -
     run.forward = _training_forward(model, cfg.compile)
     if probe is not None:
         run.checks = vaa.check_steps(cfg.steps, preview=spec.preview)
+    run.sets = checksets.for_run(spec.games10k, spec.mateset)
     if cfg.vaa_checks and cfg.vaa_reference:
         run.reference = vaa.load_reference(spec.run_dir.parent / cfg.vaa_reference)
     if cfg.film:
