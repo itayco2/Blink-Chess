@@ -76,7 +76,10 @@ def test_missing_weights_fail_fast_and_name_the_converter(monkeypatch, tmp_path)
 
 
 def test_the_registry_imports_no_torch():
-    modules = "blink.reference.registry, blink.commands.evaluate, blink.commands.play, blink.uci"
+    modules = (
+        "blink.reference.registry, blink.reference.gauntlet, blink.commands.evaluate, "
+        "blink.commands.play, blink.uci"
+    )
     code = f"import sys, {modules}; print('torch' in sys.modules)"
     proc = subprocess.run(
         [sys.executable, "-c", code],

@@ -5,9 +5,10 @@
 
 tools/dm_convert.py writes both files once, in the throwaway JAX venv. A dm selector gives a
 DeepMindAgent, not an Evaluator: DeepMind's model reads (FEN, move) rows, so it has one mode,
-"action-value", instead of Blink's policy and value modes. `blink eval puzzles`, `blink-uci` (and so
-`blink gauntlet`) and `blink match` route a dm selector here. This module imports no torch; the model
-is imported only when an agent is loaded.
+"action-value", instead of Blink's policy and value modes. `blink eval puzzles`, `blink-uci` and
+`blink match` route a dm selector here; `blink gauntlet` runs blink-uci through blink.reference.gauntlet,
+which names the engine DM-9M and audits its own moves. This module imports no torch; the model is
+imported only when an agent is loaded.
 """
 
 from dataclasses import dataclass
