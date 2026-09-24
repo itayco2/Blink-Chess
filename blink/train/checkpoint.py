@@ -7,15 +7,14 @@ checkpoint can hold tensors and plain Python values but never arbitrary pickled 
 
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from blink.train.atomic import replace_with_retry
+
 PATTERN = re.compile(r"^ckpt_(\d+)\.pt$")
-REPLACE_RETRIES = 5
-RETRY_SLEEP_S = 0.2
 
 
 def checkpoint_name(step: int) -> str:
@@ -42,18 +41,6 @@ def latest_checkpoint(run_dir: Path) -> Path | None:
     return found[-1] if found else None
 
 
-def _replace_with_retry(tmp: Path, path: Path) -> None:
-    """Windows refuses os.replace while a scanner or reader holds the target, so retry briefly."""
-    for attempt in range(REPLACE_RETRIES):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == REPLACE_RETRIES - 1:
-                raise
-            time.sleep(RETRY_SLEEP_S)
-
-
 def save_checkpoint(run_dir: Path, step: int, state: dict[str, Any], keep_last: int = 3) -> Path:
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +52,7 @@ def save_checkpoint(run_dir: Path, step: int, state: dict[str, Any], keep_last: 
         torch.save(state, handle)
         handle.flush()
         os.fsync(handle.fileno())
-    _replace_with_retry(tmp, path)
+    replace_with_retry(tmp, path)  # a scanner or reader may briefly hold either file
     for old in list_checkpoints(run_dir)[:-keep_last]:
         old.unlink(missing_ok=True)
     return path

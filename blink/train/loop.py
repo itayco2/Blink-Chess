@@ -24,6 +24,7 @@ from blink.model.config import TrainConfig, config_to_dict
 from blink.model.losses import compute_losses
 from blink.model.transformer import BlinkNet, count_parameters
 from blink.train import telemetry
+from blink.train.atomic import write_text_atomic
 from blink.train.batch import Batch, make_batch
 from blink.train.checkpoint import latest_checkpoint, list_checkpoints, load_checkpoint, save_checkpoint
 from blink.train.ema import Ema
@@ -169,10 +170,7 @@ def _write_config(cfg: TrainConfig, spec: RunSpec, parameters: int) -> None:
         "data": spec.data,
         "config": config_to_dict(cfg),
     }
-    path = spec.run_dir / "config.json"
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="")
-    os.replace(tmp, path)
+    write_text_atomic(spec.run_dir / "config.json", json.dumps(record, indent=2) + "\n")
 
 
 def _beat(run: _Run, state: str, **extra: Any) -> None:

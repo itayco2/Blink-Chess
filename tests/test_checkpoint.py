@@ -4,7 +4,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from blink.train import checkpoint  # noqa: E402
+from blink.train import atomic, checkpoint  # noqa: E402
 from blink.train.checkpoint import (  # noqa: E402
     checkpoint_name,
     latest_checkpoint,
@@ -80,7 +80,7 @@ def test_a_locked_target_is_retried_before_giving_up(tmp_path, monkeypatch):
         real_replace(src, dst)
 
     monkeypatch.setattr(checkpoint.os, "replace", flaky)
-    monkeypatch.setattr(checkpoint, "RETRY_SLEEP_S", 0.0)
+    monkeypatch.setattr(atomic, "RETRY_SLEEP_S", 0.0)
     path = save_checkpoint(tmp_path, 10, {"step": 10})
     assert load_checkpoint(path)["step"] == 10
 

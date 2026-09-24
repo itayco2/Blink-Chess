@@ -5,7 +5,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from train_helpers import fixture_records, tiny_model_config, tiny_train_config  # noqa: E402
+from train_helpers import fixture_records, held_open, tiny_model_config, tiny_train_config  # noqa: E402
 
 from blink.train import loop  # noqa: E402
 from blink.train.checkpoint import latest_checkpoint, list_checkpoints, load_checkpoint, step_of  # noqa: E402
@@ -219,3 +219,29 @@ def test_a_short_cuda_run_trains_in_bf16_and_resumes(tmp_path):
     assert done.last_eval["policy_ce"] < 7.54
     state = load_checkpoint(latest_checkpoint(run_dir))
     assert state["rng"]["cuda"] and state["step"] == 40
+
+
+def test_resume_succeeds_while_the_dashboard_briefly_holds_the_logs_open(tmp_path):
+    records = fixture_records()
+    cfg = tiny_train_config(steps=40, metrics_every=10, eval_every=10, batch_size=16, ckpt_every_steps=20)
+    run_dir = tmp_path / "run"
+    loop.train(cfg, _spec(run_dir, max_steps=30), _repeat(records[:16]), val=records, log=lambda _: None)
+    assert step_of(latest_checkpoint(run_dir)) == 30
+    list_checkpoints(run_dir)[-1].unlink()  # the resume rewinds to step 20 and truncates both logs
+    with held_open(run_dir / "metrics.jsonl", run_dir / "evals.jsonl"):
+        result = loop.train(
+            cfg, _spec(run_dir, resume=True), _repeat(records[:16]), val=records, log=lambda _: None
+        )
+    assert result.step == 40
+    assert [m["step"] for m in _records_jsonl(run_dir / "metrics.jsonl")] == [1, 10, 20, 30, 40]
+
+
+def test_a_new_run_rewrites_a_stale_config_a_reader_is_holding_open(tmp_path):
+    records = fixture_records()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "config.json").write_text("{}\n", encoding="utf-8")  # an attempt that died before step 1
+    cfg = tiny_train_config(steps=20, batch_size=16, ckpt_every_steps=10)
+    with held_open(run_dir / "config.json"):
+        loop.train(cfg, _spec(run_dir, max_steps=1), _repeat(records[:16]), val=records, log=lambda _: None)
+    assert json.loads((run_dir / "config.json").read_text(encoding="utf-8"))["world"] == WORLD

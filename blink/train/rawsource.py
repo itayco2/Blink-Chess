@@ -14,7 +14,6 @@ import hashlib
 import io
 import json
 import multiprocessing
-import os
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -25,6 +24,7 @@ import zstandard
 
 from blink.data.parse import Rejected, parse_line
 from blink.data.record import ROOT_DTYPE
+from blink.train.atomic import replace_with_retry, write_text_atomic
 
 PARSER_VERSION = 1
 READ_BUFFER = 1 << 20
@@ -110,9 +110,8 @@ def _save(cache: Path, records: np.ndarray, sidecar: dict) -> None:
     tmp = cache.with_name(cache.name + ".tmp")
     with open(tmp, "wb") as handle:
         np.save(handle, records, allow_pickle=False)
-    os.replace(tmp, cache)
-    meta = cache.with_suffix(".json")
-    meta.write_text(json.dumps(sidecar, indent=2) + "\n", encoding="utf-8", newline="")
+    replace_with_retry(tmp, cache)  # a scanner may still hold the file it just watched being written
+    write_text_atomic(cache.with_suffix(".json"), json.dumps(sidecar, indent=2) + "\n")
 
 
 def load_or_build(

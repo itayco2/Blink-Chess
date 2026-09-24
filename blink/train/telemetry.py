@@ -7,7 +7,6 @@ code marks the target square, so python-chess can list the legal moves of that f
 """
 
 import json
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +19,7 @@ import torch
 from blink.board import encode, moves, value
 from blink.board.encode import unpack
 from blink.model.losses import compute_losses
+from blink.train.atomic import write_text_atomic
 from blink.train.batch import Batch, make_batch
 
 EVAL_CHUNK = 1024
@@ -107,9 +107,7 @@ def truncate_after(path: Path, step: int) -> None:
                 kept.append(line)
         except (json.JSONDecodeError, KeyError, TypeError):
             continue
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text("".join(kept), encoding="utf-8", newline="")
-    os.replace(tmp, path)
+    write_text_atomic(path, "".join(kept))  # the live dashboard may be reading this very file
 
 
 class MetricWindow:

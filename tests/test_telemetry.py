@@ -5,7 +5,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from train_helpers import FIXTURE, fixture_records, tiny_model_config  # noqa: E402
+from train_helpers import FIXTURE, fixture_records, held_open, tiny_model_config  # noqa: E402
 
 from blink.board import encode, moves  # noqa: E402
 from blink.board.encode import unpack  # noqa: E402
@@ -55,3 +55,12 @@ def test_truncate_after_keeps_lines_up_to_the_step(tmp_path):
 def test_truncating_a_missing_file_is_a_no_op(tmp_path):
     telemetry.truncate_after(tmp_path / "missing.jsonl", 10)
     assert not (tmp_path / "missing.jsonl").exists()
+
+
+def test_truncating_succeeds_while_the_dashboard_briefly_holds_the_log_open(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    for step in (50, 100, 150):
+        telemetry.append_jsonl(path, {"step": step})
+    with held_open(path):
+        telemetry.truncate_after(path, 100)
+    assert path.read_text(encoding="utf-8") == '{"step": 50}\n{"step": 100}\n'

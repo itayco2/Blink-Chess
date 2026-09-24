@@ -4,7 +4,7 @@ import zstandard
 from train_helpers import FIXTURE, fixture_records
 
 from blink.data.record import ROOT_DTYPE
-from blink.train import rawsource
+from blink.train import atomic, rawsource
 
 SKIPPABLE = (0x184D2A50).to_bytes(4, "little") + (4).to_bytes(4, "little") + b"meta"
 
@@ -90,3 +90,25 @@ def test_the_hash_split_sends_0_1_to_val_2_3_to_test_and_the_rest_to_train():
 def test_a_missing_raw_file_is_a_clear_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         rawsource.load_or_build(tmp_path / "nope.zst", 10, tmp_path, workers=1, log=lambda _: None)
+
+
+def test_the_cache_is_saved_even_if_a_scanner_briefly_locks_the_fresh_file(tmp_path, monkeypatch):
+    raw = tmp_path / "evals.jsonl.zst"
+    _write_zst(raw, _lines())
+    real_replace = atomic.os.replace
+    locks = {"left": 2}
+
+    def scanned(src, dst):
+        if locks["left"]:
+            locks["left"] -= 1
+            raise PermissionError(32, "an antivirus scan holds the file")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(atomic.os, "replace", scanned)
+    monkeypatch.setattr(atomic, "RETRY_SLEEP_S", 0.0)
+    built = rawsource.load_or_build(
+        raw, max_lines=30, cache_dir=tmp_path / "c", workers=1, log=lambda _: None
+    )
+    assert built.built and locks["left"] == 0
+    assert np.array_equal(np.load(built.cache, allow_pickle=False), built.records)
+    assert not list((tmp_path / "c").glob("*.tmp"))
