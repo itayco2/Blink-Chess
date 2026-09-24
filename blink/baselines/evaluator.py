@@ -20,7 +20,7 @@ from blink.baselines import features, models
 from blink.board import moves, value
 from blink.play.agents import ValueAgent
 from blink.play.evaluator import Evaluation
-from blink.play.oracles import MaterialEvaluator
+from blink.play.factory import material_agent
 
 AGENT_NAMES = {"material": "Material", "linear": "Linear", "mlp": "MLP"}
 
@@ -71,7 +71,7 @@ def load_baseline(path: Path, device: str = "cpu") -> tuple[BaselineEvaluator, s
 def baseline_agent(selector: str, device: str = "cpu") -> ValueAgent:
     """material | linear | mlp (BLINK_HOME/runs/baseline-<kind>/model.pt) | a path to a baseline .pt."""
     if selector == "material":
-        return ValueAgent(MaterialEvaluator(), name=AGENT_NAMES["material"])
+        return material_agent()
     path = default_path(selector) if selector in models.KINDS else Path(selector)
     evaluator, kind = load_baseline(path, device)
     return ValueAgent(evaluator, name=AGENT_NAMES[kind])

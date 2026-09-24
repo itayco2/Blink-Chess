@@ -17,11 +17,12 @@ from blink.play import rules
 from blink.play.agents import Agent, PolicyAgent, ValueAgent
 from blink.play.budget import DecisionRecord
 from blink.play.evaluator import Evaluator
-from blink.play.oracles import RandomLogitEvaluator
+from blink.play.oracles import MaterialEvaluator, RandomLogitEvaluator
 
 RANDOM_SELECTORS = frozenset({"random", "random-net"})
 MODES = ("policy", "value")
 LOADER = "blink.model.loading"
+MATERIAL_NAME = "Material"
 
 
 class ModelUnavailable(RuntimeError):
@@ -55,6 +56,12 @@ def load_evaluator(selector: str, device: str = "cuda", seed: int = 0) -> Evalua
     except ImportError as exc:
         raise ModelUnavailable(_loader_missing_message(selector, exc)) from exc
     return load_model(selector, device=device)
+
+
+def material_agent(epsilon: float = rules.DEFAULT_EPSILON) -> ValueAgent:
+    """Ladder rung 1: MaterialEvaluator behind the same ValueAgent (rules R1-R5) as every baseline and
+    Blink's value mode. Torch-free, so `blink match --a material` never loads torch."""
+    return ValueAgent(MaterialEvaluator(), epsilon=epsilon, name=MATERIAL_NAME)
 
 
 def make_agent(

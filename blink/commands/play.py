@@ -1,25 +1,52 @@
-"""`blink match` (two agents, in process) and `blink gauntlet` (the UCI engine against SF19 via fastchess)."""
+"""`blink match` (two agents, or a round robin, in process) and `blink gauntlet` (the UCI engine against
+SF19 via fastchess).
+
+The ladder's rungs are sides like any model: random (rung 0), material (rung 1) and the learned
+baselines linear, mlp (BLINK_HOME/runs/baseline-<kind>/model.pt) or baseline:<path> (rungs 2 and 3).
+Material and the learned rungs play value mode through the one ValueAgent and rules R1-R5 Blink's value
+mode uses. The learned rungs import torch only when one plays, so `blink --help` stays torch-free.
+"""
 
 import argparse
 import json
 import subprocess
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
 
 from blink import paths
-from blink.eval import books, fastchess, match
+from blink.eval import books, fastchess, match, roundrobin
 from blink.play import agents, factory, rules
 from blink.reference import gauntlet as dm_gauntlet
 from blink.reference import registry
 
+MATERIAL = "material"
+LEARNED_BASELINES = ("linear", "mlp")
+BASELINE_PREFIX = "baseline:"
+SIDES_HELP = "random | material | linear | mlp | baseline:<path> | random-net | dm:<size> | a model selector"
+
+
+def is_baseline(side: str) -> bool:
+    return side == MATERIAL or side in LEARNED_BASELINES or side.startswith(BASELINE_PREFIX)
+
+
+def baseline_side(side: str, device: str, epsilon: float) -> agents.ValueAgent:
+    """material, linear, mlp or baseline:<path>, in value mode with the match's epsilon (rule R4)."""
+    if side == MATERIAL:
+        return factory.material_agent(epsilon=epsilon)
+    from blink.baselines.evaluator import baseline_agent  # torch, only when a learned rung plays
+
+    return replace(baseline_agent(side.removeprefix(BASELINE_PREFIX), device=device), epsilon=epsilon)
+
 
 def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> agents.Agent:
-    """random | material are baselines; any other side is a model selector (random-net: random logits)."""
+    """random and the baselines are the ladder's rungs; any other side is a model selector (random-net:
+    random logits). The baselines always play value mode, whatever `mode` says."""
     if side == "random":
         return agents.RandomAgent(seed=seed)
-    if side == "material":
-        return agents.MaterialAgent(seed=seed)
+    if is_baseline(side):
+        return baseline_side(side, device, epsilon)
     if registry.is_dm(side):
         return registry.load_agent(side, device=device)
     evaluator = factory.load_evaluator(side, device=device, seed=seed)
@@ -33,24 +60,75 @@ def _default_pgn(folder: str, a: str, b: str) -> Path:
     return paths.home() / "games" / folder / f"{tag}_{time.strftime('%Y%m%d-%H%M%S')}.pgn"
 
 
-def _cmd_match(args: argparse.Namespace) -> int:
-    a = side_agent(args.a, args.mode, args.device, args.seed, args.epsilon)
-    b = side_agent(args.b, args.b_mode or args.mode, args.device, args.seed + 1, args.epsilon)
-    pgn = args.out or _default_pgn("match", args.a, args.b)
-    try:
-        openings = books.openings_for(args.book, (args.games + 1) // 2)
-    except (OSError, ValueError) as exc:
-        print(f"blink match: {exc}")
-        return 2
-    summary = match.run_match(a, b, openings, args.games, pgn, max_plies=args.max_plies)
-    pgn.with_suffix(".json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(
-        f"{a.name} vs {b.name}: +{summary['a_wins']} ={summary['draws']} -{summary['a_losses']} "
+def _refuse(message: object) -> int:
+    print(f"blink match: {message}", file=sys.stderr)
+    return 2
+
+
+def _match_line(a_name: str, b_name: str, summary: dict) -> str:
+    return (
+        f"{a_name} vs {b_name}: +{summary['a_wins']} ={summary['draws']} -{summary['a_losses']} "
         f"({100 * summary['a_score']:.1f}%), illegal moves {summary['illegal_moves']}, "
         f"crashes {summary['crashes']}, adjudicated {summary['adjudications']}; endings {summary['reasons']}"
     )
+
+
+def _clean(summary: dict) -> bool:
+    return summary["illegal_moves"] == 0 and summary["crashes"] == 0
+
+
+def _cmd_match(args: argparse.Namespace) -> int:
+    if args.round_robin is not None:
+        if args.a or args.b:
+            return _refuse("pass either --round-robin or --a and --b, not both")
+        return _cmd_round_robin(args)
+    if not (args.a and args.b):
+        return _refuse("pass --a and --b (or --round-robin A,B,...)")
+    try:
+        a = side_agent(args.a, args.mode, args.device, args.seed, args.epsilon)
+        b = side_agent(args.b, args.b_mode or args.mode, args.device, args.seed + 1, args.epsilon)
+        openings = books.openings_for(args.book, (args.games + 1) // 2)
+    except (OSError, ValueError) as exc:
+        return _refuse(exc)
+    pgn = args.out or _default_pgn("match", args.a, args.b)
+    summary = match.run_match(a, b, openings, args.games, pgn, max_plies=args.max_plies)
+    pgn.with_suffix(".json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(_match_line(a.name, b.name, summary))
     print(f"PGN: {pgn}")
-    return 0 if summary["illegal_moves"] == 0 and summary["crashes"] == 0 else 1
+    return 0 if _clean(summary) else 1
+
+
+def _entrants(args: argparse.Namespace, labels: list[str]) -> list[roundrobin.Entrant]:
+    """One agent per side, built once; side k's random tie-breaks are seeded seed + k."""
+    return [
+        roundrobin.Entrant(label, side_agent(label, args.mode, args.device, args.seed + k, args.epsilon))
+        for k, label in enumerate(labels)
+    ]
+
+
+def _cmd_round_robin(args: argparse.Namespace) -> int:
+    labels = [label.strip() for label in args.round_robin.split(",") if label.strip()]
+    out = args.out or paths.home() / "games" / "round_robin" / time.strftime("%Y%m%d-%H%M%S")
+    try:
+        roundrobin.check_labels(labels)
+        roundrobin.check_out(out, labels)
+        openings = books.openings_for(args.book, (args.games + 1) // 2)
+        entrants = _entrants(args, labels)
+    except (OSError, ValueError) as exc:
+        return _refuse(exc)
+    pairs = len(roundrobin.pairs(len(labels)))
+    print(f"round robin: {len(labels)} sides, {pairs} pairs, {args.games} games each on book {args.book}")
+    record = roundrobin.run_round_robin(
+        entrants,
+        openings,
+        args.games,
+        out,
+        max_plies=args.max_plies,
+        on_pair=lambda row: print(_match_line(row["a"], row["b"], row["summary"]), flush=True),
+    )
+    print(roundrobin.format_table(labels, record["table"], record["scores"]))
+    print(f"games and table: {out / roundrobin.RECORD}")
+    return 0 if all(_clean(pair) for pair in record["pairs"]) else 1
 
 
 def _gauntlet_ok(report: dict) -> bool:
@@ -104,16 +182,24 @@ def _add_model_args(parser: argparse.ArgumentParser) -> None:
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
-    m = subparsers.add_parser("match", help="play two agents against each other in process")
-    m.add_argument("--a", required=True, help="random | material | random-net | a model selector")
-    m.add_argument("--b", required=True, help="random | material | random-net | a model selector")
+    m = subparsers.add_parser("match", help="play two agents, or every pair of several, in process")
+    m.add_argument("--a", help=SIDES_HELP)
+    m.add_argument("--b", help=SIDES_HELP)
+    m.add_argument(
+        "--round-robin", metavar="SIDES", help="comma-separated sides: play every pair, print the cross table"
+    )
     _add_model_args(m)
     m.add_argument("--b-mode", choices=factory.MODES, default=None, help="B's mode when it differs from A's")
     m.add_argument("--games", type=int, default=20)
     m.add_argument("--max-plies", type=int, default=match.MAX_ENGINE_PLIES)
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--epsilon", type=float, default=rules.DEFAULT_EPSILON)
-    m.add_argument("--out", type=Path, default=None, help="PGN path (default under BLINK_HOME/games/match)")
+    m.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="PGN path, or the round robin's folder (default under BLINK_HOME/games/match or round_robin)",
+    )
     m.set_defaults(func=factory.friendly(_cmd_match))
 
     g = subparsers.add_parser("gauntlet", help="Blink's UCI engine against Stockfish 19 anchors (fastchess)")
