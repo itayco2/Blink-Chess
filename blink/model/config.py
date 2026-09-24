@@ -184,6 +184,16 @@ def _read_tables(path: Path, seen: tuple[Path, ...] = ()) -> dict[str, dict[str,
     return {name: {**tables[name], **data.get(name, {})} for name in ("model", "train")}
 
 
+def read_tables(path: str | Path) -> dict[str, dict[str, Any]]:
+    """A config file's [model] and [train] tables with its `base` chain resolved: what load_config reads."""
+    return _read_tables(Path(path))
+
+
+def compile_mode(tables: dict[str, dict[str, Any]]) -> str:
+    """The train.compile a config's tables ask for ("off" when unset)."""
+    return str(tables.get("train", {}).get("compile", COMPILE_MODES[0]))
+
+
 def load_config(path: str | Path) -> TrainConfig:
     tables = _read_tables(Path(path))
     return config_from_dict({**tables["train"], "model": tables["model"]})

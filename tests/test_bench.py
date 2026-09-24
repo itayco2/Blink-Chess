@@ -216,3 +216,12 @@ def test_the_t_model_trains_on_the_gpu_in_the_throughput_bench():
     spec = bench.ThroughputSpec("t", bench.CONFIG_DIR / "t.toml", micro=64, compile="off", steps=2, warmup=1)
     row = bench.measure_throughput(spec)
     assert row["error"] is None and row["samples_per_s"] > 0 and row["peak_reserved_gb"] > 0
+
+
+def test_best_rates_for_a_compile_mode_use_only_rows_measured_in_that_mode():
+    """PF66: a config that trains eager must not be planned or policed at the inductor rate."""
+    rows = [_row("s", 1024, 5494.0, 5.8), _row("s", 1024, 9938.0, 4.8, compile="inductor")]
+    data = {"throughput": rows}
+    assert bench.best_rates(data)["s"]["samples_per_s"] == 9938.0
+    assert bench.best_rates(data, compile="off")["s"]["samples_per_s"] == 5494.0
+    assert bench.best_rates(data, compile="inductor")["s"]["samples_per_s"] == 9938.0

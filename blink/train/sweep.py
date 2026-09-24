@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from blink import paths
-from blink.model.config import config_from_dict
+from blink.model.config import compile_mode, config_from_dict, read_tables
 from blink.train.atomic import write_text_atomic
 from blink.train.bench import best_rates
 from blink.train.supervise import Outcome, checkpoint_steps, read_jsonl
@@ -304,7 +304,7 @@ def _prepare(
     run: str, base_path: Path, arm: Arm, hours: float, rate: float, folder: str
 ) -> tuple[Path, dict]:
     """Write the run's merged config under BLINK_HOME/eval/<folder>/ and describe it."""
-    base = tomllib.loads(Path(base_path).read_text(encoding="utf-8"))
+    base = read_tables(base_path)  # follows `base = "recipe.toml"` (PF66)
     steps = steps_for(hours, rate, batch_size_of(base, arm))
     config = merged_config(base, arm, steps)
     validate(config)
@@ -471,16 +471,27 @@ def _size_facts(size: str, row: Mapping[str, Any], bench: Mapping, rules: Choose
     }
 
 
-def _plan_size(setup: SizeSweep, size: str, best: Mapping, bench: Mapping, rules: ChooseRules):
+def size_compile_mode(setup: SizeSweep, size: str, recipe: Arm) -> str:
+    """The compile mode a size's run trains in: its config (with base) under the recipe's overrides."""
+    tables = read_tables(setup.config_dir / f"{size}.toml")
+    return compile_mode({"train": {**tables["train"], **recipe.overrides.get("train", {})}})
+
+
+def _plan_size(setup: SizeSweep, size: str, bench: Mapping, rules: ChooseRules):
     """(entry, request) for one size; request is None when the size does not run, and entry says why."""
-    row = best.get(size)
+    recipe = load_arm(setup.recipe) if setup.recipe else Arm("D", "Recipe D as the size config writes it")
+    try:
+        mode = size_compile_mode(setup, size, recipe)
+    except (ValueError, OSError) as exc:
+        return {"name": size, "status": f"invalid: {exc}"}, None
+    row = best_rates(bench, compile=mode).get(size)
     if row is None:
-        return {"name": size, "status": f"not run: no bench.json row for {size} fits the VRAM budget"}, None
+        why = f"not run: no bench.json row for {size} at compile {mode} fits the VRAM budget"
+        return {"name": size, "status": why}, None
     rate = row["samples_per_s"]
     if size in setup.conditional and rate < rules.epoch_floor:
         why = f"not run: fails the epoch floor ({rate:,.0f} < {rules.epoch_floor:,.0f} samples/s)"
         return {"name": size, "status": why}, None
-    recipe = load_arm(setup.recipe) if setup.recipe else Arm("D", "Recipe D as the size config writes it")
     run = f"size-{size}"
     try:
         config, info = _prepare(run, setup.config_dir / f"{size}.toml", recipe, setup.hours, rate, "sizes")
@@ -503,7 +514,6 @@ def run_sizes(
     rules = rules or ChooseRules()
     state = _load_state(out)
     sizes_state = dict(state.get("sizes", {}))
-    best = best_rates(bench)
     for size in setup.sizes:
         if sizes_state.get(size, {}).get("status", "pending") not in RERUN_STATES:
             continue
@@ -512,7 +522,7 @@ def run_sizes(
             sizes_state[name] = entry
             _save_state(out, {**state, "sizes": sizes_state})
 
-        entry, request = _plan_size(setup, size, best, bench, rules)
+        entry, request = _plan_size(setup, size, bench, rules)
         _execute(entry, request, runner, save, log)
     report = _jsonable({**state, "sizes": sizes_state, "hours": setup.hours})
     _save_state(out, report)
@@ -573,9 +583,14 @@ def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: Ch
     return {**entry, "eligible": True, "reason": "passes every constraint"}
 
 
-def choose(bench: Mapping, sizes: Mapping[str, Mapping], sigma: float, rules: ChooseRules) -> dict[str, Any]:
-    """N* by the pre-registered precedence: epoch floor > best 6 h VAA > default M."""
-    best = best_rates(bench)
+def choose(
+    bench: Mapping, sizes: Mapping[str, Mapping], sigma: float, rules: ChooseRules, compile: str | None = None
+) -> dict[str, Any]:
+    """N* by the pre-registered precedence: epoch floor > best 6 h VAA > default M.
+
+    `compile` is the mode the long run will train in; its rates decide the epoch floor.
+    """
+    best = best_rates(bench, compile=compile)
     ordered = sorted(sizes, key=lambda s: _order(s, best))
     entries = {
         s: _eligibility(best.get(s), sizes[s].get("vaa"), p99_of(bench, s, rules), rules) for s in ordered

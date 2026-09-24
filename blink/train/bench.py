@@ -412,11 +412,17 @@ def update_bench(path: Path, section: str, value: Any, machine: dict[str, Any] |
     return updated
 
 
-def best_rates(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Per size, the fastest measured row that fits the VRAM budget at micro-batch >= 256, unspilled."""
+def best_rates(data: dict[str, Any], compile: str | None = None) -> dict[str, dict[str, Any]]:
+    """Per size, the fastest measured row that fits the VRAM budget at micro-batch >= 256, unspilled.
+
+    With `compile`, only rows measured in that mode count: a run is planned and policed at the rate of
+    the mode it actually trains in (PF66).
+    """
     budget = (data.get("machine") or {}).get("vram_budget_gb")
     best: dict[str, dict[str, Any]] = {}
     for row in data.get("throughput", []):
+        if compile is not None and row.get("compile", "off") != compile:
+            continue
         peak = row.get("peak_reserved_gb")
         fits = not row.get("spilled") and (budget is None or peak is None or peak <= budget)
         usable = not row.get("oom") and not row.get("error") and row.get("micro", 0) >= MIN_MICRO and fits

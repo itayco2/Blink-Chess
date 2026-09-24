@@ -10,6 +10,10 @@ data = "v1"                   # BLINK_HOME/data/v1 (a relative path is under BLI
 hours = 1.5
 size = "s"                    # the bench.json throughput row that turns hours into steps
 sigma_arms = ["a01", "a02", "a03"]
-arms = ["a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a10", "a11", "a12", "a15"]
+arms = ["a01", "a02", "a03", "a04", "a05", "a11", "a12"]
+# Held until their code exists (PF66): a06 static bias, a07 games10k_top1, a08 value mapping and
+# mate_preserving, a10 Muon; then a15 (combined winners) last. Arms never recorded in
+# ablations.json are pending, so adding them back here resumes the same sweep.
+held = ["a06", "a07", "a08", "a10", "a15"]
 slip_cut = ["a10", "a11", "a12"]    # dropped by the P5 slip rule (blink sweep ablations --slip)
 disable = []                  # supervise stop rules turned off for every arm (recorded)

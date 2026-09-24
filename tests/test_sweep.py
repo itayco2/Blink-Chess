@@ -30,7 +30,8 @@ warmup_steps = 10
 def test_every_ablation_arm_file_only_overrides_the_recipe():
     plan = tomllib.loads((ABLATIONS / "plan.toml").read_text(encoding="utf-8"))["plan"]
     expected = ["a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a10", "a11", "a12", "a15"]
-    assert plan["arms"] == expected
+    assert sorted(plan["arms"] + plan["held"]) == expected  # PF66: arms without code yet are held
+    assert plan["arms"][:3] == ["a01", "a02", "a03"] and plan["held"][-1] == "a15"
     assert sorted(p.stem for p in ABLATIONS.glob("a*.toml")) == expected  # a09, a13, a14 are cut
     for name in expected:
         arm = sweep.load_arm(ABLATIONS / f"{name}.toml")
@@ -305,3 +306,83 @@ def test_sweep_ablations_dry_run_prints_each_arm_command(tmp_path, monkeypatch, 
     assert cli.main(["sweep", "ablations", "--plan", str(plan), "--rate", "1000", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "abl-a01" in out and "abl-a15" in out and "steps 36" in out
+
+
+RECIPE = """
+[model]
+head_dim = 32
+
+[train]
+batch_size = 1000
+warmup_steps = 10
+child_frac = 0.3
+"""
+SIZE_WITH_BASE = """base = "recipe.toml"
+
+[model]
+d_model = 64
+n_layers = 1
+n_heads = 2
+
+[train]
+peak_lr = 0.001
+steps = 100
+"""
+
+
+def _recipe_and_size(folder: Path, compile_mode: str = "off") -> Path:
+    (folder / "recipe.toml").write_text(RECIPE + f'compile = "{compile_mode}"\n', encoding="utf-8")
+    size = folder / "s.toml"
+    size.write_text(SIZE_WITH_BASE, encoding="utf-8")
+    return size
+
+
+def test_an_arm_keeps_the_recipe_its_size_config_names_as_base(tmp_path, monkeypatch):
+    """PF66: the sweep read configs/s.toml with plain tomllib, so `base = "recipe.toml"` was dropped
+    and every arm trained TrainConfig defaults (batch 256, no children, no GAB-lite)."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    size = _recipe_and_size(tmp_path, "inductor")
+    arm = _arm("a01", overrides={"train": {"seed": 1}})
+    path, info = sweep._prepare("abl-a01", size, arm, 0.01, 1000.0, "ablations")
+    written = tomllib.loads(path.read_text(encoding="utf-8"))["train"]
+    assert (written["batch_size"], written["child_frac"], written["compile"]) == (1000, 0.3, "inductor")
+    assert written["seed"] == 1 and info["steps"] == 36  # 0.01 h x 1,000/s / batch 1,000
+
+
+def _two_mode_bench(path: Path, size: str = "s", off: float = 1000.0, inductor: float = 2000.0) -> Path:
+    ok = {"size": size, "micro": 1024, "oom": False, "error": None, "peak_reserved_gb": 1.0}
+    rows = [
+        {**ok, "compile": "off", "samples_per_s": off},
+        {**ok, "compile": "inductor", "samples_per_s": inductor},
+    ]
+    path.write_text(json.dumps({"throughput": rows}), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(("mode", "steps"), [("off", "steps 36"), ("inductor", "steps 72")])
+def test_ablation_steps_use_the_bench_row_of_the_recipes_compile_mode(
+    tmp_path, monkeypatch, capsys, mode, steps
+):
+    """PF66: steps came from the fastest row of any compile mode while the recipe trained eager."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = _plan(tmp_path, ARMS, ORDER)
+    _recipe_and_size(tmp_path, mode)  # replaces the plan's s.toml with one that names recipe.toml as base
+    bench = _two_mode_bench(tmp_path / "bench.json")
+    assert cli.main(["sweep", "ablations", "--plan", str(plan), "--bench", str(bench), "--dry-run"]) == 0
+    assert steps in capsys.readouterr().out
+
+
+def test_the_size_sweep_plans_each_size_at_its_own_compile_modes_rate(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    (tmp_path / "recipe.toml").write_text(RECIPE + 'compile = "off"\n', encoding="utf-8")
+    (tmp_path / "m.toml").write_text(SIZE_WITH_BASE, encoding="utf-8")
+    bench = json.loads(
+        _two_mode_bench(tmp_path / "bench.json", "m", 3000.0, 4500.0).read_text(encoding="utf-8")
+    )
+    setup = sweep.SizeSweep(
+        sizes=("m",), conditional=(), hours=0.01, recipe=None, data=tmp_path, config_dir=tmp_path
+    )
+    runner = SizeRunner(tmp_path / "home")
+    report = sweep.run_sizes(setup, bench, tmp_path / "sweep.json", runner=runner, log=lambda _: None)
+    assert report["sizes"]["m"]["samples_per_s"] == 3000.0 and report["sizes"]["m"]["compile"] == "off"
+    assert runner.requests[0].bench_rate == 3000.0

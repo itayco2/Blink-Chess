@@ -78,10 +78,21 @@ def _bench_rate(args: argparse.Namespace) -> tuple[float | None, str]:
         return None, "no --bench-rate or --bench-size"
     from blink.train.bench import best_rates
 
-    best = best_rates(_read_json(_home_eval("bench.json", args.bench), "bench.json")).get(args.bench_size)
+    mode = _train_compile_mode(_rest(args.train_args))
+    bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
+    best = best_rates(bench, compile=mode).get(args.bench_size)
     if best is None:
         raise ValueError(f"bench.json has no usable throughput row for size {args.bench_size}")
     return float(best["samples_per_s"]), f"size {args.bench_size} in bench.json"
+
+
+def _train_compile_mode(train_args: list[str]) -> str | None:
+    """The compile mode of the child's `--config` (None without one: any mode's best row)."""
+    from blink.model.config import compile_mode, read_tables
+
+    if "--config" not in train_args[:-1]:
+        return None
+    return compile_mode(read_tables(train_args[train_args.index("--config") + 1]))
 
 
 def _supervise_config(args: argparse.Namespace):
@@ -293,23 +304,25 @@ def _repo_config(given: str | None, default: str) -> Path:
     return Path(given) if given else CONFIG_DIR / default
 
 
-def _plan_rate(args: argparse.Namespace, size: str) -> float:
+def _plan_rate(args: argparse.Namespace, size: str, mode: str) -> float:
+    """--rate, or bench.json's best row for `size` measured in the compile mode the runs train in."""
     from blink.train.bench import best_rates
 
     if args.rate:
         return args.rate
-    best = best_rates(_read_json(_home_eval("bench.json", args.bench), "bench.json")).get(size)
+    bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
+    best = best_rates(bench, compile=mode).get(size)
     if best is None:
-        raise ValueError(f"bench.json has no usable throughput row for {size}; run `blink bench throughput`")
+        why = f"bench.json has no usable throughput row for {size} at compile {mode}"
+        raise ValueError(f"{why}; run `blink bench throughput`")
     return float(best["samples_per_s"])
 
 
 def _print_arm_plan(plan, rate: float) -> None:
-    import tomllib
-
+    from blink.model.config import read_tables
     from blink.train import sweep
 
-    base = tomllib.loads(plan.recipe.read_text(encoding="utf-8"))
+    base = read_tables(plan.recipe)
     for arm in plan.arms:
         if arm.combine:
             _say(f"abl-{arm.name}: {arm.change}, chosen when it starts by the adopt rule")
@@ -320,11 +333,12 @@ def _print_arm_plan(plan, rate: float) -> None:
 
 
 def cmd_sweep_ablations(args: argparse.Namespace) -> int:
+    from blink.model.config import compile_mode, read_tables
     from blink.train import sweep
 
     try:
         plan = sweep.load_plan(_repo_config(args.plan, "ablations/plan.toml"))
-        rate = _plan_rate(args, plan.size)
+        rate = _plan_rate(args, plan.size, compile_mode(read_tables(plan.recipe)))
         if args.dry_run:
             _print_arm_plan(plan, rate)
             return 0
@@ -373,6 +387,7 @@ def _sigma(args: argparse.Namespace) -> float:
 
 
 def cmd_sweep_choose(args: argparse.Namespace) -> int:
+    from blink.model.config import compile_mode, read_tables
     from blink.train import sweep
 
     sweep_path = _home_eval("sweep.json", args.sweep)
@@ -381,7 +396,9 @@ def cmd_sweep_choose(args: argparse.Namespace) -> int:
         state = _read_json(sweep_path, "sweep.json")
         config = _repo_config(args.config, "sweep.toml")
         rules = sweep.load_rules(config) if config.is_file() else sweep.ChooseRules()
-        choice = sweep.choose(bench, state.get("sizes", {}), _sigma(args), rules)
+        recipe = sweep.CONFIG_DIR / "recipe.toml"  # the long run trains in the recipe's compile mode
+        mode = compile_mode(read_tables(recipe)) if recipe.is_file() else None
+        choice = sweep.choose(bench, state.get("sizes", {}), _sigma(args), rules, compile=mode)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep choose: {exc}", file=sys.stderr)
         return EXIT_REFUSED
