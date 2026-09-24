@@ -145,13 +145,21 @@ def examine(
 
 
 def run_failures(
-    pgns: Sequence[Path], labeler: SfLabeler, player: str = "blink", max_failures: int = MAX_FAILURES
+    pgns: Sequence[Path],
+    labeler: SfLabeler,
+    player: str = "blink",
+    max_failures: int = MAX_FAILURES,
+    max_examined: int | None = None,
 ) -> dict:
-    """The first `max_failures` failures in the PGNs, in file and game order, with class counts."""
+    """The first `max_failures` failures in the PGNs, in file and game order, with class counts.
+
+    `max_examined` caps the games looked at (a smoke run's bound on Stockfish searches)."""
     found: list[Failure] = []
     examined = 0
     for path in pgns:
         for number, game in enumerate(read_games(path), start=1):
+            if max_examined is not None and examined >= max_examined:
+                break
             examined += 1
             failure = examine(game, number, Path(path).name, player.lower(), labeler)
             if failure is not None:
@@ -177,5 +185,5 @@ def e9_block(ctx, state: dict) -> dict:
     pgns = pgns or sorted((ctx.out_dir / "E5").glob("*.pgn"))
     cap = MAX_FAILURES if ctx.games is None else min(MAX_FAILURES, ctx.games)
     with SfLabeler(1_000_000, exe=fastchess.stockfish_exe()) as labeler:
-        result = run_failures(pgns, labeler, max_failures=cap)
+        result = run_failures(pgns, labeler, max_failures=cap, max_examined=ctx.positions)
     return {**result, "games": 0, "pgns": []}

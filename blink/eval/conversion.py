@@ -233,11 +233,22 @@ def _stockfish():
     return match.stockfish_agent(fastchess.stockfish_exe())
 
 
+def _endgame_set(ctx, name: str, count: int) -> list:
+    """The screened set; a smoke run (--positions) may use an incomplete screen, a real run may not."""
+    from blink.eval import endgames
+
+    summary_path = endgames.out_dir() / "endgames.json"
+    complete = summary_path.is_file() and json.loads(summary_path.read_text(encoding="utf-8"))["complete"]
+    if not complete and ctx.positions is None:
+        raise ValueError("the endgame screen is incomplete (fewer than 700 kept): run `blink eval endgames`")
+    return endgames.read_set(endgames.out_dir(), name)[: ctx.positions or count]
+
+
 def e2b_block(ctx, state: dict) -> dict:
     from blink.eval import endgames
     from blink.play.agents import ValueAgent
 
-    dev = endgames.read_set(endgames.out_dir(), "dev")[: ctx.positions or endgames.DEV_COUNT]
+    dev = _endgame_set(ctx, "dev", endgames.DEV_COUNT)
     evaluator = match.blink_agents(ctx.model, ctx.device, epsilon=0.0)["value"].evaluator
     agent = {eps: ValueAgent(evaluator, epsilon=eps, name=f"Blink-value-eps{eps:.6f}") for eps in EPSILONS}
     pgns: list[str] = []
@@ -266,9 +277,7 @@ def e8_block(ctx, state: dict) -> dict:
     from blink.eval import endgames
     from blink.eval.orchestrate import shipped_mode
 
-    final = endgames.read_set(endgames.out_dir(), "final")[
-        : ctx.positions or endgames.WANT - endgames.DEV_COUNT
-    ]
+    final = _endgame_set(ctx, "final", endgames.WANT - endgames.DEV_COUNT)
     mode = shipped_mode(ctx, state)
     rules_on = match.blink_agents(ctx.model, ctx.device)[mode]
     rules_off = RulesOffAgent(rules_on.evaluator, mode, name=f"{rules_on.name}-rules-off")
