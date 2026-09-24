@@ -249,13 +249,27 @@ def restart_argv(argv: Sequence[str], resume: bool, lr_scale: float) -> list[str
     return out + (["--lr-scale", f"{lr_scale:g}"] if lr_scale != 1.0 else [])
 
 
+def _run_names(args: Sequence[str]) -> list[str]:
+    names = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--run"]
+    return names + [a.split("=", 1)[1] for a in args if a.startswith("--run=")]
+
+
+def run_of(args: Sequence[str], run: str | None) -> str:
+    """The run a supervise command serves: its own --run, else the one the train command names."""
+    if run is not None:
+        return run
+    names = _run_names(args)
+    if not names:
+        raise ValueError("name the run: blink supervise --run NAME, or --run NAME in the train command")
+    return names[0]
+
+
 def train_argv(args: Sequence[str], run: str) -> list[str]:
     """The blink arguments for the child: a `train` command whose --run is this run."""
     args = list(args)
     if not args or args[0] != "train":
         raise ValueError(f"blink supervise wraps `train ...`, got {' '.join(args) or 'nothing'}")
-    names = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--run"]
-    names += [a.split("=", 1)[1] for a in args if a.startswith("--run=")]
+    names = _run_names(args)
     if any(name != run for name in names):
         raise ValueError(f"the train command says --run {names[0]} but supervise says --run {run}")
     return args if names else args + ["--run", run]

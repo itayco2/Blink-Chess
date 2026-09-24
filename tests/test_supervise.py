@@ -288,8 +288,42 @@ def test_the_supervise_command_wraps_blink_train_and_adds_the_run_name(tmp_path,
     monkeypatch.setenv("BLINK_HOME", str(tmp_path))
     argv = ["supervise", "--run", "long", "--dry-run", "--", "train", "--config", "configs/t.toml"]
     assert cli.main(argv) == 0
-    out = capsys.readouterr().out.strip()
-    assert out.endswith("-m blink.cli train --config configs/t.toml --run long")
+    command, rule = capsys.readouterr().out.strip().splitlines()
+    assert command.endswith("-m blink.cli train --config configs/t.toml --run long")
+    assert rule == "throughput rule: off (no --bench-rate or --bench-size)"
+
+
+def test_the_supervise_command_takes_the_run_name_from_the_train_command(tmp_path, monkeypatch, capsys):
+    """The plan's P7 line is `blink supervise -- train --config configs/long.toml --run long`."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    argv = ["supervise", "--dry-run", "--", "train", "--config", "configs/long.toml", "--run", "long"]
+    assert cli.main(argv) == 0
+    assert "-m blink.cli train --config configs/long.toml --run long" in capsys.readouterr().out
+    assert cli.main(["supervise", "--dry-run", "--", "train", "--config", "c.toml"]) == 2
+    assert "--run" in capsys.readouterr().err
+
+
+def _bench_json(path: Path) -> Path:
+    ok = {"size": "s", "oom": False, "error": None}
+    rows = [
+        {**ok, "micro": 256, "compile": "off", "samples_per_s": 3000.0},
+        {**ok, "micro": 512, "compile": "inductor", "samples_per_s": 4000.0},
+    ]
+    path.write_text(json.dumps({"throughput": rows}), encoding="utf-8")
+    return path
+
+
+def test_the_supervise_command_reads_its_benchmark_rate_from_bench_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    bench = _bench_json(tmp_path / "bench.json")
+    common = ["supervise", "--run", "long", "--dry-run", "--bench", str(bench)]
+    assert cli.main([*common, "--bench-size", "s", "--", "train"]) == 0
+    expected = "throughput rule: floor 3,400 samples/s (85% of 4,000, size s in bench.json)"
+    assert expected in capsys.readouterr().out
+    assert cli.main([*common, "--bench-size", "m12", "--", "train"]) == 2
+    assert "m12" in capsys.readouterr().err
+    assert cli.main(["supervise", "--run", "long", "--dry-run", "--", "train"]) == 0
+    assert "throughput rule: off" in capsys.readouterr().out
 
 
 def test_the_supervise_command_refuses_a_mismatched_run_and_an_unknown_rule(tmp_path, monkeypatch, capsys):

@@ -70,45 +70,67 @@ def cmd_ps(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- supervise
 
 
+def _bench_rate(args: argparse.Namespace) -> tuple[float | None, str]:
+    """The throughput rule's benchmark: --bench-rate, or the best bench.json row of --bench-size."""
+    if args.bench_rate is not None:
+        return args.bench_rate, "--bench-rate"
+    if args.bench_size is None:
+        return None, "no --bench-rate or --bench-size"
+    from blink.train.bench import best_rates
+
+    best = best_rates(_read_json(_home_eval("bench.json", args.bench), "bench.json")).get(args.bench_size)
+    if best is None:
+        raise ValueError(f"bench.json has no usable throughput row for size {args.bench_size}")
+    return float(best["samples_per_s"]), f"size {args.bench_size} in bench.json"
+
+
 def _supervise_config(args: argparse.Namespace):
     from blink.train.supervise import SuperviseConfig
 
-    return SuperviseConfig(
+    rate, source = _bench_rate(args)
+    cfg = SuperviseConfig(
         interval_s=args.interval,
         poll_s=min(1.0, args.interval),
         heartbeat_stale_s=args.stale,
         startup_grace_s=args.grace,
-        bench_rate=args.bench_rate,
+        bench_rate=rate,
         backoff_s=args.backoff,
         disabled=tuple(args.disable or ()),
     )
+    if rate is None or not cfg.on("throughput"):
+        return cfg, f"throughput rule: off ({source if rate is None else 'disabled'})"
+    floor = (1.0 - cfg.slow_frac) * rate
+    share = round(100 * (1.0 - cfg.slow_frac))
+    return cfg, f"throughput rule: floor {floor:,.0f} samples/s ({share}% of {rate:,.0f}, {source})"
 
 
 def cmd_supervise(args: argparse.Namespace) -> int:
     from blink.train import status, supervise
 
-    if not status.valid_run_name(args.run):
-        print(f"blink supervise: bad run name {args.run!r}", file=sys.stderr)
-        return EXIT_REFUSED
     try:
-        cfg = _supervise_config(args)
-        argv = supervise.child_argv(supervise.train_argv(_rest(args.train_args), args.run))
-    except ValueError as exc:
+        run = supervise.run_of(_rest(args.train_args), args.run)
+        if not status.valid_run_name(run):
+            raise ValueError(f"bad run name {run!r} (letters, digits, _ - . only)")
+        cfg, throughput = _supervise_config(args)
+        argv = supervise.child_argv(supervise.train_argv(_rest(args.train_args), run))
+    except (FileNotFoundError, ValueError) as exc:
         print(f"blink supervise: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     if args.dry_run:
         _say(" ".join(argv))
+        _say(throughput)
         return 0
+    _say(f"supervise {run}: {throughput}")
     deadline = None if args.max_hours is None else args.max_hours * 3600
     outcome = supervise.supervise(
         cfg,
-        paths.home() / "runs" / args.run,
+        paths.home() / "runs" / run,
         argv,
         log=_say,
         deadline_s=deadline,
         launch_command=" ".join(sys.argv),
     )
-    _say(f"supervise {args.run}: {outcome.status}")
+    _say(f"supervise {run}: {outcome.status}")
     return outcome.exit_code
 
 
@@ -130,8 +152,10 @@ def _register_supervise(sub: argparse._SubParsersAction) -> None:
     from blink.train.supervise import RULES
 
     sup = sub.add_parser("supervise", help="run `train ...` as a child and enforce every stop rule")
-    sup.add_argument("--run", required=True)
+    sup.add_argument("--run", help="the run name (default: the --run of the train command)")
     sup.add_argument("--bench-rate", type=float, help="benchmark samples/s; turns the throughput rule on")
+    sup.add_argument("--bench-size", help="take the benchmark from bench.json's best row for this size")
+    sup.add_argument("--bench", help="bench.json for --bench-size (default BLINK_HOME/eval/bench.json)")
     sup.add_argument("--interval", type=float, default=60.0, help="seconds between rule checks")
     sup.add_argument("--stale", type=float, default=60.0, help="heartbeat age that stops the run")
     sup.add_argument("--grace", type=float, default=600.0, help="seconds allowed before the first step")
