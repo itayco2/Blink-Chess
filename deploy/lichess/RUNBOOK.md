@@ -1,8 +1,10 @@
 # Lichess bot runbook
 
-Every step on this page is done by Itay. The build agent prepares the config, watches the public
-Lichess API and may stop the bot process by its PID. It never creates accounts, never handles the
-token, never reads `D:\blink-bot\token.dpapi`, and never starts the bot.
+Every account step, every token step and every bot start on this page is done by Itay. Steps marked
+**(agent)** are `blink lichess` commands the build agent runs: it generates the config, reads the
+public Lichess API without a token, and may stop the bot process by its PID. It never creates
+accounts, never handles the token, never reads `D:\blink-bot\token.dpapi` or the bot's environment,
+and never starts the bot.
 
 ## 1. Create the account (any time before the bot is needed)
 
@@ -59,11 +61,122 @@ It calls `POST https://lichess.org/api/bot/account/upgrade` directly. Do not use
 After the upgrade, a new BOT starts at rating 3000 with RD 500 in the standard pools, so its rating
 will fall steeply over its first games. That is expected.
 
-## 5. Running it
+**(agent)** checks the upgrade on the public profile only (no token):
 
-- Casual smoke test (gate G5): `D:\blink-bot\start-bot.ps1 -Config D:\blink-bot\config.casual.yml`,
-  then challenge the bot from your own account to 5 casual games (1+1, 3+2, 10+0).
-- Rated launch (gate G7): `D:\blink-bot\start-bot.ps1`.
-- Optional auto-start (gate G7): a Task Scheduler task that runs `start-bot.ps1` "only when user is
-  logged on", with an at-logon trigger only and no restart on failure, so a pause is never undone.
-- After the launch post, keep the bot online for at least 7 days, then on the hours listed in its bio.
+```powershell
+uv run blink lichess snapshot --bot <BotName> --no-write
+```
+
+It must print `(BOT)` and `blitz 3000, RD 500, N 0`.
+
+## 5. Generate the configs (agent)
+
+The two configs are generated from the tracked templates, never edited by hand, and never hold the
+token (lichess-bot reads it from `LICHESS_BOT_TOKEN`, which only `start-bot.ps1` sets):
+
+| file | template | what it is |
+|---|---|---|
+| `D:\blink-bot\config.yml` | [config.template.yml](config.template.yml) | the rated bot (G7): torch CUDA fp32, the shipped model, sha and mode |
+| `D:\blink-bot\config.casual.yml` | [config.casual.yml](config.casual.yml) | the G5 casual smoke: the preview model on CPU, only `itayco2` |
+
+Both switch off every lookup lichess-bot could make for the engine (polyglot book, every
+`online_moves` source, `lichess_bot_tbs`, the tablebase resign and draw options, pondering), remove
+the default `uci_options` (blink-uci declares none), and set `abort_time: 30` explicitly (the code
+default for a missing key is 20).
+
+```powershell
+# G5, during P7: the casual config only, with the preview model
+uv run blink lichess config --only casual --model <preview selector> --mode <mode>
+uv run blink lichess check-config --config D:\blink-bot\config.casual.yml
+
+# G7, after E8: the rated config, pinned to the shipped weights (sha256 hashed from the file)
+uv run blink lichess config --only rated --model ship --mode <shipped mode>
+uv run blink lichess check-config --config D:\blink-bot\config.yml
+```
+
+`check-config` exits 0 only with `0 problems`. For the rated config it also compares the recorded
+sha256 and mode with `shipped` in `results/results.json` and with the weights file itself, so a
+config that points at anything but the evaluated model fails. `--sha <sha>` makes the generator
+refuse a weights file with a different hash.
+
+## 6. Casual smoke (gate G5, during P7, CPU)
+
+1. **(agent)** generates and checks `config.casual.yml` (section 5).
+2. Itay: `D:\blink-bot\start-bot.ps1 -Config D:\blink-bot\config.casual.yml`
+3. Itay challenges the bot from `itayco2` to 5 casual games: 1+1, 3+2 and 10+0 (about 40 minutes).
+4. **(agent)** `uv run blink lichess check --bot <BotName> --window 5`
+5. Pass: 5/5 games completed, 0 aborts, 0 time losses, 0 illegal moves. Then Itay stops the bot
+   with Ctrl+C.
+
+## 7. Rated launch (gate G7, after E8 and after training)
+
+1. **(agent)** generates and checks `config.yml` (section 5): rated blitz only; matchmaking bases
+   [180, 300] and increments [0, 2, 3], `challenge_timeout: 2`, `opponent_rating_difference: 300`,
+   `challenge_filter: fine`; under `challenge:` `concurrency: 2` with `games_reserved_for_humans: 1`
+   (so one bot game at a time), `preference: human`, `bullet_requires_increment: true`,
+   `max_simultaneous_games_per_user: 1`; resign and draw offers off; PGNs in `D:\blink\lichess\pgn`.
+2. Itay: `D:\blink-bot\start-bot.ps1`
+3. Optional auto-start: a Task Scheduler task that runs `start-bot.ps1` "only when user is logged
+   on", with an at-logon trigger only and no restart on failure, so a pause is never undone. Task
+   Scheduler stops a task after 72 hours by default, which would end the bot inside the 7-day
+   window, so the time limit is switched off:
+
+   ```powershell
+   $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -File D:\blink-bot\start-bot.ps1'
+   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+   $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
+   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)
+   Register-ScheduledTask -TaskName 'BlinkBot' -Action $action -Trigger $trigger -Principal $principal -Settings $settings
+   ```
+
+## 8. Watching it and the stop rule (agent)
+
+```powershell
+uv run blink lichess check --bot <BotName> --stop     # exits 1 when the rule fires
+uv run blink lichess snapshot --bot <BotName> --no-write
+```
+
+- The stop rule: **time losses > 2% or aborts > 1% over the last 50 games** (any kind; fewer games
+  count as they are). With `--stop` a firing rule pauses the bot exactly as section 9 does and
+  records the rule in `D:\blink\lichess\pause.json`; Itay decides when it restarts.
+- `snapshot --no-write` prints rating, RD, N, the human share, performance vs humans and vs bots,
+  and the time-loss, abort and duplicate-game rates. It writes nothing and commits nothing.
+
+## 9. Pause and restart (GPU windows, stop rule)
+
+During rating accrual, GPU jobs run only while the bot is paused (the D15 window: export,
+quantize, film extract).
+
+```powershell
+uv run blink lichess pause --bot <BotName> --reason "D15 GPU window"   # (agent)
+```
+
+1. Writes `D:\blink\lichess\PAUSED`, so `start-bot.ps1` and the Task Scheduler task will not start
+   the bot.
+2. Polls the public status every 15 s until the bot is in no game (at most `--timeout`, 30 minutes
+   by default; after that the game in progress is cut off and the record says so).
+3. Stops the lichess-bot process found by its command line under `D:\blink-bot`, and every process
+   below it (game workers, blink-uci engines), by PID.
+4. Records the time, reason, wait and PIDs in `D:\blink\lichess\pause.json`.
+
+To restart:
+
+```powershell
+uv run blink lichess resume-note     # (agent) only deletes the PAUSED flag
+D:\blink-bot\start-bot.ps1           # Itay
+```
+
+## 10. Publishing the rating (gate G12)
+
+```powershell
+uv run blink lichess snapshot --bot <BotName>     # (agent) writes results/lichess.json with its date
+```
+
+The rating is publishable only at N >= 200 rated blitz games and RD < 75; until then the file says
+`"publishable": false` and the page shows "rating accruing". No workflow writes this file.
+
+## 11. Staying online
+
+- After the LinkedIn post (G13), keep the bot online for **at least 7 days**: sleep never on AC, the
+  at-logon task from section 7, and no GPU pause in those 7 days unless the stop rule fires.
+- After the 7 days, run it on the hours listed in its bio.
