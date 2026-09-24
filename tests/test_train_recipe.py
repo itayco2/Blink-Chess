@@ -105,6 +105,19 @@ def test_lr_scale_on_resume_scales_the_schedule_and_is_kept_in_later_checkpoints
     assert load_checkpoint(latest_checkpoint(run_dir))["lr_scale"] == 0.5
 
 
+def test_lr_scale_sets_the_scale_so_a_restart_that_repeats_it_never_compounds(tmp_path):
+    """The supervisor re-sends --lr-scale 0.5 on every restart after its NaN rollback: 0.5 stays 0.5."""
+    cfg = tiny_train_config(steps=80, warmup_steps=2, cooldown_frac=0.1, metrics_every=10, batch_size=16)
+    run_dir, source = tmp_path / "run", _repeat(fixture_records()[:16])
+    loop.train(cfg, _spec(run_dir, max_steps=20), source, **_quiet())
+    for end in (40, 60):
+        loop.train(cfg, _spec(run_dir, resume=True, lr_scale=0.5, max_steps=end), source, **_quiet())
+    loop.train(cfg, _spec(run_dir, resume=True, lr_scale=1.0, max_steps=70), source, **_quiet())
+    lrs = {row["step"]: row["lr"] for row in _rows(run_dir / "metrics.jsonl")}
+    assert lrs[30] == lrs[50] == lrs[60] == pytest.approx(5e-4)
+    assert lrs[70] == pytest.approx(1e-3)
+
+
 def test_vaa_is_in_every_eval_row_and_the_checks_score_the_full_probe(tmp_path):
     probe = vaa.probe_from_roots(fixture_records()[:40])
     cfg = tiny_train_config(steps=40, eval_every=20, vaa_subset=10, keep_last=1, batch_size=16)

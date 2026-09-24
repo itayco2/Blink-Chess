@@ -2,6 +2,8 @@
 
 A checkpoint carries the model, EMA, optimizer, RNG states, schedule, step, world, config, the clip
 state (auto clips measure over the warmup), the LR scale in force, and which steps are kept for good.
+A resume keeps the checkpoint's LR scale unless it is given one, which replaces it (never multiplies):
+the supervisor repeats --lr-scale 0.5 on every restart after its NaN rollback, and that must stay 0.5.
 `restore` continues a run from its own latest checkpoint; `branch` starts a new run directory from
 another run's checkpoint (the preview cooldown) and leaves that run untouched.
 """
@@ -78,11 +80,10 @@ def _load_into(run, state: dict[str, Any]) -> None:
     restore_rng(state["rng"])
     run.step = int(state["step"])
     run.clip.load_state_dict(state.get("clip", {}), step=run.step)
-    run.lr_scale = float(state.get("lr_scale", 1.0)) * run.spec.lr_scale
-    if run.spec.lr_scale != 1.0:
-        run.log(
-            f"lr scale x{run.spec.lr_scale:g} from step {run.step} (the schedule runs at x{run.lr_scale:g})"
-        )
+    saved = float(state.get("lr_scale", 1.0))
+    run.lr_scale = saved if run.spec.lr_scale is None else float(run.spec.lr_scale)
+    if run.lr_scale != saved:
+        run.log(f"lr scale x{saved:g} -> x{run.lr_scale:g} from step {run.step}")
 
 
 def _history(path: Path) -> list[dict[str, Any]]:

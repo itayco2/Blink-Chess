@@ -93,7 +93,7 @@ def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path
         resume=args.resume,
         max_steps=args.max_steps,
         data=plan.description,
-        lr_scale=args.lr_scale or 1.0,
+        lr_scale=args.lr_scale,
         init_from=None if args.resume else branch_from,
         preview=is_preview,
     )
@@ -139,7 +139,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     train.add_argument("--workers", type=int, default=train_data.DEFAULT_WORKERS, help="parser processes")
     train.add_argument("--valprobe", help="a valprobe .npz for VAA (default: DATA/valprobe.npz when present)")
     train.add_argument("--resume", action="store_true", help="continue from the run's latest checkpoint")
-    train.add_argument("--lr-scale", type=float, help="with --resume: multiply the LR schedule from here on")
+    train.add_argument(
+        "--lr-scale", type=float, help="with --resume: the LR scale from here on (replaces the checkpoint's)"
+    )
     train.add_argument(
         "--preview-cooldown", help="branch a cooldown of this long (3h, 90m) into NAME-preview"
     )

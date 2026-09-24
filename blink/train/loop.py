@@ -50,7 +50,7 @@ class RunSpec:
     resume: bool = False
     max_steps: int | None = None  # stop this invocation early; the schedule still spans cfg.steps
     data: dict[str, Any] = field(default_factory=dict)  # a description of the data, for config.json
-    lr_scale: float = 1.0  # multiplies the schedule from here on, on top of the checkpoint's scale
+    lr_scale: float | None = None  # on resume: the LR scale from here on (None keeps the checkpoint's)
     init_from: Path | None = None  # start a new run from another run's checkpoint (preview cooldown)
     preview: bool = False  # a preview branch checks only its own end, against the reference's final VAA
 
@@ -302,7 +302,7 @@ def _start(run: _Run) -> None:
         return
     if spec.init_from is not None:
         resume.branch(run, spec.init_from)
-    elif spec.lr_scale != 1.0:
+    elif spec.lr_scale is not None:
         raise ValueError("lr_scale applies on resume or on a branch, not to a fresh run")
     _write_config(run)
     report = parameter_report(run.model)
