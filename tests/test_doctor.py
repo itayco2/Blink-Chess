@@ -70,3 +70,32 @@ def test_doctor_reports_capability_8_6_bf16_and_the_efficient_sdpa_kernel():
     assert facts.bf16_supported is True
     assert facts.efficient_sdpa_bf16 is True
     assert facts.flash_sdpa is False  # torch 2.14 on Windows builds no flash kernel (PF05)
+
+
+def test_doctor_warns_when_the_gpu_board_energy_counter_is_unavailable():
+    """Before a run that will be published, the NVML energy counter (compute.json's kWh) must read."""
+    ok = doctor.check_energy(True, "GPU-board energy: NVML total-energy counter on GPU 0")
+    assert ok.status == "ok" and "NVML" in ok.detail
+    missing = doctor.check_energy(False, "GPU-board energy: unavailable (nvml.dll was not found)")
+    assert missing.status == "WARN" and "nvml.dll" in missing.detail and "kWh" in missing.fix
+
+
+def test_the_energy_reader_accepts_a_device_name_as_well_as_a_torch_device():
+    from blink.train import power
+
+    calls = []
+
+    class Lib:
+        def nvmlInit_v2(self):
+            return 0
+
+        def nvmlDeviceGetHandleByIndex_v2(self, index, ref):
+            calls.append(index.value)
+            return 0
+
+        def nvmlDeviceGetTotalEnergyConsumption(self, handle, ref):
+            ref._obj.value = 42_000
+            return 0
+
+    reader, _ = power.open_energy("cuda", loader=Lib)
+    assert reader() == 42.0 and calls == [0]

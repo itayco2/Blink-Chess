@@ -1,0 +1,16 @@
+{
+  "compliant": true,
+  "decisions": 123456,
+  "files": 41,
+  "games": 2051,
+  "histogram": {
+    "0": 812,
+    "1": 20100,
+    "38": 102544
+  },
+  "max_legal": 52,
+  "max_rows": 38,
+  "missing_counts": 0,
+  "value_mode_full_batches": 102544,
+  "violations": []
+}

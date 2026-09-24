@@ -28,7 +28,7 @@ import torch
 from blink import heartbeat
 from blink.model.config import AUTO, TrainConfig, config_to_dict
 from blink.model.transformer import BlinkNet, parameter_report
-from blink.train import checksets, evals, film, resume, step, telemetry, vaa, vram
+from blink.train import checksets, evals, film, power, resume, step, telemetry, vaa, vram
 from blink.train.atomic import write_text_atomic
 from blink.train.checkpoint import list_checkpoints, save_checkpoint
 from blink.train.clipping import GradClip
@@ -292,7 +292,10 @@ def _after_step(run: _Run, window: telemetry.MetricWindow, lr: float, end: int) 
 
 def _run_steps(run: _Run, source: BatchSource, end: int) -> None:
     cfg = run.cfg
-    window = telemetry.MetricWindow(run.device)
+    energy, note = power.open_energy(run.device)  # GPU-board kWh for results/compute.json
+    if note:
+        run.log(note)
+    window = telemetry.MetricWindow(run.device, energy)
     batches = source(run.step)
     while run.step < end:
         lr = wsd_lr(run.step, cfg.peak_lr, cfg.warmup_steps, cfg.steps, cfg.cooldown_frac) * run.lr_scale

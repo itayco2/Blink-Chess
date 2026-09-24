@@ -122,6 +122,25 @@ def vram_holders() -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def check_energy(available: bool, note: str | None) -> CheckResult:
+    """The NVML energy counter the trainer logs as gpu_power_w (results/compute.json's kWh)."""
+    if available:
+        return CheckResult("gpu-board energy", "ok", note or "NVML energy counter reads")
+    return CheckResult(
+        "gpu-board energy",
+        "WARN",
+        note or "NVML energy counter unavailable",
+        fix="a run started now logs no gpu_power_w, so compute.json will have no kWh for it",
+    )
+
+
+def energy_check() -> CheckResult:
+    from blink.train import power
+
+    reader, note = power.open_energy("cuda")
+    return check_energy(reader is not None, note)
+
+
 def torch_facts() -> tuple[str | None, bool]:
     try:
         import torch
@@ -163,5 +182,6 @@ def run(disk_c: int, disk_d: int) -> list[CheckResult]:
         )
     )
     results.append(check_vram(facts.free_bytes, vram_holders()))
+    results.append(energy_check())
     results.append(triton_smoke())
     return results

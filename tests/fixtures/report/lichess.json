@@ -1,0 +1,15 @@
+{
+  "abort_rate": null,
+  "bot": "BlinkBot",
+  "duplicate_rate": null,
+  "human_share": 0.12,
+  "n": 231,
+  "perf_vs_bots": null,
+  "perf_vs_humans": null,
+  "publishable": true,
+  "rating": 1950,
+  "rd": 62,
+  "schema_version": 1,
+  "snapshot_date": "2026-10-11",
+  "time_loss_rate": null
+}

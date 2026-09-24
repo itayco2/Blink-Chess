@@ -8,6 +8,7 @@ code marks the target square, so python-chess can list the legal moves of that f
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -115,6 +116,7 @@ def truncate_after(path: Path, step: int) -> None:
 
 
 PHASES = ("train", "ckpt", "eval")  # a window's phase is the costliest thing that happened in it
+POWER_FIELD = "gpu_power_w"  # blink.report.compute reads it: the window's mean GPU-board power
 
 
 class MetricWindow:
@@ -125,17 +127,26 @@ class MetricWindow:
     "train" rows. It also carries its wall-clock `time` (the rules judge minutes, not rows) and
     `data_wait_frac`, the share of the window the loop spent waiting for its next batch (P4: <= 5%).
     Neither touches the losses: both are host clocks read around the batch source.
+
+    With an energy reader (blink.train.power, joules since the driver loaded) the row also carries
+    gpu_power_w: the joules between the window's open and close over the same seconds samples_per_s
+    is measured on. A missing or backwards reading leaves the field out.
     """
 
-    def __init__(self, device: torch.device) -> None:
+    def __init__(self, device: torch.device, energy: Callable[[], float | None] | None = None) -> None:
         self.device = device
+        self.energy = energy
         self._reset()
+
+    def _joules(self) -> float | None:
+        return self.energy() if self.energy is not None else None
 
     def _reset(self) -> None:
         zero = torch.zeros((), device=self.device)
         self.loss_policy, self.loss_value, self.grad_norm, self.clipped = zero, zero, zero, zero
         self.steps, self.samples, self.started = 0, 0, time.perf_counter()
         self.wait_s = 0.0
+        self.joules_start = self._joules()
         self.phase = "train"
 
     def mark(self, phase: str) -> None:
@@ -156,6 +167,7 @@ class MetricWindow:
 
     def flush(self, step: int, lr: float) -> dict[str, Any]:
         elapsed = max(time.perf_counter() - self.started, 1e-9)
+        joules = self._joules()
         n = max(self.steps, 1)
         on_cuda = self.device.type == "cuda"
         record = {
@@ -171,5 +183,7 @@ class MetricWindow:
             "data_wait_frac": min(1.0, self.wait_s / elapsed),
             "time": time.time(),
         }
+        if joules is not None and self.joules_start is not None and joules >= self.joules_start:
+            record[POWER_FIELD] = (joules - self.joules_start) / elapsed
         self._reset()
         return record

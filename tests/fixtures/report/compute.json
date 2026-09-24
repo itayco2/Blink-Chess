@@ -1,0 +1,14 @@
+{
+  "flagship": "long",
+  "flagship_gpu_hours": 120.3,
+  "flagship_kwh": 26.4,
+  "generated_at": "2026-10-07T12:00:00+03:00",
+  "gpu_board_kwh": 39.8,
+  "kwh_coverage": 1.0,
+  "kwh_gpu_hours": 181.2,
+  "runs": [],
+  "schema_version": 1,
+  "scope": "fixture",
+  "skipped": [],
+  "total_gpu_hours": 181.2
+}
