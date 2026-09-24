@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blink Live</title>
+<style>
+  :root {
+    --bg: #0b0e13;
+    --panel: #121720;
+    --line: #1f2633;
+    --text: #d7dde6;
+    --muted: #7d8795;
+    --accent: #ffd54a;
+    --val: #8ab4f8;
+    --live: #3ddc84;
+    --sick: #ff6b6b;
+    --warn: #ffa94d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+    padding: 16px 20px; border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0; font-size: 18px; letter-spacing: 0.02em; }
+  h1 span { color: var(--accent); }
+  #runs { display: flex; flex-wrap: wrap; gap: 8px; }
+  .run {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 12px; cursor: pointer; font: inherit;
+  }
+  .run[aria-pressed="true"] { border-color: var(--accent); }
+  .badge {
+    display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 4px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.05em; color: var(--muted); border: 1px solid var(--line);
+  }
+  .badge.live { color: var(--bg); background: var(--live); border-color: var(--live); }
+  .badge.sick { color: var(--bg); background: var(--sick); border-color: var(--sick); }
+  #summary { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; }
+  main {
+    display: grid; gap: 14px; padding: 16px 20px 28px;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .card h2 {
+    margin: 0; font-size: 12px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0 6px; }
+  canvas { width: 100%; height: 150px; display: block; }
+  .caption { margin-top: 6px; font-size: 13px; }
+  .caption.healthy { color: var(--live); }
+  .caption.sick { color: var(--sick); }
+  .caption.watch { color: var(--warn); }
+  .caption.idle { color: var(--muted); }
+  .legend { font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 10px; height: 3px; vertical-align: middle; margin: 0 4px 0 10px; }
+  footer { padding: 0 20px 20px; color: var(--muted); font-size: 12px; }
+  @media (max-width: 480px) {
+    header, main { padding-left: 16px; padding-right: 16px; }
+    main { grid-template-columns: 1fr; }
+    #summary { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Blink <span>live</span></h1>
+  <div id="runs" role="group" aria-label="runs"></div>
+  <div id="summary">looking for runs</div>
+</header>
+<main>
+  <section class="card" data-chart="policy">
+    <h2>Policy CE</h2><div class="value">-</div><canvas></canvas>
+    <div class="legend"><i style="background:#ffd54a"></i>train<i style="background:#8ab4f8"></i>val</div>
+    <div class="caption idle">waiting for metrics</div>
+  </section>
+  <section class="card" data-chart="value">
+    <h2>Value CE</h2><div class="value">-</div><canvas></canvas>
+    <div class="legend"><i style="background:#ffd54a"></i>train<i style="background:#8ab4f8"></i>val</div>
+    <div class="caption idle">waiting for metrics</div>
+  </section>
+  <section class="card" data-chart="top1">
+    <h2>Val top-1 (legal moves)</h2><div class="value">-</div><canvas></canvas>
+    <div class="legend"><i style="background:#8ab4f8"></i>raw<i style="background:#ffd54a"></i>EMA</div>
+    <div class="caption idle">waiting for evals</div>
+  </section>
+  <section class="card" data-chart="speed">
+    <h2>Samples / s</h2><div class="value">-</div><canvas></canvas>
+    <div class="caption idle">waiting for metrics</div>
+  </section>
+  <section class="card" data-chart="lr">
+    <h2>Learning rate</h2><div class="value">-</div><canvas></canvas>
+    <div class="caption idle">waiting for metrics</div>
+  </section>
+  <section class="card" data-chart="grad">
+    <h2>Gradient norm</h2><div class="value">-</div><canvas></canvas>
+    <div class="caption idle">waiting for metrics</div>
+  </section>
+</main>
+<footer>Served from 127.0.0.1 only. One home GPU, no cloud GPU, no paid data.</footer>
+<script>
+"use strict";
+const LN_MOVES = Math.log(1880);
+const LN_BINS = Math.log(128);
+const RANDOM_LEGAL_TOP1 = 0.03;
+const COLORS = { accent: "#ffd54a", val: "#8ab4f8", grid: "#1f2633", muted: "#7d8795" };
+const state = { run: null, metrics: [], evals: [], offsets: { "metrics.jsonl": 0, "evals.jsonl": 0 } };
+
+function parseLine(line) {
+  const safe = line.replace(/(-?Infinity|NaN)/g, '"$1"');
+  const raw = JSON.parse(safe);
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) out[k] = typeof v === "string" ? Number(v) : v;
+  return out;
+}
+
+async function getJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(url + " -> " + response.status);
+  return response.json();
+}
+
+function fmt(x, digits) {
+  if (x === undefined || x === null) return "-";
+  if (!Number.isFinite(x)) return String(x);
+  if (Math.abs(x) >= 1000) return Math.round(x).toLocaleString("en-US");
+  if (Math.abs(x) > 0 && Math.abs(x) < 0.01) return x.toExponential(2);
+  return x.toFixed(digits);
+}
+
+function drawChart(canvas, series, refLine) {
+  const ratio = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const points = series.flatMap(s => s.points).filter(p => Number.isFinite(p[1]));
+  if (!points.length) return;
+  let [x0, x1] = [Math.min(...points.map(p => p[0])), Math.max(...points.map(p => p[0]))];
+  let [y0, y1] = [Math.min(...points.map(p => p[1])), Math.max(...points.map(p => p[1]))];
+  if (refLine !== undefined) { y0 = Math.min(y0, refLine); y1 = Math.max(y1, refLine); }
+  if (x1 === x0) x1 = x0 + 1;
+  if (y1 === y0) { y1 += Math.abs(y1) * 0.05 + 1e-9; y0 -= Math.abs(y0) * 0.05 + 1e-9; }
+  const pad = { l: 44, r: 8, t: 6, b: 18 };
+  const sx = x => pad.l + (x - x0) / (x1 - x0) * (w - pad.l - pad.r);
+  const sy = y => h - pad.b - (y - y0) / (y1 - y0) * (h - pad.t - pad.b);
+  ctx.strokeStyle = COLORS.grid; ctx.fillStyle = COLORS.muted; ctx.lineWidth = 1;
+  ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+  for (const y of [y0, (y0 + y1) / 2, y1]) {
+    ctx.beginPath(); ctx.moveTo(pad.l, sy(y)); ctx.lineTo(w - pad.r, sy(y)); ctx.stroke();
+    ctx.fillText(fmt(y, 3), 2, sy(y) + 4);
+  }
+  ctx.fillText(fmt(x0, 0), pad.l, h - 4);
+  ctx.fillText(fmt(x1, 0), w - pad.r - 40, h - 4);
+  if (refLine !== undefined) {
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = COLORS.muted;
+    ctx.beginPath(); ctx.moveTo(pad.l, sy(refLine)); ctx.lineTo(w - pad.r, sy(refLine)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  for (const s of series) {
+    const pts = s.points.filter(p => Number.isFinite(p[1]));
+    if (!pts.length) continue;
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color; ctx.lineWidth = 2;
+    ctx.beginPath();
+    pts.forEach((p, i) => (i ? ctx.lineTo(sx(p[0]), sy(p[1])) : ctx.moveTo(sx(p[0]), sy(p[1]))));
+    ctx.stroke();
+    if (pts.length < 40) for (const p of pts) { ctx.beginPath(); ctx.arc(sx(p[0]), sy(p[1]), 2.5, 0, 7); ctx.fill(); }
+  }
+}
+
+function median(xs) {
+  const s = [...xs].sort((a, b) => a - b);
+  return s.length ? s[Math.floor(s.length / 2)] : NaN;
+}
+
+const verdicts = {
+  policy(m) {
+    const last = m.at(-1);
+    if (!last) return ["idle", "waiting for metrics"];
+    const x = last.loss_policy, best = Math.min(...m.map(r => r.loss_policy));
+    if (!Number.isFinite(x)) return ["sick", "sick: the policy loss is " + x];
+    if (last.step >= 500 && x > LN_MOVES - 0.3) return ["sick", "sick: still near ln 1880 = 7.54 after 500 steps"];
+    if (x > best * 1.1) return ["watch", "watch: " + fmt((x / best - 1) * 100, 0) + "% above its best " + fmt(best, 3)];
+    return ["healthy", "healthy: down from ln 1880 = 7.54 to " + fmt(x, 3)];
+  },
+  value(m) {
+    const last = m.at(-1);
+    if (!last) return ["idle", "waiting for metrics"];
+    const x = last.loss_value, best = Math.min(...m.map(r => r.loss_value));
+    if (!Number.isFinite(x)) return ["sick", "sick: the value loss is " + x];
+    if (last.step >= 500 && x > LN_BINS - 0.05) return ["sick", "sick: still at ln 128 = 4.85 after 500 steps"];
+    if (x > best * 1.1) return ["watch", "watch: " + fmt((x / best - 1) * 100, 0) + "% above its best " + fmt(best, 3)];
+    return ["healthy", "healthy: down from ln 128 = 4.85 to " + fmt(x, 3)];
+  },
+  top1(_, e) {
+    const last = e.at(-1);
+    if (!last) return ["idle", "waiting for evals"];
+    const best = Math.max(...e.map(r => r.top1));
+    if (last.step >= 500 && last.top1 < RANDOM_LEGAL_TOP1) return ["sick", "sick: below a random legal move (about 3%)"];
+    if (last.top1 < best - 0.02) return ["watch", "watch: down from its best " + fmt(best * 100, 1) + "%"];
+    return ["healthy", "healthy: " + fmt(last.top1 * 100, 1) + "% vs about 3% for a random legal move"];
+  },
+  speed(m) {
+    if (m.length < 3) return ["idle", "measuring"];
+    const recent = m.slice(-11, -1).map(r => r.samples_per_s), x = m.at(-1).samples_per_s;
+    if (x < 0.7 * median(recent)) return ["sick", "WARN: over 30% below the recent median (sysmem spill?)"];
+    return ["healthy", "healthy: steady at " + fmt(x, 0) + " samples/s, " + fmt(m.at(-1).gpu_mem_gb, 2) + " GB reserved"];
+  },
+  lr(m) {
+    const last = m.at(-1);
+    if (!last) return ["idle", "waiting for metrics"];
+    if (!Number.isFinite(last.lr) || last.lr < 0) return ["sick", "sick: learning rate is " + last.lr];
+    const peak = Math.max(...m.map(r => r.lr));
+    const phase = last.lr >= peak * 0.999 ? "stable at the peak" : (m.length > 1 && last.lr > m.at(-2).lr ? "warming up" : "cooling down");
+    return ["healthy", "healthy: " + phase + " (warmup, stable, 1 - sqrt cooldown)"];
+  },
+  grad(m) {
+    const last = m.at(-1);
+    if (!last) return ["idle", "waiting for metrics"];
+    if (!Number.isFinite(last.grad_norm)) return ["sick", "sick: gradient norm is " + last.grad_norm];
+    if (last.clip_frac > 0.5) return ["watch", "watch: clipped on " + fmt(last.clip_frac * 100, 0) + "% of steps"];
+    return ["healthy", "healthy: clipped on " + fmt(last.clip_frac * 100, 0) + "% of steps"];
+  },
+};
+
+function renderCard(name, big, series, ref) {
+  const card = document.querySelector('[data-chart="' + name + '"]');
+  card.querySelector(".value").textContent = big;
+  drawChart(card.querySelector("canvas"), series, ref);
+  const [kind, text] = verdicts[name](state.metrics, state.evals);
+  const caption = card.querySelector(".caption");
+  caption.className = "caption " + kind;
+  caption.textContent = text;
+}
+
+function render() {
+  const m = state.metrics, e = state.evals;
+  const pts = (rows, key) => rows.map(r => [r.step, r[key]]);
+  renderCard("policy", fmt(m.at(-1)?.loss_policy, 3),
+    [{ points: pts(m, "loss_policy"), color: COLORS.accent }, { points: pts(e, "policy_ce"), color: COLORS.val }], LN_MOVES);
+  renderCard("value", fmt(m.at(-1)?.loss_value, 3),
+    [{ points: pts(m, "loss_value"), color: COLORS.accent }, { points: pts(e, "value_ce"), color: COLORS.val }], LN_BINS);
+  renderCard("top1", e.length ? fmt(e.at(-1).top1 * 100, 1) + "%" : "-",
+    [{ points: pts(e, "top1"), color: COLORS.val }, { points: pts(e, "ema_top1"), color: COLORS.accent }], RANDOM_LEGAL_TOP1);
+  renderCard("speed", fmt(m.at(-1)?.samples_per_s, 0), [{ points: pts(m.slice(1), "samples_per_s"), color: COLORS.accent }]);
+  renderCard("lr", fmt(m.at(-1)?.lr, 5), [{ points: pts(m, "lr"), color: COLORS.accent }]);
+  renderCard("grad", fmt(m.at(-1)?.grad_norm, 3), [{ points: pts(m, "grad_norm"), color: COLORS.accent }], 1.0);
+}
+
+async function pull(file, key) {
+  const url = "/api/tail?run=" + encodeURIComponent(state.run) + "&file=" + file + "&offset=" + state.offsets[file];
+  const data = await getJson(url);
+  if (data.reset) state[key] = [];
+  state.offsets[file] = data.offset;
+  for (const line of data.lines) {
+    try { state[key].push(parseLine(line)); } catch (err) { console.warn("skipped a bad line", err); }
+  }
+}
+
+function selectRun(name) {
+  state.run = name; state.metrics = []; state.evals = [];
+  state.offsets = { "metrics.jsonl": 0, "evals.jsonl": 0 };
+}
+
+function renderRuns(runs) {
+  const box = document.getElementById("runs");
+  box.replaceChildren(...runs.map(r => {
+    const button = document.createElement("button");
+    button.className = "run"; button.type = "button";
+    button.setAttribute("aria-pressed", String(r.name === state.run));
+    button.textContent = r.name;
+    const badge = document.createElement("span");
+    const sick = r.state === "crashed";
+    badge.className = "badge" + (r.live ? " live" : sick ? " sick" : "");
+    badge.textContent = r.live ? "LIVE" : r.state.toUpperCase();
+    button.append(badge);
+    button.addEventListener("click", () => { selectRun(r.name); tick(); });
+    return button;
+  }));
+  const current = runs.find(r => r.name === state.run);
+  const summary = document.getElementById("summary");
+  if (!current) { summary.textContent = runs.length ? "pick a run" : "no runs yet"; return; }
+  const age = current.heartbeat_age_s === null ? "no heartbeat" : "heartbeat " + fmt(current.heartbeat_age_s, 0) + " s ago";
+  summary.textContent = "step " + (current.step ?? "-") + " / " + (current.steps ?? "-") + ", " + age;
+}
+
+async function tick() {
+  try {
+    const { runs } = await getJson("/api/runs");
+    if (!state.run && runs.length) selectRun((runs.find(r => r.live) || runs[0]).name);
+    renderRuns(runs);
+    if (state.run) {
+      await pull("metrics.jsonl", "metrics");
+      await pull("evals.jsonl", "evals");
+    }
+    render();
+  } catch (err) {
+    document.getElementById("summary").textContent = "dashboard offline: " + err.message;
+  }
+}
+
+tick();
+setInterval(tick, 3000);
+window.addEventListener("resize", render);
+</script>
+</body>
+</html>
