@@ -4,8 +4,9 @@ Checked on every train record (roots and children): sha256 against the manifest,
 no hit in the blocklist or in val, test_iid, test_grouped (roots and children), no child equal to a train
 root, no duplicate child. Checked on a random sample (1% by default): the fen_hash is the board's hash,
 the best and alternative moves are legal, the position is valid for python-chess, the board is exactly
-what encode_board writes for that python-chess position (castling rights and en passant as python-chess
-cleans them: the pack's stand-in for canonical_epd parity), and no record belongs to a held-out group.
+what encode_board writes for that python-chess position, canonical_epd of the board (decoded with no
+python-chess) equals python-chess's epd() of it (castling rights and en passant as python-chess cleans
+them: the plan's canonical_epd parity), and no record belongs to a held-out group.
 Composed positions with more pawns or pieces than a game can reach (the analysis board allows them) are
 playable, so they count as impossible_material, not as invalid.
 Measured: PV monotonicity (side-to-move win% never rises from PV 1 down; a sign flip drives it to about
@@ -24,7 +25,7 @@ import numpy as np
 
 from blink.board import encode, moves
 from blink.board.value import win_probability_array
-from blink.data import bigpack, children, grouped, pack
+from blink.data import bigpack, canon, children, grouped, pack
 from blink.data.blocklist import contains
 from blink.data.record import CHILD_DTYPE, NO_MOVE, ROOT_DTYPE
 
@@ -116,6 +117,7 @@ COUNTS = (
     "valid",
     "impossible_material",
     "round_trip_mismatches",
+    "epd_mismatches",
     "multi_pv",
     "monotone",
 )
@@ -145,13 +147,22 @@ def classify(board: chess.Board) -> tuple[bool, bool]:
     return status & ~MATERIAL_ONLY == chess.STATUS_VALID, bool(status & MATERIAL_ONLY)
 
 
+def epd_matches(codes: np.ndarray, board: chess.Board) -> bool:
+    """canonical_epd of the codes equals python-chess's epd() of the board they decode to."""
+    try:
+        return canon.canonical_epd(codes) == board.epd()
+    except ValueError:  # codes no EPD can hold (a castling rook off the corners, two ep squares)
+        return False
+
+
 def _tally_position(codes: np.ndarray, tally: "_Tally") -> chess.Board:
-    """Status and round trip of one sampled board; returns it as a python-chess board."""
+    """Status, round trip and epd parity of one sampled board; returns it as a python-chess board."""
     board = children.codes_to_board(codes)
     valid, impossible = classify(board)
     tally.add("valid", valid)
     tally.add("impossible_material", impossible)
     tally.add("round_trip_mismatches", not np.array_equal(encode.encode_board(board), codes))
+    tally.add("epd_mismatches", not epd_matches(codes, board))
     return board
 
 
@@ -258,6 +269,7 @@ def _checks(tally: _Tally, roots_by_split: dict[str, int]) -> dict:
         ("alt_move_legal_pct", n["legal_alts"], n["alts"]),
         ("position_valid_pct", n["valid"], sampled),
         ("board_round_trip_pct", sampled - n["round_trip_mismatches"], sampled),
+        ("canonical_epd_parity_pct", sampled - n["epd_mismatches"], sampled),
     ):
         pct = _pct(part, whole)
         checks[name] = _check(pct, "== 100", pct is None or pct == 100.0)

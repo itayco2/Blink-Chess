@@ -47,6 +47,7 @@ def test_a_clean_pack_has_no_leak_and_only_legal_labels(pack_dir):
     assert checks["best_move_legal_pct"]["value"] == 100.0
     assert checks["alt_move_legal_pct"]["value"] == 100.0
     assert checks["position_valid_pct"]["value"] == 100.0
+    assert checks["canonical_epd_parity_pct"]["value"] == 100.0 and checks["canonical_epd_parity_pct"]["ok"]
     assert report["counts"]["sampled_roots"] == report["counts"]["train_roots"] > 0
     assert json.loads((pack_dir / "verify.json").read_text(encoding="utf-8")) == report
 
@@ -121,6 +122,34 @@ def test_a_board_python_chess_would_write_differently_fails_the_round_trip(pack_
     assert report["counts"]["round_trip_mismatches"] == 1
     assert report["checks"]["board_round_trip_pct"]["value"] < 100.0
     assert not report["checks"]["board_round_trip_pct"]["ok"]
+
+
+def _plant_off_corner_castling_rook(records: np.ndarray) -> int:
+    """Turn an own rook off a1 and h1 into a castling rook on the first record that has one."""
+    codes = encode.unpack(records["board"])
+    for index, row in enumerate(codes):
+        own_rooks = np.flatnonzero(row == encode.OWN + chess.ROOK - 1)
+        rooks = [s for s in own_rooks if s not in (chess.A1, chess.H1)]
+        if rooks:
+            row[rooks[0]] = encode.OWN_CASTLING_ROOK
+            records["board"][index] = encode.pack(row)
+            return index
+    raise AssertionError("no record with an own rook off the corners")
+
+
+@pytest.mark.parametrize("plant", [_plant_dead_ep_square, _plant_off_corner_castling_rook])
+def test_a_packed_board_whose_canonical_epd_differs_from_python_chess_epd_fails_the_parity(
+    pack_dir, tmp_path, plant
+):
+    pack = copy_pack(pack_dir, tmp_path / "bad")
+    roots = np.fromfile(pack / "train_r002.bin", dtype=ROOT_DTYPE)
+    plant(roots)
+    roots.tofile(pack / "train_r002.bin")
+    _retag(pack, "train_r002.bin")
+    report = run(pack)
+    assert report["counts"]["epd_mismatches"] == 1
+    assert report["checks"]["canonical_epd_parity_pct"]["value"] < 100.0
+    assert not report["checks"]["canonical_epd_parity_pct"]["ok"] and not report["ok"]
 
 
 def test_a_changed_shard_fails_its_sha256(pack_dir, tmp_path):
