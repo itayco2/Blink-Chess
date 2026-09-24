@@ -360,3 +360,45 @@ def test_blocks_record_the_epsilon_they_played_with_and_refuse_a_changed_one(tmp
             log=lambda s: None,
             load=IDLE,
         )
+
+
+AUDITED = """[White "Blink-value-run_x"]
+[Black "DM-9M"]
+[Result "*"]
+
+1. e4 {+0.30/1 0.020s, n=1} e5 {+0.10/1 0.020s, n=20} 2. Nf3 {+0.20/1 0.020s, n=1} *
+
+[White "SF1320"]
+[Black "Blink-value-run_x"]
+[Result "*"]
+
+1. e4 {+0.30/20 0.100s, n=90000} e5 {+0.10/1 0.020s, n=1} *
+"""
+
+
+def test_each_block_audits_every_searchless_player_in_its_pgns_by_exact_name(tmp_path):
+    pgn = tmp_path / "e6.pgn"
+    pgn.write_text(AUDITED, encoding="utf-8")
+    state = orchestrate.run_blocks(
+        ctx(tmp_path), recorder([], {"E6": {"pgns": [str(pgn)]}}), only=["E6"], runs_root=tmp_path, load=IDLE
+    )
+    audits = state["E6"]["nosearch"]
+    assert set(audits) == {"Blink-value-run_x", "DM-9M"}
+    assert audits["Blink-value-run_x"]["decisions"] == 3 and audits["DM-9M"]["decisions"] == 1
+    assert all(a["compliant"] for a in audits.values())
+    assert state["gate_failures"] == []
+    full = json.loads((tmp_path / "out" / "E6.nosearch.json").read_text(encoding="utf-8"))
+    assert full["DM-9M"]["histogram"] == {"20": 1}
+
+
+def test_a_block_with_a_non_compliant_audit_fails_the_run(tmp_path, capsys):
+    from blink.commands import evaluate
+
+    pgn = tmp_path / "e3.pgn"
+    pgn.write_text(AUDITED.replace("e5 {+0.10/1 0.020s, n=1}", "e5 {+0.10/1 0.020s}"), encoding="utf-8")
+    runners = recorder([], {"E3": {"pgns": [str(pgn)]}})
+    state = orchestrate.run_blocks(ctx(tmp_path), runners, only=["E3"], runs_root=tmp_path, load=IDLE)
+    assert not state["E3"]["nosearch"]["Blink-value-run_x"]["compliant"]
+    assert any("no-search" in line and "Blink-value-run_x" in line for line in state["gate_failures"])
+    assert evaluate._run_guarded("blink eval block", lambda: state) == 1
+    assert "no-search" in capsys.readouterr().err

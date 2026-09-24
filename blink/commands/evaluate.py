@@ -293,9 +293,14 @@ def _run_guarded(prefix: str, action) -> int:
         ValueError,
     ) as exc:
         return _fail(prefix, exc)
-    if isinstance(outcome, dict) and outcome.get("ordo_error"):
+    if not isinstance(outcome, dict):
+        return 0
+    gates = outcome.get("gate_failures") or []
+    for line in gates:
+        print(f"{prefix}: done-when gate failed: {line}", file=sys.stderr)
+    if outcome.get("ordo_error"):
         return _fail(prefix, RuntimeError(f"results.json written without Elo: {outcome['ordo_error']}"))
-    return 0
+    return 1 if gates else 0
 
 
 def _cmd_block(args: argparse.Namespace) -> int:

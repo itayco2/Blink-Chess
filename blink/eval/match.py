@@ -248,9 +248,9 @@ def pair_player(
 
 
 def audit_players(pgns: Sequence[Path], players: Sequence[str]) -> dict[str, dict]:
-    """The no-search audit of each searchless player by its own name (Blink-*, DM-9M*): one report each."""
+    """The no-search audit of each searchless player by its exact name (Blink-*, DM-9M*): one report each."""
     files = [Path(p) for p in pgns if Path(p).is_file()]
-    return {name: nosearch.audit(files, engine=name) for name in players}
+    return nosearch.audit_each(files, players)
 
 
 class EngineAgent:

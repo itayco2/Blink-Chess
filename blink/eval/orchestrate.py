@@ -4,8 +4,11 @@ Before anything runs: the per-block game-count table is printed; when the annota
 exists, EVAL.md must be byte-identical to the tagged copy (else nothing runs); and a time-based block
 refuses to start while any Blink training run's heartbeat is live (a busy GPU or CPU would bend both the
 clocks and the anchors). After each block its report goes to <out>/<block>.json with the time forfeits and
-adjudications of every engine in its PGNs; at the end results/results.json is written through
-blink.report.results_schema (Ordo over the final-slice PGNs for the Elo column, E2 for the diagnostics).
+adjudications of every engine in its PGNs and the no-search audit of every searchless player in them
+(Blink-*, DM-*, each by its exact name; the full audits go to <out>/<block>.nosearch.json). The plan's
+done-when gates the run can fail are listed as gate_failures, and `blink eval` then exits non-zero. At the
+end results/results.json is written through blink.report.results_schema (Ordo over the final-slice PGNs
+for the Elo column, E2 for the diagnostics).
 
 Where the games are played: the fastchess blocks are the ones against clocked UCI_Elo anchors (E0's SF
 self-check, E5 and DM-9M's E7 gauntlet), at concurrency 5 as in the plan. Every other match runs in process
@@ -251,6 +254,37 @@ def _count_game(table: dict[str, Counter], headers: chess.pgn.Headers) -> None:
         table[loser][key] += 1
 
 
+# ------------------------------------------------------------------------------ no-search audit, gates
+
+AUDIT_KEYS = ("games", "decisions", "compliant", "missing_counts", "max_rows", "max_legal")
+
+
+def audit_block(pgns: Sequence[Path], players: Iterable[str]) -> dict[str, dict]:
+    """The no-search audit of every searchless player seated in these PGNs, each by its exact name."""
+    from blink.eval import nosearch
+
+    files = [Path(p) for p in pgns if Path(p).is_file()]
+    return nosearch.audit_each(files, sorted(p for p in players if nosearch.is_searchless(p)))
+
+
+def _audit_summary(audit: dict) -> dict:
+    return {**{key: audit[key] for key in AUDIT_KEYS}, "violations": len(audit["violations"])}
+
+
+def gate_failures(state: dict) -> list[str]:
+    """The plan's done-when gates this run failed (P8), one line each; empty when every gate holds."""
+    failures = []
+    for block_id in BLOCK_ORDER:
+        report = state.get(block_id) or {}
+        for player, audit in (report.get("nosearch") or {}).items():
+            if not audit["compliant"]:
+                failures.append(
+                    f"{block_id}: the no-search audit of {player} is not compliant "
+                    f"({audit['violations']} violations in {audit['decisions']} decisions)"
+                )
+    return failures
+
+
 # ------------------------------------------------------------------------------ running blocks
 
 Runner = Callable[[EvalContext, dict], dict]
@@ -286,13 +320,26 @@ def run_blocks(
         epsilon = guard_epsilon(block_id, ctx.results_dir, state.get("epsilon"))
         log(f"{block_id}: {BLOCKS[block_id].title}")
         report = runners[block_id](ctx, state)
-        forfeits = forfeit_table(Path(p) for p in report.get("pgns", []))
-        report = {**report, "forfeits": forfeits, "cpu_pct_at_start": busy, "epsilon": epsilon}
+        pgns = [Path(p) for p in report.get("pgns", [])]
+        forfeits = forfeit_table(pgns)
+        audits = audit_block(pgns, forfeits)
+        if audits:
+            _write_json(ctx.out_dir / f"{block_id}.nosearch.json", audits)
+        report = {
+            **report,
+            "forfeits": forfeits,
+            "nosearch": {player: _audit_summary(audit) for player, audit in audits.items()},
+            "cpu_pct_at_start": busy,
+            "epsilon": epsilon,
+        }
         state[block_id] = report
         if epsilon is not None:
             state["epsilon"] = epsilon
         _write_json(ctx.out_dir / f"{block_id}.json", report)
         log(f"{block_id}: {report.get('games', 0):,} games, forfeits {report['forfeits'] or '{}'}")
+    state["gate_failures"] = gate_failures(state)
+    for line in state["gate_failures"]:
+        log(f"done-when gate failed: {line}")
     return state
 
 
@@ -655,6 +702,7 @@ def run_all(
         "ordo": fit.as_dict() if fit is not None else None,
         "ordo_error": ordo_error,
         "forfeits": {block: state[block]["forfeits"] for block in BLOCK_ORDER if block in state},
+        "gate_failures": state["gate_failures"],
         "games": {block: state[block].get("games", 0) for block in BLOCK_ORDER if block in state},
     }
     _write_json(ctx.out_dir / "summary.json", summary)
