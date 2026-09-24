@@ -378,3 +378,20 @@ def test_the_trainer_dies_with_its_supervisor_even_when_the_supervisor_is_killed
     assert note == "free" and alive  # without the job, a killed supervisor leaves an orphan trainer
     note, _, alive = _grandchild_after_parent_dies(tmp_path, "bind")
     assert note.startswith("bound") and not alive
+
+
+def test_a_locked_status_file_never_takes_the_supervision_down(tmp_path, monkeypatch):
+    def locked(path, text):
+        raise PermissionError(13, "held open by a reader", str(path))
+
+    monkeypatch.setattr(supervise, "write_text_atomic", locked)
+    monkeypatch.setattr(supervise.heartbeat, "write", lambda *a, **k: locked("heartbeat.json", ""))
+    run_dir = tmp_path / "runs" / "fake"
+    run_dir.mkdir(parents=True)
+    lines = []
+    outcome = supervise.supervise(
+        FAST, run_dir, [sys.executable, "-c", "raise SystemExit(3)"], log=lines.append
+    )
+    assert outcome.status == "stopped: crash, exit 3 after 3 restarts"
+    assert any("could not write supervisor.json" in line for line in lines)
+    assert any("could not write heartbeat.json" in line for line in lines)

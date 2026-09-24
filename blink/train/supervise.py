@@ -519,7 +519,10 @@ class Supervisor:
         if state in ("stopped", "paused"):
             beat = heartbeat.read(self._path("heartbeat.json")) or {}
             payload = {**beat, "state": state, "stopped": status, "supervisor_pid": os.getpid()}
-            heartbeat.write(self._path("heartbeat.json"), payload)
+            try:
+                heartbeat.write(self._path("heartbeat.json"), payload)
+            except OSError as exc:  # a reader held the file past every retry; supervisor.json still says why
+                self.log(f"supervise {self.run_dir.name}: could not write heartbeat.json: {exc}")
         self._event(state, status=status)
         self._write_record(state, status)
         code = {"finished": EXIT_FINISHED, "paused": EXIT_PAUSED}.get(state, EXIT_STOPPED)
@@ -554,7 +557,10 @@ class Supervisor:
             "last_eval": evals[-1] if evals else None,
             "events": self.events[-MAX_EVENTS:],
         }
-        write_text_atomic(self._path(RECORD_FILE), json.dumps(record, indent=2) + "\n")
+        try:
+            write_text_atomic(self._path(RECORD_FILE), json.dumps(record, indent=2) + "\n")
+        except OSError as exc:  # never let a locked status file take down the supervision itself
+            self.log(f"supervise {self.run_dir.name}: could not write {RECORD_FILE}: {exc}")
 
 
 def supervise(
