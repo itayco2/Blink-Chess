@@ -182,3 +182,13 @@ def test_real_ordo_fits_a_small_connected_pool(tmp_path):
     blink = fit.row("Blink-value")
     assert 1200 < blink.rating < 1600 and blink.error > 0 and blink.played == 24
     assert [a.name for a in fit.anchors] == ["SF1320", "SF1400"]
+
+
+def test_an_ordo_that_never_finishes_is_a_clear_error(tmp_path, monkeypatch):
+    def hang(*args, **kwargs):
+        raise rating.subprocess.TimeoutExpired(cmd="ordo", timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(rating.subprocess, "run", hang)
+    write_games(tmp_path / "g.pgn", [("Blink", "SF1320", "1/2-1/2"), ("SF1320", "Blink", "1-0")])
+    with pytest.raises(RuntimeError, match="did not finish in 5 s"):
+        rating.run_ordo([tmp_path / "g.pgn"], (rating.Anchor("SF1320", 1320),), tmp_path / "o", timeout_s=5)

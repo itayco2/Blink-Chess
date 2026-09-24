@@ -31,6 +31,7 @@ REGULARIZE = 1e-3  # fishtest LLRcalc.regularize
 SCORE_CLAMP = 1e-3  # fishtest stat_util.elo
 LOWEST_UCI_ELO = 1320
 ORDO_SIMULATIONS = 1000
+ORDO_TIMEOUT_S = 1800
 ANCHORS_FILE = Path("configs") / "anchors.csv"
 WHITE_ADVANTAGE = re.compile(r"White advantage = (-?[\d.]+) \+/- ([\d.]+)")
 DRAW_RATE = re.compile(r"Draw rate \(equal opponents\) = ([\d.]+) % \+/- ([\d.]+)")
@@ -324,6 +325,7 @@ def run_ordo(
     workdir: Path,
     simulations: int = ORDO_SIMULATIONS,
     exe: Path | None = None,
+    timeout_s: float = ORDO_TIMEOUT_S,
 ) -> OrdoFit:
     """Fit every player in `pgns` with the anchors that played fixed: the rows, and who was left out."""
     tally = tally_players(pgns)
@@ -336,7 +338,12 @@ def run_ordo(
     fitted = [p for p in tally if p not in excluded and p not in {a.name for a in present}]
     if not present or not fitted:
         return OrdoFit((), present, excluded, tally, tuple(command), {})
-    proc = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"ordo did not finish in {timeout_s} s (a nearly unbounded rating?)") from exc
     if proc.returncode != 0:
         output = proc.stdout + proc.stderr
         if "not well connected" in output:
