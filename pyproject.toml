@@ -19,18 +19,24 @@ blink = "blink.cli:main"
 blink-uci = "blink.uci:main"
 
 # Groups, not extras: uv syncs exactly, so an extra would be uninstalled by any plain `uv run`.
-# All three groups are on by default; the torch-free CI leg passes --no-group train --no-group compile.
+# All four groups are on by default; the torch-free CI leg passes --no-group train --no-group compile.
 [dependency-groups]
 dev = [
     "pytest==9.1.1",
     "pytest-cov>=7",
     "ruff==0.16.8",
+    "playwright==1.63.0",
 ]
 train = ["torch==2.14.0"]
 compile = ["triton-windows>=3.8,<3.9; sys_platform == 'win32'"]
+export = [
+    "onnx==1.23.0",
+    "onnxscript==0.7.2",
+    "onnxruntime==1.30.0",
+]
 
 [tool.uv]
-default-groups = ["dev", "train", "compile"]
+default-groups = ["dev", "train", "compile", "export"]
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
