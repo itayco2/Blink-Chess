@@ -110,8 +110,16 @@ def truncate_after(path: Path, step: int) -> None:
     write_text_atomic(path, "".join(kept))  # the live dashboard may be reading this very file
 
 
+PHASES = ("train", "ckpt", "eval")  # a window's phase is the costliest thing that happened in it
+
+
 class MetricWindow:
-    """Sums per-step losses on the device (no host sync) until the next metrics line is written."""
+    """Sums per-step losses on the device (no host sync) until the next metrics line is written.
+
+    Each row carries a phase: "eval" or "ckpt" when an evaluation or a checkpoint ran inside its
+    window (its samples/s is then not a training rate), else "train". Throughput stop rules read only
+    "train" rows.
+    """
 
     def __init__(self, device: torch.device) -> None:
         self.device = device
@@ -121,6 +129,11 @@ class MetricWindow:
         zero = torch.zeros((), device=self.device)
         self.loss_policy, self.loss_value, self.grad_norm, self.clipped = zero, zero, zero, zero
         self.steps, self.samples, self.started = 0, 0, time.perf_counter()
+        self.phase = "train"
+
+    def mark(self, phase: str) -> None:
+        if PHASES.index(phase) > PHASES.index(self.phase):
+            self.phase = phase
 
     def add(self, loss_policy, loss_value, grad_norm, clip_norm: float, samples: int) -> None:
         self.loss_policy = self.loss_policy + loss_policy
@@ -143,6 +156,7 @@ class MetricWindow:
             "clip_frac": self.clipped.item() / n,
             "samples_per_s": self.samples / elapsed,
             "gpu_mem_gb": torch.cuda.max_memory_reserved(self.device) / 2**30 if on_cuda else 0.0,
+            "phase": self.phase,
         }
         self._reset()
         return record

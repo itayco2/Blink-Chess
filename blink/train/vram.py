@@ -24,12 +24,10 @@ def budget_bytes(free_bytes: int) -> int:
 
 def candidates(batch_size: int, floor: int = MIN_MICRO) -> list[int]:
     """batch, batch/2, batch/4, ... while the halving divides evenly and stays >= floor."""
-    out, micro = [], batch_size
-    while micro >= floor:
-        out.append(micro)
-        if micro % 2:
-            break
+    out, micro = [batch_size], batch_size
+    while micro % 2 == 0 and micro // 2 >= floor:
         micro //= 2
+        out.append(micro)
     return out
 
 

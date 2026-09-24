@@ -47,3 +47,7 @@ def test_a_real_probe_on_cuda_reports_a_peak_that_grows_with_the_micro_batch():
     large = vram.probe_peak(model, 512, torch.device("cuda"))
     assert 0 < small < large
     assert all(p.grad is None for p in model.parameters())
+
+
+def test_a_batch_below_the_floor_is_its_own_only_candidate():
+    assert vram.candidates(16) == [16]
