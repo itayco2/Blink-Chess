@@ -16,18 +16,46 @@ def test_candidates_halve_the_batch_down_to_the_floor():
     assert vram.candidates(96, floor=16) == [96, 48, 24]
 
 
-def test_micro_batch_is_the_largest_candidate_whose_peak_fits_the_budget():
-    peaks = {1024: 9 * GB, 512: 5.6 * GB, 256: 3.1 * GB, 128: 1.9 * GB}
-    micro, probes = vram.choose_micro_batch(1024, lambda m: peaks[m], budget=int(5.5 * GB))
-    assert micro == 256
-    assert [p["micro"] for p in probes] == [1024, 512, 256]
-    assert probes[-1]["fits"] and not probes[0]["fits"]
+def _linear(base_gb: float, mb_per_row: float):
+    calls = []
+
+    def peak(micro: int) -> float:
+        calls.append(micro)
+        return (base_gb + micro * mb_per_row / 1024) * GB
+
+    return peak, calls
 
 
-def test_an_out_of_memory_probe_moves_to_a_smaller_micro_batch():
-    micro, probes = vram.choose_micro_batch(512, lambda m: None if m > 128 else m * 0.005 * GB, budget=GB)
+def test_micro_batch_is_the_largest_candidate_predicted_and_measured_to_fit():
+    """PF02: 0.6 GB + 5 MB a row fits 980 rows in 5.5 GB, so 512; only 32, 64 and 512 are ever run."""
+    peak, calls = _linear(0.6, 5.0)
+    micro, probes = vram.choose_micro_batch(1024, peak, budget=int(5.5 * GB))
+    assert micro == 512 and calls == [32, 64, 512]
+    assert probes[-1]["fits"] and probes[-1]["predicted_gb"] == pytest.approx(3.1)
+
+
+def test_no_probe_ever_runs_a_size_predicted_to_overflow_the_budget():
+    peak, calls = _linear(0.6, 5.0)
+    vram.choose_micro_batch(1024, peak, budget=int(1.5 * GB))
+    assert max(calls) == 128  # 0.6 + 0.625 GB; 256 rows would need 1.85 GB
+
+
+def test_a_verify_that_runs_out_of_memory_or_over_budget_steps_down():
+    def peak(micro: int):
+        if micro >= 512:
+            return None  # out of memory despite the prediction
+        if micro == 256:
+            return 2 * GB  # worse than predicted: over the 1.5 GB budget
+        return (0.1 + micro * 0.002) * GB
+
+    micro, probes = vram.choose_micro_batch(1024, peak, budget=int(1.5 * GB))
     assert micro == 128
-    assert probes[0]["peak_gb"] is None
+    assert [p["micro"] for p in probes] == [32, 64, 512, 256, 128]
+
+
+def test_a_batch_that_is_its_own_only_candidate_is_measured_directly():
+    peak, calls = _linear(0.1, 1.0)
+    assert vram.choose_micro_batch(16, peak, budget=GB)[0] == 16 and calls == [16]
 
 
 def test_no_micro_batch_that_fits_is_an_explicit_error():

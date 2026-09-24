@@ -1,0 +1,13 @@
+# M12: d512, L12, H16 on Recipe D. 26,746,752 parameters = 26,075,008 non-GAB + 671,744 GAB-lite.
+# Steps are 6 GPU-h at the 1,121 samples/s measured at micro-batch 256 (P4, eager):
+# 6 * 3600 * 1121 / 1024 = 23,646.
+base = "recipe.toml"
+
+[model]
+d_model = 512
+n_layers = 12
+n_heads = 16
+
+[train]
+peak_lr = 7e-4
+steps = 23646

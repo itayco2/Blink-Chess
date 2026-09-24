@@ -135,7 +135,10 @@ def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
     device = torch.device(spec.device)
-    free = torch.cuda.mem_get_info(device)[0] if device.type == "cuda" else None
+    free = None
+    if device.type == "cuda":
+        torch.cuda.empty_cache()  # blocks this process cached earlier are free for this run
+        free = torch.cuda.mem_get_info(device)[0]
     model = BlinkNet(cfg.model).to(device)
     has_val = val is not None and len(val) > 0
     val_set = telemetry.make_val_set(val[: cfg.val_size], device) if has_val else None

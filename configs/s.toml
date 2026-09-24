@@ -1,0 +1,14 @@
+# S: d256, L8, H8 on Recipe D. 5,048,448 parameters = 4,450,432 non-GAB + 598,016 GAB-lite.
+# Steps are 6 GPU-h at the 7,003 samples/s measured on the 3070 at micro-batch 1024 (P4, eager):
+# 6 * 3600 * 7003 / 1024 = 147,720. Recompute from `blink bench` rates before the sweep.
+# blink train --config configs/s.toml --run s-6h --data D:\blink\data\v1
+base = "recipe.toml"
+
+[model]
+d_model = 256
+n_layers = 8
+n_heads = 8
+
+[train]
+peak_lr = 1e-3
+steps = 147720

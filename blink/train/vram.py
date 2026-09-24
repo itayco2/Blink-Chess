@@ -31,20 +31,50 @@ def candidates(batch_size: int, floor: int = MIN_MICRO) -> list[int]:
     return out
 
 
+def _probe(micro: int, peak_of, budget: int, predicted: float | None, probes: list) -> bool:
+    peak = peak_of(micro)
+    fits = peak is not None and peak <= budget
+    probes.append(
+        {
+            "micro": micro,
+            "peak_gb": None if peak is None else peak / GB,
+            "predicted_gb": None if predicted is None else predicted / GB,
+            "fits": fits,
+        }
+    )
+    return fits
+
+
 def choose_micro_batch(
     batch_size: int, peak_of: Callable[[int], float | None], budget: int, floor: int = MIN_MICRO
 ) -> tuple[int, list[dict[str, Any]]]:
-    """The largest candidate whose peak (bytes; None = out of memory) fits, and every probe made."""
-    probes = []
-    for micro in candidates(batch_size, floor):
-        peak = peak_of(micro)
-        fits = peak is not None and peak <= budget
-        probes.append({"micro": micro, "peak_gb": None if peak is None else peak / GB, "fits": fits})
-        if fits:
+    """The largest candidate whose measured peak (bytes; None = out of memory) fits, and every probe.
+
+    Only sizes predicted to fit are ever run: the two smallest candidates are measured, a line through
+    them predicts the rest, and the largest predicted fit is measured to confirm it (stepping down on a
+    miss). Running a size that overflows would not fail cleanly on Windows: the driver can spill it into
+    system memory (the sysmem fallback) and crawl instead of raising out-of-memory.
+    """
+    sizes = sorted(candidates(batch_size, floor))
+    probes: list[dict[str, Any]] = []
+    measured = {}
+    for micro in sizes[:2]:
+        if not _probe(micro, peak_of, budget, None, probes):
+            break
+        measured[micro] = probes[-1]["peak_gb"] * GB
+    if not measured:
+        raise MemoryError(
+            f"no micro-batch of at least {floor} fits the {budget / GB:.2f} GB budget: {probes}"
+        )
+    if len(measured) == 1:  # a single candidate, or the second smallest already overflows
+        return sizes[0], probes
+    (m1, p1), (m2, p2) = sorted(measured.items())
+    per_row = (p2 - p1) / (m2 - m1)
+    for micro in reversed(sizes[2:]):
+        predicted = p1 + per_row * (micro - m1)
+        if predicted <= budget and _probe(micro, peak_of, budget, predicted, probes):
             return micro, probes
-    raise MemoryError(
-        f"no micro-batch of at least {floor} fits the {budget / GB:.2f} GB VRAM budget: {probes}"
-    )
+    return m2, probes
 
 
 def probe_peak(model, micro: int, device) -> int | None:

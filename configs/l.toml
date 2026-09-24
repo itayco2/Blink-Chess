@@ -1,0 +1,13 @@
+# L: d640, L12, H20 on Recipe D. 41,412,224 parameters = 40,703,616 non-GAB + 708,608 GAB-lite.
+# Runs in P6 only if its measured rate passes the 1,658 samples/s epoch floor; P4 measured 984
+# samples/s at micro-batch 256 (eager), so it does not. 6 * 3600 * 984 / 1024 = 20,756 steps.
+base = "recipe.toml"
+
+[model]
+d_model = 640
+n_layers = 12
+n_heads = 20
+
+[train]
+peak_lr = 5e-4
+steps = 20756

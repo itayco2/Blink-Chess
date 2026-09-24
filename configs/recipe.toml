@@ -1,0 +1,33 @@
+# Recipe D (plan P4): the training recipe every size config inherits with base = "recipe.toml".
+# Frozen at the end of P5 (configs/recipe.toml is the frozen copy); ablation arms override one key each.
+# The model shape and the learning rate live in the size configs (s, m, m12, l).
+
+[model]
+head_dim = 32
+ffn_mult = 2
+gab = true              # GAB-lite: 598,016 params at S (14.3% of the trunk), 671,744 at M (3.2%)
+
+[train]
+batch_size = 1024       # rows per optimizer step: 717 roots + 307 children
+micro_batch = "auto"    # the largest halving whose measured peak fits free VRAM - 0.8 GB
+child_frac = 0.3        # children add HL-Gauss value loss only
+rebalance = true        # per-sample weights from the pack manifest multiply both losses
+warmup_steps = 2000
+cooldown_frac = 0.2     # warmup-stable-decay, 1 - sqrt cooldown over the last 20%
+weight_decay = 0.1      # matrices only
+beta1 = 0.9
+beta2 = 0.95
+clip_norm = "auto"      # 2 x p95 of the warmup grad norms; clip 1.0 clipped 98% of the skeleton's steps
+ema_max = 0.9999        # decay_t = min(0.9999, (1 + t) / (10 + t))
+alpha = 0.5             # soft policy target: (1 - alpha) onehot + alpha softmax((W_i - W_1) / tau)
+tau = 0.05
+lambda_v = 1.0
+seed = 0
+metrics_every = 50
+eval_every = 2000       # 2,000-root valprobe subset; the full valprobe at the 5/25/30/50/100% checks
+val_size = 2000
+vaa_subset = 2000
+ckpt_every_steps = 1000000   # effectively off: the 30-minute clock decides
+ckpt_every_minutes = 30.0
+keep_last = 3
+heartbeat_s = 10.0

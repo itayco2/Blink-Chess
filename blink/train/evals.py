@@ -12,6 +12,8 @@ from typing import Any
 
 from blink.train import telemetry, vaa
 
+EVAL_ROWS_PER_TRAIN_ROW = 2
+
 
 def _val_metrics(run) -> dict[str, Any]:
     if run.val is None:
@@ -25,8 +27,9 @@ def _vaa_metrics(run, label: str | None) -> dict[str, Any]:
     if run.probe is None:
         return {}
     probe = run.probe if label else run.probe.subset(run.cfg.vaa_subset)
-    raw = vaa.evaluate_vaa(run.model, probe, run.device)
-    ema = vaa.evaluate_vaa(run.ema.module, probe, run.device)
+    chunk = min(vaa.VAA_CHUNK, EVAL_ROWS_PER_TRAIN_ROW * run.micro)  # no-grad rows cost far less VRAM
+    raw = vaa.evaluate_vaa(run.model, probe, run.device, chunk)
+    ema = vaa.evaluate_vaa(run.ema.module, probe, run.device, chunk)
     return {
         "vaa": raw["vaa"],
         "ema_vaa": ema["vaa"],
