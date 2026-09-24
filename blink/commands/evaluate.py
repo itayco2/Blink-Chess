@@ -92,6 +92,10 @@ def _cmd_arm_metrics(args: argparse.Namespace) -> int:
     if not valid_run_name(args.run):
         print(f"blink eval arm-metrics: bad run name {args.run!r}", file=sys.stderr)
         return 2
+    refusal = posthoc.gpu_refusal(args.device)
+    if refusal:
+        print(f"blink eval arm-metrics: {refusal}", file=sys.stderr)
+        return 2
     run_dir = paths.home() / "runs" / args.run
     pack = args.data or posthoc.pack_of(run_dir)
     games = args.games10k or games10k.default_path()

@@ -29,9 +29,18 @@ import psutil
 
 from blink import heartbeat, paths
 from blink.train.atomic import write_text_atomic
-from blink.train.status import valid_run_name
+from blink.train.status import list_runs, valid_run_name
 
 UV_CACHE_DIR = r"D:\uv-cache"
+# Blink commands that hold the GPU or start runs that do (blink ops ps, gpu_users)
+GPU_COMMANDS = (
+    ("train",),
+    ("supervise",),
+    ("sweep", "ablations"),
+    ("sweep", "sizes"),
+    ("bench", "throughput"),
+    ("bench", "play"),
+)
 CMD_UNSAFE = frozenset('"%^&|<>\r\n')
 POWERSHELL = "powershell.exe"
 POWERSHELL_TIMEOUT_S = 60
@@ -261,6 +270,24 @@ def is_blink(cmdline: Sequence[str]) -> bool:
     )
 
 
+def blink_args(cmdline: Sequence[str]) -> list[str]:
+    """What follows the Blink entry point (blink.exe, blink, or -m blink.cli) in a command line."""
+    for i, arg in enumerate(cmdline):
+        if _basename(arg) in ("blink.exe", "blink"):
+            return list(cmdline[i + 1 :])
+        if arg == "-m" and cmdline[i + 1 : i + 2] == ["blink.cli"]:
+            return list(cmdline[i + 2 :])
+    return []
+
+
+def gpu_command(args: Sequence[str]) -> str | None:
+    """The GPU_COMMANDS entry Blink arguments run ("sweep ablations"), or None: a command that does not
+    train, bench or start training runs (a dry run does none of these)."""
+    if "--dry-run" in args:
+        return None
+    return next((" ".join(c) for c in GPU_COMMANDS if tuple(args[: len(c)]) == c), None)
+
+
 def _describe_beat(path: Path | None, now: float) -> str:
     if path is None:
         return "no heartbeat"
@@ -293,6 +320,7 @@ def ps_rows(
                 "run": run,
                 "heartbeat": _describe_beat(beat, now),
                 "command": " ".join(cmdline),
+                "args": blink_args(cmdline),
             }
         )
     return sorted(rows, key=lambda row: row["pid"])
@@ -314,6 +342,28 @@ def blink_processes(home: Path | None = None) -> list[dict[str, Any]]:
         if info["pid"] not in skip and info.get("cmdline"):
             found.append(info)
     return ps_rows(found, home or paths.home())
+
+
+def gpu_users(home: Path | None = None) -> list[str]:
+    """Why the GPU is not free to score on beside training: each run whose trainer beat within 30 s,
+    and each other Blink process that trains or starts training runs. A trainer sizing its micro-batch
+    from the free VRAM or compiling its first step has not beaten yet, and a sweep between two arms is
+    about to start one; scoring beside either leaves that run a smaller micro-batch or a sysmem spill
+    for all its hours, policed at a bench rate measured on a free GPU. This process and its ancestors
+    never count, so a sweep's own scoring child does not refuse itself."""
+    home = Path(home or paths.home())
+    live = [
+        f"run {run.name} (beat {run.heartbeat_age_s:.0f} s ago)"
+        for run in list_runs(home / "runs")
+        if run.live
+    ]
+    jobs = []
+    for row in blink_processes(home):
+        command = gpu_command(row["args"])
+        if command:
+            run = f" --run {row['run']}" if row["run"] else ""
+            jobs.append(f"pid {row['pid']} (blink {command}{run})")
+    return live + jobs
 
 
 def _age(seconds: float) -> str:

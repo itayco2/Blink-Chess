@@ -610,7 +610,8 @@ def test_sweep_rescore_will_not_score_on_the_gpu_beside_a_live_training_run(tmp_
     assert cli.main(["sweep", "rescore", "--plan", plan]) == 2
     err = capsys.readouterr().err
     assert "abl-a15" in err and "--device cpu" in err
-    assert cli.main(["sweep", "rescore", "--plan", plan, "--device", "cpu"]) == 0
+    assert cli.main(["sweep", "rescore", "--plan", plan, "--device", "cpu"]) == 1  # not refused
+    assert "nothing to score" in capsys.readouterr().out  # no arm has finished
 
 
 def _bench(rates: dict[str, float], p99: dict[str, float], budget: float = 5.5) -> dict:

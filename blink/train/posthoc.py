@@ -78,6 +78,23 @@ def fingerprint(path: Path | None) -> dict[str, str] | None:
     return {"path": str(Path(path)), "sha1": hashlib.sha1(Path(path).read_bytes()).hexdigest()}
 
 
+def gpu_refusal(device: str) -> str | None:
+    """Why scoring on `device` must wait, or None. On cuda: while a run trains or is about to
+    (blink.ops.launch.gpu_users), since two more models and their chunks beside a run that sized its
+    micro-batch to the free VRAM could shrink it or run it out of memory."""
+    if device != "cuda":
+        return None
+    from blink.ops import launch
+
+    users = launch.gpu_users()
+    if not users:
+        return None
+    return (
+        f"the GPU is in use ({'; '.join(users)}): scoring beside it could shrink a starting run's "
+        "micro-batch or run it out of memory. Wait for it, or pass --device cpu"
+    )
+
+
 def summary(name: str, record: Mapping[str, Any]) -> str:
     metrics = record.get("metrics", {})
     parts = [f"{name}: step {record['step']:,} ({record['checkpoint']})"]
