@@ -1,4 +1,4 @@
-"""`blink export onnx | vocab | golden` end to end, on the packaged stand-in."""
+"""`blink export onnx | vocab | golden | rules` end to end, on the packaged stand-in."""
 
 import hashlib
 import json
@@ -19,6 +19,15 @@ def test_export_vocab_writes_the_file_the_page_reads(tmp_path, capsys):
     assert cli.main(["export", "vocab", "--out", str(out)]) == 0
     assert out.read_text(encoding="utf-8") == vocab.render(vocab.build())
     assert "ok:" in capsys.readouterr().out
+
+
+def test_export_rules_writes_the_cases_the_node_rules_test_reads(tmp_path, capsys):
+    from blink.export import rulecases
+
+    out = tmp_path / "rules.json"
+    assert cli.main(["export", "rules", "--out", str(out)]) == 0
+    assert out.read_text(encoding="utf-8") == rulecases.render(rulecases.build())
+    assert f"{len(rulecases.RULE_CASES)} cases" in capsys.readouterr().out
 
 
 def test_model_selectors_become_directory_names():

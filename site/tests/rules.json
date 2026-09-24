@@ -1,0 +1,22 @@
+{
+  "about": "NSC-1 R2 (mate now) and R3 (rule draws) for every child, from python-chess, written by `blink export rules`. site/tests/rules.test.mjs checks site/rules.js against it.",
+  "version": 1,
+  "draw_delta": 0.1,
+  "halfmove_draw": 100,
+  "cases": [
+    {"name":"nothing applies","fen":"r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4","moves":[],"turn":"w","legal":33,"mates":[],"draws":[]},
+    {"name":"mate now on the back rank","fen":"6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1","moves":[],"turn":"w","legal":20,"mates":[[21,"a1a8"]],"draws":[]},
+    {"name":"mate now for black","fen":"r5k1/5ppp/8/8/8/8/5PPP/6K1 b - - 0 1","moves":[],"turn":"b","legal":20,"mates":[[21,"a8a1"]],"draws":[]},
+    {"name":"two mates by promotion","fen":"7k/5P2/6K1/8/8/8/8/8 w - - 0 1","moves":[],"turn":"w","legal":9,"mates":[[1852,"f7f8q"],[1853,"f7f8r"]],"draws":[[1346,"g6h6","stalemate"],[1854,"f7f8b","insufficient material"],[1855,"f7f8n","insufficient material"]]},
+    {"name":"scholar's mate from the start","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","moves":["e2e4","e7e5","f1c4","b8c6","d1h5","g8f6"],"turn":"w","legal":43,"mates":[[1135,"h5f7"]],"draws":[]},
+    {"name":"a queen move that stalemates","fen":"7k/8/8/6Q1/8/8/8/K7 w - - 0 1","moves":[],"turn":"w","legal":26,"mates":[],"draws":[[1107,"g5g6","stalemate"]]},
+    {"name":"king takes the last rook","fen":"8/8/8/4k3/8/8/3r4/4K3 w - - 0 1","moves":[],"turn":"w","legal":2,"mates":[],"draws":[[105,"e1d2","insufficient material"]]},
+    {"name":"bishops left on one colour","fen":"8/8/8/4k3/8/2b5/3N4/4K1B1 b - - 0 1","moves":[],"turn":"b","legal":12,"mates":[],"draws":[[1220,"c3d2","insufficient material"]]},
+    {"name":"knight against knight is not a draw","fen":"8/8/8/4k3/8/8/3r4/2n1K1N1 w - - 0 1","moves":[],"turn":"w","legal":5,"mates":[],"draws":[]},
+    {"name":"the hundredth halfmove, except a mate","fen":"6k1/5ppp/8/8/8/8/8/R5K1 w - - 99 80","moves":[],"turn":"w","legal":17,"mates":[[21,"a1a8"]],"draws":[[0,"a1b1","fifty-move rule"],[1,"a1c1","fifty-move rule"],[2,"a1d1","fifty-move rule"],[3,"a1e1","fifty-move rule"],[4,"a1f1","fifty-move rule"],[7,"a1a2","fifty-move rule"],[10,"a1a3","fifty-move rule"],[13,"a1a4","fifty-move rule"],[15,"a1a5","fifty-move rule"],[17,"a1a6","fifty-move rule"],[19,"a1a7","fifty-move rule"],[152,"g1f1","fifty-move rule"],[153,"g1h1","fifty-move rule"],[155,"g1f2","fifty-move rule"],[156,"g1g2","fifty-move rule"],[157,"g1h2","fifty-move rule"]]},
+    {"name":"black repeats the start a third time","fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","moves":["g1f3","g8f6","f3g1","f6g8","g1f3","g8f6","f3g1"],"turn":"b","legal":22,"mates":[],"draws":[[568,"f6g8","threefold repetition"]]},
+    {"name":"an unusable en-passant square is not part of the key","fen":"4k3/8/8/8/8/8/4P3/4K3 w - - 0 1","moves":["e2e4","e8e7","e1d1","e7e8","d1e1","e8e7","e1d1","e7e8"],"turn":"w","legal":6,"mates":[],"draws":[[75,"d1e1","threefold repetition"]]},
+    {"name":"a capturable en-passant square is part of the key","fen":"4k3/8/8/8/5p2/8/4P3/4K3 w - - 0 1","moves":["e2e4","e8e7","e1d1","e7e8","d1e1","e8e7","e1d1","e7e8"],"turn":"w","legal":6,"mates":[],"draws":[]},
+    {"name":"castling rights are part of the key","fen":"r3k3/8/8/8/8/8/8/4K2R w Kq - 0 1","moves":["h1h2","a8a7","h2h1","a7a8","h1h2","a8a7","h2h1"],"turn":"b","legal":19,"mates":[],"draws":[]}
+  ]
+}

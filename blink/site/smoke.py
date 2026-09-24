@@ -4,6 +4,8 @@ Playwright launches channel "msedge" (the system Edge), so no browser is ever do
 plays random legal user moves by clicking squares, waits for each of Blink's replies, replays every
 game in python-chess to prove each reply legal, counts the arrows on the board, and records every
 console error, page error and failed request. `failures()` turns the report into a verdict.
+A reply shows one arrow per move of the network's top 3 (fewer when fewer moves are legal), and none
+after a mate in one, which rule R2 plays without a network call.
 """
 
 import random
@@ -38,6 +40,8 @@ class SmokeReport:
     games: int
     load_seconds: float
     problems: tuple[str, ...] = ()
+    expected_arrows: int = ARROWS_EXPECTED
+    last_rule: str | None = None
 
     def to_dict(self) -> dict:
         timings = list(self.timings_ms)
@@ -63,6 +67,16 @@ def replay(start_fen: str, history: list[str], user_color: str) -> tuple[int, li
     return replies, []
 
 
+def expected_arrows(start_fen: str, history: list[str], last_rule: str | None) -> int:
+    """Arrows after the last ply (Blink's reply): min(3, its legal moves), or 0 when R2 skipped the look."""
+    if not history or last_rule == "R2":
+        return 0
+    board = chess.Board(start_fen)
+    for uci in history[:-1]:
+        board.push_uci(uci)
+    return min(ARROWS_EXPECTED, board.legal_moves.count())
+
+
 def failures(report: SmokeReport, moves: int) -> list[str]:
     out = list(report.problems)
     if not report.loaded:
@@ -70,8 +84,8 @@ def failures(report: SmokeReport, moves: int) -> list[str]:
     if report.legal_replies < moves:
         out.append(f"{report.legal_replies} legal replies, expected at least {moves}")
     out.extend(f"illegal move: {text}" for text in report.illegal)
-    if report.arrows != ARROWS_EXPECTED:
-        out.append(f"{report.arrows} arrows after the last reply, expected {ARROWS_EXPECTED}")
+    if report.arrows != report.expected_arrows:
+        out.append(f"{report.arrows} arrows after the last reply, expected {report.expected_arrows}")
     if report.console_errors:
         count = len(report.console_errors)
         out.append(f"{count} console error{'s' if count != 1 else ''}: {report.console_errors[0]}")
@@ -110,7 +124,7 @@ def _play_one(page, rng: random.Random, progress: _Progress, timeout_ms: float) 
     progress.user_moves += 1
     page.wait_for_function(WAIT_REPLY, arg=replies + 1, timeout=timeout_ms)
     state = page.evaluate("window.__blink.state()")
-    if state["replies"] > replies:
+    if state["replies"] > replies and state["lastRule"] != "R2":
         progress.min_arrows = min(progress.min_arrows, state["arrows"])
 
 
@@ -174,4 +188,6 @@ def run(url: str, moves: int = 10, seed: int = 0, timeout_s: float = 60.0) -> Sm
         games=len(progress.games),
         load_seconds=round(load_seconds, 2),
         problems=tuple(problems),
+        expected_arrows=expected_arrows(state["startFen"], state["history"], state["lastRule"]),
+        last_rule=state["lastRule"],
     )

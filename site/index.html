@@ -33,7 +33,8 @@
           <h2>Blink's last look</h2>
           <p class="timing"><span id="ms-last">-</span> ms per move <span class="muted" id="ms-median"></span></p>
           <ol id="top-moves" class="top-moves"></ol>
-          <p class="muted small" id="mode-label">One look (policy): the move with the highest probability among the legal ones. onnxruntime-web, WASM, 1 thread.</p>
+          <p class="small" id="rule-note" role="status" aria-live="polite"></p>
+          <p class="muted small" id="mode-label">One look (policy): the legal move with the highest probability, from one forward pass. Like the bot, Blink plays a mate in one without looking, and avoids draws by rule when clearly winning but takes them when clearly losing. onnxruntime-web, WASM, 1 thread.</p>
         </section>
 
         <section class="card controls">

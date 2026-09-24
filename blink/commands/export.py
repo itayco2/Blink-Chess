@@ -1,4 +1,4 @@
-"""`blink export onnx | vocab | golden`: the files the browser page runs on and is checked against."""
+"""`blink export onnx | vocab | golden | rules`: the files the browser page runs on and is checked against."""
 
 import argparse
 import hashlib
@@ -70,6 +70,14 @@ def _cmd_vocab(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rules(args: argparse.Namespace) -> int:
+    from blink.export import rulecases
+
+    out = rulecases.write(Path(args.out))
+    print(f"ok: {out} ({len(rulecases.RULE_CASES)} cases, {out.stat().st_size:,} B)")
+    return 0
+
+
 def _golden_model_info(selector: str, onnx: Path | None) -> dict:
     from blink.export import models
 
@@ -95,7 +103,7 @@ def _cmd_golden(args: argparse.Namespace) -> int:
 
 
 def register(sub: argparse._SubParsersAction) -> None:
-    export = sub.add_parser("export", help="ONNX export, the move vocabulary and the golden positions")
+    export = sub.add_parser("export", help="ONNX export, move vocabulary, golden positions, rule cases")
     tasks = export.add_subparsers(dest="export_command", required=True)
 
     onnx = tasks.add_parser("onnx", help="write one self-contained opset-20 ONNX file and check it")
@@ -112,3 +120,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     gold.add_argument("--onnx", help="the ONNX file the Node parity test runs (its sha256 is recorded)")
     gold.add_argument("--out", default=str(SITE_DIR / "tests" / "golden.json"))
     gold.set_defaults(func=_cmd_golden)
+
+    rules = tasks.add_parser("rules", help="write site/tests/rules.json (R2 and R3 per child)")
+    rules.add_argument("--out", default=str(SITE_DIR / "tests" / "rules.json"))
+    rules.set_defaults(func=_cmd_rules)

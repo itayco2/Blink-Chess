@@ -1,9 +1,12 @@
 // Blink in the browser: one look (policy mode) per move. The network runs in worker.js
 // (onnxruntime-web, WASM, one thread); this module owns the game, the board and what is drawn.
-// Blink's move is the legal move with the highest policy probability: one forward pass, no search.
+// Blink's move is the legal move with the highest policy probability, one forward pass and no search,
+// with the bot's rule checks from rules.js: a mate in one is played without looking (R2), and draws
+// by rule are avoided when clearly winning and taken when clearly losing (R3).
 
 import { Chessboard, COLOR, FEN, INPUT_EVENT_TYPE } from "./vendor/cm-chessboard/Chessboard.js";
 import { Chess, validateFen } from "./vendor/chess.js/chess.js";
+import * as rules from "./rules.js";
 import * as tok from "./tokenizer.js";
 
 const MODEL_URL = "models/model.onnx";
@@ -68,20 +71,8 @@ function createEngine() {
 
 // --- One look ------------------------------------------------------------------------------------------
 
-async function lookOnce(game) {
-  const codes = tok.encodeBoard(app.vocab, game);
-  const legal = tok.legalMoves(app.vocab, game);
-  const started = performance.now();
-  const out = await app.engine.evaluate(codes);
-  const ms = performance.now() - started;
-  return {
-    turn: game.turn(),
-    top: tok.policyTopK(legal, out.policy, ARROWS),
-    win: tok.winProbability(out.value),
-    legalCount: legal.length,
-    ms,
-    runMs: out.runMs,
-  };
+function lookOnce(game) {
+  return rules.decide(app.vocab, game, Chess, app.engine.evaluate, ARROWS);
 }
 
 async function blinkMoves() {
@@ -100,9 +91,9 @@ async function blinkMoves() {
     if (generation !== app.generation) {
       return; // a new game or a pasted FEN replaced this position while the network ran
     }
-    const best = look.top[0];
-    app.game.move({ from: best.from, to: best.to, promotion: best.promotion });
-    app.timings = [...app.timings, look.ms];
+    const { from, to, promotion } = look.move;
+    app.game.move({ from, to, promotion });
+    app.timings = look.calls ? [...app.timings, look.ms] : app.timings; // R2 made no network call
     app.lastLook = look;
     await app.board.setPosition(app.game.fen(), true);
     if (generation !== app.generation) {
@@ -193,6 +184,7 @@ async function startGame(fen) {
   renderWin(null);
   renderMoves();
   $("top-moves").replaceChildren();
+  $("rule-note").textContent = "";
   await app.board.setPosition(app.game.fen(), false);
   await blinkMoves();
 }
@@ -271,17 +263,34 @@ function median(values) {
   return sorted[Math.floor((sorted.length - 1) / 2)];
 }
 
+function ruleNote(look) {
+  const percent = `${(look.win * 100).toFixed(0)}%`;
+  if (look.rule === "R2") {
+    return `Mate in one: ${look.move.san} is played without looking (rule R2, no network call).`;
+  }
+  if (look.rule === "R3" && look.draw) {
+    return `Losing (${percent}), so Blink took a draw by ${look.draw} with ${look.move.san} (rule R3).`;
+  }
+  if (look.rule === "R3") {
+    const moves = look.avoided === 1 ? "move" : "moves";
+    return `Winning (${percent}), so Blink passed over ${look.avoided} ${moves} that draw by rule and played ${look.move.san} (rule R3).`;
+  }
+  return "";
+}
+
 function renderLook(look) {
   drawArrows(look.top);
   renderWin(look.turn === "w" ? look.win : 1 - look.win);
-  $("ms-last").textContent = look.ms.toFixed(0);
-  $("ms-median").textContent = `(median ${median(app.timings).toFixed(0)} ms over ${app.timings.length})`;
+  $("ms-last").textContent = look.calls ? look.ms.toFixed(0) : "0";
+  const timed = app.timings.length ? `median ${median(app.timings).toFixed(0)} ms over ${app.timings.length}` : "";
+  $("ms-median").textContent = timed ? `(${timed})` : "";
   const items = look.top.map((move) => {
     const item = document.createElement("li");
     item.textContent = `${move.san}  ${(move.prob * 100).toFixed(1)}%`;
     return item;
   });
   $("top-moves").replaceChildren(...items);
+  $("rule-note").textContent = ruleNote(look);
 }
 
 function renderMoves() {
@@ -363,8 +372,8 @@ async function loadModelCard() {
 async function runSelfTest() {
   const game = new Chess();
   const look = await lookOnce(game);
-  const legal = game.moves({ verbose: true }).some((move) => move.lan === look.top[0].uci);
-  window.__blinkSelfTest = Object.freeze({ ok: legal && Number.isFinite(look.win), move: look.top[0].uci, ms: look.ms });
+  const legal = game.moves({ verbose: true }).some((move) => move.lan === look.move.uci);
+  window.__blinkSelfTest = Object.freeze({ ok: legal && look.calls === 1 && Number.isFinite(look.win), move: look.move.uci, ms: look.ms });
 }
 
 function exposeHooks() {
@@ -379,6 +388,7 @@ function exposeHooks() {
       history: app.game.history({ verbose: true }).map((move) => move.lan),
       replies: app.replies,
       arrows: document.querySelectorAll("#arrows .blink-arrow").length,
+      lastRule: app.lastLook ? app.lastLook.rule : null,
       timings: [...app.timings],
       gameOver: app.game.isGameOver(),
     }),

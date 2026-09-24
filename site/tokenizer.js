@@ -161,7 +161,8 @@ export function decodeMove(vocab, turn, index) {
   return { from, to, promotion, uci: from + to + (promotion || "") };
 }
 
-// Every legal move with its vocabulary index, sorted by index (castling is the king's two-square move).
+// Every legal move with its vocabulary index and the child's FEN, sorted by index (castling is the
+// king's two-square move).
 export function legalMoves(vocab, chess) {
   const turn = chess.turn();
   return chess
@@ -173,6 +174,7 @@ export function legalMoves(vocab, chess) {
       from: move.from,
       to: move.to,
       promotion: move.promotion,
+      after: move.after,
     }))
     .sort((a, b) => a.index - b.index);
 }
