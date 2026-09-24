@@ -1,6 +1,7 @@
-"""The Lichess bot config must switch off every lookup lichess-bot can make for the engine (N3)."""
+"""The Lichess bot configs: every lookup off (N3), the plan's rated and casual settings, no token (P9)."""
 
 import copy
+import hashlib
 import importlib
 import json
 import tomllib
@@ -8,15 +9,19 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from blink import uci
+from blink import cli, uci
+from blink.lichess import config as botconfig
 from blink.lichess import config_check
+from blink.report import results_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "deploy" / "lichess" / "config.template.yml"
+CASUAL_TEMPLATE = ROOT / "deploy" / "lichess" / "config.casual.yml"
+SHA = hashlib.sha256(b"blink weights").hexdigest()
 
 
-def load_template() -> dict:
-    return json.loads(TEMPLATE.read_text(encoding="utf-8"))
+def load_template(path: Path = TEMPLATE) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def console_scripts() -> dict[str, str]:
@@ -27,6 +32,29 @@ def console_scripts() -> dict[str, str]:
 def lichess_bot_flags(engine_options: dict) -> list[str]:
     """lichess-bot appends each engine_options entry to the engine command as --key=value."""
     return [f"--{key}={value}" for key, value in engine_options.items()]
+
+
+def fake_weights(tmp_path: Path) -> Path:
+    path = tmp_path / "blink.pt"
+    path.write_bytes(b"blink weights")
+    return path
+
+
+def generate(tmp_path: Path, **overrides) -> dict[str, dict]:
+    weights = fake_weights(tmp_path)
+    spec = botconfig.BotSpec(
+        model=overrides.pop("model", "ship"),
+        mode=overrides.pop("mode", "value"),
+        sha=overrides.pop("sha", None),
+        casual_model=overrides.pop("casual_model", "run:long:ema"),
+    )
+    written = botconfig.generate(spec, tmp_path / "bot", resolve=lambda selector: weights, **overrides)
+    return {kind: json.loads(path.read_text(encoding="utf-8")) for kind, path in written.items()}
+
+
+def all_configs(tmp_path: Path) -> list[dict]:
+    generated = generate(tmp_path)
+    return [load_template(), load_template(CASUAL_TEMPLATE), generated["rated"], generated["casual"]]
 
 
 def test_the_bot_engine_is_a_console_script_the_project_installs():
@@ -40,26 +68,26 @@ def test_the_bot_engine_is_a_console_script_the_project_installs():
     assert getattr(importlib.import_module(module_name), function_name) is uci.main
 
 
-def test_the_bot_engine_options_are_flags_blink_uci_accepts():
-    engine = load_template()["engine"]
-    args = uci.build_parser().parse_args(lichess_bot_flags(engine["engine_options"]))
-    assert (args.model, args.mode, args.device) == ("ship", "policy", "cuda")
-    assert args.log == Path("D:/blink/lichess/decisions.jsonl")
-    assert args.random is False
+def test_the_bot_engine_options_are_flags_blink_uci_accepts(tmp_path):
+    for config in all_configs(tmp_path):
+        engine = config["engine"]
+        args = uci.build_parser().parse_args(lichess_bot_flags(engine["engine_options"]))
+        assert args.mode in ("policy", "value") and args.device in ("cpu", "cuda")
+        assert args.log is not None and args.random is False
 
 
-def test_lichess_config_disables_every_lookup():
-    config = load_template()
-    assert config_check.lookup_problems(config) == []
-    engine = config["engine"]
-    assert engine["polyglot"]["enabled"] is False
-    assert all(engine["online_moves"][s]["enabled"] is False for s in config_check.ONLINE_SOURCES)
-    assert all(engine["lichess_bot_tbs"][t]["enabled"] is False for t in config_check.LOCAL_TABLEBASES)
-    assert engine["draw_or_resign"]["resign_for_egtb_minus_two"] is False
-    assert engine["draw_or_resign"]["offer_draw_for_egtb_zero"] is False
-    for section in ("engine", "correspondence"):
-        assert (config[section]["ponder"], config[section]["uci_ponder"]) == (False, False)
-    assert not any("syzygy" in option.lower() for option in engine["uci_options"])
+def test_lichess_config_disables_every_lookup(tmp_path):
+    for config in all_configs(tmp_path):
+        assert config_check.lookup_problems(config) == []
+        engine = config["engine"]
+        assert engine["polyglot"]["enabled"] is False
+        assert all(engine["online_moves"][s]["enabled"] is False for s in config_check.ONLINE_SOURCES)
+        assert all(engine["lichess_bot_tbs"][t]["enabled"] is False for t in config_check.LOCAL_TABLEBASES)
+        assert engine["draw_or_resign"]["resign_for_egtb_minus_two"] is False
+        assert engine["draw_or_resign"]["offer_draw_for_egtb_zero"] is False
+        for section in ("engine", "correspondence"):
+            assert (config[section]["ponder"], config[section]["uci_ponder"]) == (False, False)
+        assert not any("syzygy" in option.lower() for option in engine.get("uci_options", {}))
 
 
 @pytest.mark.parametrize(
@@ -97,6 +125,195 @@ def test_a_missing_switch_counts_as_on_because_lichess_bot_defaults_some_to_true
 
 
 def test_the_template_never_holds_a_token():
-    config = load_template()
-    assert "token" not in config
-    assert "lip_" not in TEMPLATE.read_text(encoding="utf-8")
+    for path in (TEMPLATE, CASUAL_TEMPLATE):
+        assert "token" not in load_template(path)
+        assert "lip_" not in path.read_text(encoding="utf-8")
+
+
+def test_lichess_config_sets_abort_time_30_and_puts_concurrency_under_challenge(tmp_path):
+    rated = generate(tmp_path)["rated"]
+    assert rated["abort_time"] == 30  # lichess-bot's code default for a missing key is 20
+    assert "concurrency" not in rated and "games_reserved_for_humans" not in rated
+    challenge = rated["challenge"]
+    assert (challenge["concurrency"], challenge["games_reserved_for_humans"]) == (2, 1)
+    assert (challenge["preference"], challenge["bullet_requires_increment"]) == ("human", True)
+    assert challenge["max_simultaneous_games_per_user"] == 1
+    broken = copy.deepcopy(rated)
+    broken["concurrency"] = broken["challenge"].pop("concurrency")
+    found = botconfig.problems(broken, "rated", frozenset())
+    assert any("challenge.concurrency" in p for p in found)
+    assert any("top level" in p for p in found)
+
+
+def test_the_rated_config_matchmakes_rated_blitz_only_with_the_plan_settings(tmp_path):
+    rated = generate(tmp_path)["rated"]
+    match = rated["matchmaking"]
+    assert match["allow_matchmaking"] is True and match["challenge_mode"] == "rated"
+    assert (match["challenge_initial_time"], match["challenge_increment"]) == ([180, 300], [0, 2, 3])
+    assert (match["challenge_timeout"], match["opponent_rating_difference"]) == (2, 300)
+    assert match["challenge_filter"] == "fine"
+    assert (rated["challenge"]["time_controls"], rated["challenge"]["modes"]) == (["blitz"], ["rated"])
+    assert rated["engine"]["engine_options"]["device"] == "cuda"
+    draw_or_resign = rated["engine"]["draw_or_resign"]
+    assert (draw_or_resign["resign_enabled"], draw_or_resign["offer_draw_enabled"]) == (False, False)
+    assert rated["pgn_directory"] == "D:/blink/lichess/pgn"
+    # every base and increment pair estimates (base + 40 x increment) to between 180 and 420 s: blitz
+    assert all(
+        180 <= b + 40 * i <= 479
+        for b in match["challenge_initial_time"]
+        for i in match["challenge_increment"]
+    )
+
+
+def test_the_casual_config_allows_only_itayco2_with_matchmaking_off_on_cpu(tmp_path):
+    casual = generate(tmp_path)["casual"]
+    assert casual["challenge"]["allow_list"] == ["itayco2"]
+    assert casual["challenge"]["modes"] == ["casual"]
+    assert casual["matchmaking"]["allow_matchmaking"] is False
+    options = casual["engine"]["engine_options"]
+    assert (options["model"], options["device"]) == ("run:long:ema", "cpu")
+    assert casual["abort_time"] == 30
+    assert botconfig.problems(casual, "casual", frozenset()) == []
+
+
+def test_config_passes_only_declared_uci_options(tmp_path):
+    declared = botconfig.declared_uci_options()
+    for config in all_configs(tmp_path):
+        assert set(config["engine"].get("uci_options", {})) <= declared
+    with_defaults = copy.deepcopy(generate(tmp_path)["rated"])
+    with_defaults["engine"]["uci_options"] = {"Move Overhead": 100, "Threads": 4, "Hash": 512}
+    found = botconfig.problems(with_defaults, "rated", declared)
+    assert {p for p in found if "uci_options" in p} == {
+        "engine.uci_options.Move Overhead is not an option blink-uci declares",
+        "engine.uci_options.Threads is not an option blink-uci declares",
+        "engine.uci_options.Hash is not an option blink-uci declares",
+    }
+
+
+def test_declared_uci_options_are_read_from_a_uci_handshake():
+    lines = ["id name X", "option name Move Overhead type spin default 10 min 0 max 5000", "uciok"]
+    assert botconfig.parse_uci_options(lines) == frozenset({"Move Overhead"})
+    assert botconfig.declared_uci_options() == frozenset()  # blink-uci declares no options today
+
+
+def test_bot_config_points_at_the_shipped_sha_and_mode(tmp_path):
+    configs = generate(tmp_path, model=str(tmp_path / "blink.pt"), mode="value")
+    rated, casual = configs["rated"], configs["casual"]
+    shipped = results_schema.Shipped(agent="Blink-M", mode="value", sha=SHA)
+    assert rated["blink"]["sha"] == shipped.sha
+    assert rated["engine"]["engine_options"]["mode"] == shipped.mode
+    assert rated["engine"]["engine_options"]["model"] == rated["blink"]["model"] == str(tmp_path / "blink.pt")
+    assert botconfig.problems(rated, "rated", frozenset(), shipped=shipped, weights_sha=SHA) == []
+    other_mode = results_schema.Shipped(agent="Blink-M", mode="policy", sha=SHA)
+    assert any("mode" in p for p in botconfig.problems(rated, "rated", frozenset(), shipped=other_mode))
+    other_sha = results_schema.Shipped(agent="Blink-M", mode="value", sha="0" * 64)
+    assert any("sha" in p for p in botconfig.problems(rated, "rated", frozenset(), shipped=other_sha))
+    swapped_weights = botconfig.problems(rated, "rated", frozenset(), weights_sha="f" * 64)
+    assert any("sha256" in p for p in swapped_weights)
+    # the G5 casual smoke runs the preview model on CPU during P7, so it is exempt
+    assert casual["engine"]["engine_options"]["model"] == "run:long:ema"
+    assert botconfig.problems(casual, "casual", frozenset(), shipped=other_sha) == []
+
+
+def test_generate_refuses_a_sha_that_does_not_match_the_weights_file(tmp_path):
+    with pytest.raises(botconfig.ConfigError, match="does not match"):
+        generate(tmp_path, sha="0" * 12)
+    assert generate(tmp_path, sha=SHA[:12])["rated"]["blink"]["sha"] == SHA
+
+
+def test_generate_needs_a_sha_when_the_weights_file_cannot_be_found(tmp_path):
+    spec = botconfig.BotSpec(model="dm:9M", mode="value")
+    with pytest.raises(botconfig.ConfigError, match="--sha"):
+        botconfig.generate(spec, tmp_path, resolve=lambda selector: None)
+    written = botconfig.generate(spec, tmp_path, kinds=("casual",), resolve=lambda selector: None)
+    assert set(written) == {"casual"} and not (tmp_path / "config.yml").exists()
+
+
+@pytest.mark.parametrize(
+    ("kind", "path", "value", "problem"),
+    [
+        ("rated", ("abort_time",), 20, "abort_time"),
+        ("rated", ("challenge", "games_reserved_for_humans"), 0, "challenge.games_reserved_for_humans"),
+        ("rated", ("matchmaking", "challenge_mode"), "random", "matchmaking.challenge_mode"),
+        ("rated", ("challenge", "time_controls"), ["bullet", "blitz"], "challenge.time_controls"),
+        ("rated", ("engine", "engine_options", "device"), "cpu", "engine.engine_options.device"),
+        ("casual", ("challenge", "allow_list"), [], "challenge.allow_list"),
+        ("casual", ("matchmaking", "allow_matchmaking"), True, "matchmaking.allow_matchmaking"),
+        ("casual", ("challenge", "concurrency"), True, "challenge.concurrency"),  # true is not 1
+    ],
+)
+def test_check_config_names_each_setting_a_config_breaks(tmp_path, kind, path, value, problem):
+    config = copy.deepcopy(generate(tmp_path)[kind])
+    node = config
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    assert any(p.startswith(problem) for p in botconfig.problems(config, kind, frozenset()))
+
+
+def test_engine_options_that_blink_uci_would_reject_are_named(tmp_path):
+    config = copy.deepcopy(generate(tmp_path)["rated"])
+    config["engine"]["engine_options"]["random"] = None
+    config["engine"]["engine_options"]["mode"] = "both"
+    found = botconfig.problems(config, "rated", frozenset())
+    assert any("random" in p for p in found) and any("blink-uci" in p for p in found)
+
+
+def test_a_token_anywhere_in_a_config_is_refused(tmp_path):
+    config = copy.deepcopy(generate(tmp_path)["rated"])
+    config["token"] = "lip_" + "A" * 20
+    config["greeting"] = {"hello": "lio_" + "B" * 32}
+    found = botconfig.problems(config, "rated", frozenset())
+    assert any(p.startswith("token") for p in found)
+    assert sum("token" in p for p in found) >= 2
+
+
+def test_generated_configs_are_ascii_json_that_yaml_reads_the_same(tmp_path):
+    weights = fake_weights(tmp_path)
+    spec = botconfig.BotSpec(model="ship", mode="policy")
+    written = botconfig.generate(spec, tmp_path / "bot", resolve=lambda selector: weights)
+    for path in written.values():
+        text = path.read_text(encoding="utf-8")
+        assert text.isascii() and "\t" not in text and "token" not in json.loads(text)
+        assert "lip_" not in text and "lio_" not in text
+        assert json.loads(text) == botconfig.load_config(path)
+
+
+def test_the_cli_generates_both_configs_and_check_config_passes_them(tmp_path, capsys):
+    weights = fake_weights(tmp_path)
+    out = tmp_path / "bot"
+    argv = ["lichess", "config", "--model", str(weights), "--mode", "policy", "--sha", SHA]
+    assert cli.main([*argv, "--casual-model", "run:preview:ema", "--out-dir", str(out)]) == 0
+    assert {p.name for p in out.iterdir()} == {"config.yml", "config.casual.yml"}
+    for name in ("config.yml", "config.casual.yml"):
+        assert cli.main(["lichess", "check-config", "--config", str(out / name), "--results", "none"]) == 0
+    assert "0 problems" in capsys.readouterr().out
+
+
+def test_check_config_exits_1_and_lists_every_problem(tmp_path, capsys):
+    config = copy.deepcopy(generate(tmp_path)["rated"])
+    config["abort_time"] = 20
+    config["engine"]["polyglot"]["enabled"] = True
+    bad = tmp_path / "bad.yml"
+    bad.write_text(json.dumps(config), encoding="utf-8")
+    assert cli.main(["lichess", "check-config", "--config", str(bad), "--results", "none"]) == 1
+    printed = capsys.readouterr().out
+    assert "abort_time" in printed and "engine.polyglot.enabled" in printed
+
+
+def test_check_config_compares_against_the_shipped_model_in_results_json(tmp_path, capsys):
+    weights = fake_weights(tmp_path)
+    out = tmp_path / "bot"
+    botconfig.generate(botconfig.BotSpec(str(weights), "policy", SHA), out, resolve=lambda s: weights)
+    results = results_schema.Results(
+        strength=(),
+        diagnostics=(),
+        shipped=results_schema.Shipped(agent="Blink-M", mode="value", sha=SHA),
+        eval_md_sha="e" * 12,
+        generated_at="2026-10-08T12:00:00+03:00",
+    )
+    results_path = tmp_path / "results.json"
+    results_path.write_text(results_schema.to_json(results), encoding="utf-8")
+    argv = ["lichess", "check-config", "--config", str(out / "config.yml"), "--results", str(results_path)]
+    assert cli.main(argv) == 1
+    assert "shipped mode" in capsys.readouterr().out

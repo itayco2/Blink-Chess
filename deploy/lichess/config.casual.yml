@@ -7,7 +7,7 @@
     "protocol": "uci",
     "ponder": false,
     "uci_ponder": false,
-    "engine_options": {"model": "ship", "mode": "policy", "device": "cuda", "log": "D:/blink/lichess/decisions.jsonl"},
+    "engine_options": {"model": "ship", "mode": "policy", "device": "cpu", "log": "D:/blink/lichess/casual-decisions.jsonl"},
     "polyglot": {"enabled": false},
     "draw_or_resign": {
       "resign_enabled": false,
@@ -30,33 +30,22 @@
   },
   "abort_time": 30,
   "quit_after_all_games_finish": true,
-  "pgn_directory": "D:/blink/lichess/pgn",
+  "pgn_directory": "D:/blink/lichess/pgn-casual",
   "pgn_file_grouping": "game",
   "correspondence": {"ponder": false, "uci_ponder": false},
   "challenge": {
-    "concurrency": 2,
-    "games_reserved_for_humans": 1,
-    "sort_by": "best",
-    "preference": "human",
-    "accept_bot": true,
+    "concurrency": 1,
+    "games_reserved_for_humans": 0,
+    "sort_by": "first",
+    "preference": "none",
+    "accept_bot": false,
     "only_bot": false,
     "variants": ["standard"],
-    "time_controls": ["blitz"],
-    "modes": ["rated"],
-    "allow_list": [],
+    "time_controls": ["bullet", "blitz", "rapid"],
+    "modes": ["casual"],
+    "allow_list": ["itayco2"],
     "bullet_requires_increment": true,
     "max_simultaneous_games_per_user": 1
   },
-  "matchmaking": {
-    "allow_matchmaking": true,
-    "allow_during_games": false,
-    "challenge_variant": "standard",
-    "challenge_timeout": 2,
-    "challenge_initial_time": [180, 300],
-    "challenge_increment": [0, 2, 3],
-    "opponent_rating_difference": 300,
-    "rating_preference": "none",
-    "challenge_mode": "rated",
-    "challenge_filter": "fine"
-  }
+  "matchmaking": {"allow_matchmaking": false}
 }

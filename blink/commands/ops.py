@@ -5,6 +5,8 @@ blink ops ps                                    Blink processes and launched job
 blink supervise --run NAME -- train ...         the trainer as a child, every P7 stop rule enforced
 blink bench throughput|loader|play              measured rates into bench.json (plan P4)
 blink sweep ablations|sizes|choose              plan P5 and P6
+blink lichess config|check-config               the bot's config.yml and config.casual.yml (plan P9)
+blink lichess snapshot|check|pause|resume-note  public-API numbers, the stop rule, the bot pause
 
 Torch is imported only inside the commands that need it, so `blink --help` works torch-free.
 """
@@ -428,8 +430,172 @@ def _register_sweep(sub: argparse._SubParsersAction) -> None:
     choose.set_defaults(func=cmd_sweep_choose)
 
 
+# ---------------------------------------------------------------- lichess (plan P9)
+
+
+def _refuse(command: str, exc: Exception) -> int:
+    print(f"blink lichess {command}: {exc}", file=sys.stderr)
+    return EXIT_REFUSED
+
+
+def cmd_lichess_config(args: argparse.Namespace) -> int:
+    from blink.lichess import config
+
+    spec = config.BotSpec(args.model, args.mode, args.sha, args.casual_model)
+    kinds = (args.only,) if args.only else config.KINDS
+    try:
+        written = config.generate(spec, Path(args.out_dir), kinds=kinds, templates=Path(args.templates))
+    except (config.ConfigError, FileNotFoundError) as exc:
+        return _refuse("config", exc)
+    for kind, path in written.items():
+        stamp = config.load_config(path)["blink"]
+        sha = f", sha256 {stamp['sha'][:12]}" if stamp.get("sha") else ""
+        _say(f"{kind}: {path} (model {stamp['model']}, mode {stamp['mode']}{sha})")
+    _say("check them with `blink lichess check-config --config <file>`; the token is never written")
+    return 0
+
+
+def cmd_lichess_check_config(args: argparse.Namespace) -> int:
+    from blink.lichess import config
+
+    results = None if args.results.lower() == "none" else Path(args.results)
+    try:
+        report = config.check_file(Path(args.config), kind=args.kind, results=results)
+    except (config.ConfigError, FileNotFoundError, ValueError) as exc:
+        return _refuse("check-config", exc)
+    for note in report.notes:
+        _say(f"  note: {note}")
+    for problem in report.problems:
+        _say(f"  problem: {problem}")
+    _say(f"{args.config} ({report.kind or 'unknown kind'}): {len(report.problems)} problems")
+    return 1 if report.problems else 0
+
+
+def cmd_lichess_snapshot(args: argparse.Namespace) -> int:
+    import datetime
+
+    from blink.lichess import snapshot
+
+    today = datetime.datetime.now(datetime.UTC).date().isoformat()
+    try:
+        snapshot.check_name(args.bot)
+        report = snapshot.take_snapshot(snapshot.default_api(), args.bot, args.max_games, today)
+    except (ValueError, snapshot.ApiError, OSError) as exc:
+        return _refuse("snapshot", exc)
+    for line in snapshot.format_report(report, args.max_games):
+        _say(line)
+    if args.no_write:
+        _say("--no-write: nothing written")
+        return 0
+    _say(f"-> {snapshot.write_snapshot(report.snapshot, Path(args.out))}")
+    return 0
+
+
+def _pause_bot(bot: str, api, args: argparse.Namespace, reason: str) -> None:
+    from blink.lichess import pause
+
+    deps = pause.default_deps(bot, api, Path(args.bot_root))
+    record = pause.pause(bot, deps, paths.home() / "lichess", args.timeout, args.poll, reason)
+    for line in pause.format_record(record):
+        _say(line)
+
+
+def cmd_lichess_check(args: argparse.Namespace) -> int:
+    from blink.lichess import monitor, snapshot
+
+    try:
+        snapshot.check_name(args.bot)
+        api = snapshot.default_api()
+        verdict = monitor.check(api, args.bot, window=args.window)
+    except (ValueError, snapshot.ApiError, OSError) as exc:
+        return _refuse("check", exc)
+    _say(monitor.format_verdict(args.bot, verdict))
+    if verdict.stop and args.stop:
+        _pause_bot(args.bot, api, args, "stop rule: " + "; ".join(verdict.reasons))
+    return 1 if verdict.stop else 0
+
+
+def cmd_lichess_pause(args: argparse.Namespace) -> int:
+    from blink.lichess import snapshot
+
+    try:
+        snapshot.check_name(args.bot)
+    except ValueError as exc:
+        return _refuse("pause", exc)
+    _pause_bot(args.bot, snapshot.default_api(), args, args.reason)
+    return 0
+
+
+def cmd_lichess_resume_note(args: argparse.Namespace) -> int:
+    from blink.lichess import pause
+
+    _say(pause.resume_note(paths.home() / "lichess" / pause.FLAG_NAME))
+    return 0
+
+
+def _pause_options(parser: argparse.ArgumentParser) -> None:
+    from blink.lichess import pause
+
+    parser.add_argument(
+        "--timeout", type=float, default=pause.DEFAULT_TIMEOUT_S, help="seconds to wait for no game"
+    )
+    parser.add_argument(
+        "--poll", type=float, default=pause.DEFAULT_POLL_S, help="seconds between status reads"
+    )
+    parser.add_argument("--bot-root", default=str(pause.BOT_ROOT), help="the lichess-bot folder to match")
+
+
+def _register_lichess_config(actions: argparse._SubParsersAction) -> None:
+    from blink.lichess import config
+
+    gen = actions.add_parser(
+        "config", help="write config.yml and config.casual.yml from the tracked templates"
+    )
+    gen.add_argument("--model", required=True, help="the rated bot's model selector (casual too, by default)")
+    gen.add_argument("--mode", required=True, choices=config.MODES)
+    gen.add_argument("--sha", help="the shipped weights' sha256 (default: hashed from the weights file)")
+    gen.add_argument("--casual-model", help="the preview model for the G5 casual smoke (default: --model)")
+    gen.add_argument("--only", choices=config.KINDS, help="write just one of the two configs")
+    gen.add_argument("--out-dir", default=str(config.DEFAULT_OUT_DIR))
+    gen.add_argument("--templates", default=str(config.TEMPLATE_DIR), help="default: deploy/lichess")
+    gen.set_defaults(func=cmd_lichess_config)
+    chk = actions.add_parser("check-config", help="check a generated config against the plan")
+    chk.add_argument("--config", required=True)
+    chk.add_argument("--kind", choices=config.KINDS, help="default: the kind the config records")
+    chk.add_argument(
+        "--results", default="results/results.json", help="the shipped model to compare, or none"
+    )
+    chk.set_defaults(func=cmd_lichess_check_config)
+
+
+def _register_lichess(sub: argparse._SubParsersAction) -> None:
+    lichess = sub.add_parser("lichess", help="the Lichess BOT: configs, public snapshot, stop rule, pause")
+    actions = lichess.add_subparsers(dest="lichess_command", required=True)
+    _register_lichess_config(actions)
+    snap = actions.add_parser("snapshot", help="rating, RD, N and game rates from the public API (no token)")
+    snap.add_argument("--bot", required=True)
+    snap.add_argument("--no-write", action="store_true", help="print only; write nothing")
+    snap.add_argument("--out", default=str(Path("results") / "lichess.json"))
+    snap.add_argument("--max-games", type=int, default=3000, help="newest rated blitz games to export")
+    snap.set_defaults(func=cmd_lichess_snapshot)
+    check = actions.add_parser("check", help="the stop rule over the last 50 games; exits 1 when it fires")
+    check.add_argument("--bot", required=True)
+    check.add_argument("--window", type=int, default=50)
+    check.add_argument("--stop", action="store_true", help="pause the bot when the rule fires")
+    _pause_options(check)
+    stop = actions.add_parser("pause", help="flag, wait for no live game, then stop the bot by PID")
+    stop.add_argument("--bot", required=True)
+    stop.add_argument("--reason", default="GPU window", help="recorded in pause.json and the flag")
+    _pause_options(stop)
+    note = actions.add_parser("resume-note", help="delete the PAUSED flag; Itay restarts the bot himself")
+    note.set_defaults(func=cmd_lichess_resume_note)
+    check.set_defaults(func=cmd_lichess_check)
+    stop.set_defaults(func=cmd_lichess_pause)
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     _register_ops(sub)
     _register_supervise(sub)
     _register_bench(sub)
     _register_sweep(sub)
+    _register_lichess(sub)

@@ -1,0 +1,15 @@
+{
+  "id": "blinkbot",
+  "username": "BlinkBot",
+  "title": "BOT",
+  "perfs": {
+    "bullet": {"games": 0, "rating": 3000, "rd": 500, "prog": 0, "prov": true},
+    "blitz": {"games": 214, "rating": 2012, "rd": 62, "prog": -41},
+    "rapid": {"games": 0, "rating": 3000, "rd": 500, "prog": 0, "prov": true}
+  },
+  "createdAt": 1790000000000,
+  "seenAt": 1790900000000,
+  "playTime": {"total": 480000, "tv": 0, "human": 96000},
+  "url": "https://lichess.org/@/BlinkBot",
+  "count": {"all": 226, "rated": 214, "draw": 20, "loss": 110, "win": 96, "playing": 0}
+}
