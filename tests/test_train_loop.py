@@ -203,3 +203,19 @@ def test_an_empty_val_array_skips_evals(tmp_path):
     empty = fixture_records()[:0]
     loop.train(cfg, _spec(run_dir), _repeat(fixture_records()[:16]), val=empty, log=lambda _: None)
     assert not (run_dir / "evals.jsonl").exists()
+
+
+@pytest.mark.cuda
+def test_a_short_cuda_run_trains_in_bf16_and_resumes(tmp_path):
+    records = fixture_records()
+    cfg = tiny_train_config(steps=40, warmup_steps=4, batch_size=32, ckpt_every_steps=20, eval_every=20)
+    run_dir = tmp_path / "gpu"
+    source = InMemorySource(records, 32, seed=1).batches
+    quiet = {"val": records, "log": lambda _: None}
+    first = loop.train(cfg, _spec(run_dir, device="cuda", max_steps=20), source, **quiet)
+    assert first.step == 20 and first.last_metrics["gpu_mem_gb"] > 0
+    done = loop.train(cfg, _spec(run_dir, device="cuda", resume=True), source, **quiet)
+    assert done.step == 40
+    assert done.last_eval["policy_ce"] < 7.54
+    state = load_checkpoint(latest_checkpoint(run_dir))
+    assert state["rng"]["cuda"] and state["step"] == 40
