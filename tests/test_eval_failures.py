@@ -94,3 +94,102 @@ def test_book_moves_are_not_blinks_turns(tmp_path):
     game.variations[0].comment = "book"
     turns = failures.blink_turns(game, chess.WHITE, labeler(tmp_path))
     assert [t.ply for t in turns] == [2]
+
+
+def write_named(tmp_path, name, *games):
+    path = tmp_path / name
+    path.write_text("\n\n".join(games) + "\n", encoding="utf-8")
+    return path
+
+
+def test_failures_are_taken_in_turn_from_each_file_not_all_from_the_first(tmp_path):
+    first = write_named(tmp_path, "a.pgn", *[game_pgn(SHUFFLE, black="SF1800")] * 3)
+    second = write_named(tmp_path, "b.pgn", *[game_pgn(SHUFFLE, black="SF1900")] * 3)
+    out = failures.run_failures([first, second], labeler(tmp_path), max_failures=2)
+    assert [(f["file"], f["game"]) for f in out["failures"]] == [("a.pgn", 1), ("b.pgn", 1)]
+    assert out["examined_games"] == 2
+
+
+def test_an_exact_player_never_picks_up_a_name_that_contains_it(tmp_path):
+    games = [
+        game_pgn(SHUFFLE, white="Blink-value-ship-rules-off"),
+        game_pgn(SHUFFLE, white="Blink-value-ship"),
+    ]
+    pgn = write_named(tmp_path, "g.pgn", *games)
+    out = failures.run_failures([pgn], labeler(tmp_path), player="Blink-value-ship", exact=True)
+    assert [(f["blink"], f["game"]) for f in out["failures"]] == [("Blink-value-ship", 2)]
+
+
+def e9_context(tmp_path, **kwargs):
+    from blink.eval import orchestrate
+
+    base = {"model": "ship", "out_dir": tmp_path / "out", "mode": "value"}
+    return orchestrate.EvalContext(**{**base, **kwargs})
+
+
+def e5_report(tmp_path):
+    pgns = {}
+    for mode in ("policy", "value"):
+        for anchor in ("SF1800", "SF1900"):
+            pgns[mode, anchor] = write_named(tmp_path, f"{mode}_{anchor}.pgn", game_pgn(SHUFFLE))
+    final = {
+        mode: {
+            "locator": {"pgn": str(tmp_path / f"{mode}_locator.pgn")},
+            "anchors": [{"pgn": str(pgns[mode, a])} for a in ("SF1800", "SF1900")],
+        }
+        for mode in ("policy", "value")
+    }
+    return {"final": final, "side": {}}, pgns
+
+
+def fake_e9(monkeypatch):
+    seen = {}
+
+    class Labeler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def run_failures(pgns, labeler, player="blink", max_failures=50, max_examined=None, exact=False):
+        seen.update(pgns=list(pgns), player=player, exact=exact)
+        return {"examined_games": 0, "failures": [], "classes": {}, "positions_searched": 0}
+
+    monkeypatch.setattr(sflabel, "SfLabeler", Labeler)
+    monkeypatch.setattr(failures, "run_failures", run_failures)
+    return seen
+
+
+def test_e9_reads_only_the_shipped_engines_final_slice_anchor_games(tmp_path, monkeypatch):
+    seen = fake_e9(monkeypatch)
+    e5, pgns = e5_report(tmp_path)
+    out = failures.e9_block(e9_context(tmp_path), {"E5": e5})
+    assert seen == {
+        "pgns": [pgns["value", "SF1800"], pgns["value", "SF1900"]],
+        "player": "Blink-value-ship",
+        "exact": True,
+    }
+    assert out["player"] == "Blink-value-ship" and len(out["source_pgns"]) == 2
+
+
+def test_e9_run_alone_reads_e5_from_the_same_out_folder_and_refuses_without_it(tmp_path, monkeypatch):
+    import json
+
+    import pytest
+
+    seen = fake_e9(monkeypatch)
+    ctx = e9_context(tmp_path, mode="policy")
+    with pytest.raises(ValueError, match="E5"):
+        failures.e9_block(ctx, {})
+    e5, pgns = e5_report(tmp_path)
+    ctx.out_dir.mkdir(parents=True)
+    (ctx.out_dir / "E5.json").write_text(json.dumps(e5), encoding="utf-8")
+    failures.e9_block(ctx, {})
+    assert seen["pgns"] == [pgns["policy", "SF1800"], pgns["policy", "SF1900"]]
+    pgns["policy", "SF1900"].unlink()
+    with pytest.raises(ValueError, match="policy_SF1900.pgn"):
+        failures.e9_block(ctx, {})

@@ -1,8 +1,10 @@
 """E9: Blink's failures, grouped into named classes (plan P8).
 
 A failure is a final-slice game Blink lost or drew although Stockfish 19 at 1M nodes rated Blink at least
-+3.00 at one of its turns. Every position where Blink was to move is labelled (cached, blink.eval.sflabel);
-the first 50 failures are kept and each gets one class:
++3.00 at one of its turns. E9 reads the shipped engine's games against E5's centred anchors (its exact name,
+the shipped mode, never the locator or side rows) and takes the games in turn from each anchor's PGN (the
+first game of every file, then the second, ...), so the 50 failures it keeps span the anchors. Every
+position where Blink was to move is labelled (cached, blink.eval.sflabel), and each failure gets one class:
 - time forfeit or crash: the game ended on a clock, an illegal move or a crashed engine;
 - missed a forced mate: Stockfish saw a mate for Blink at one of its turns and the game was not won;
 - one-move blunder: a lost game in which one Blink move dropped Blink's score by 3.00 or more;
@@ -60,11 +62,17 @@ def read_games(path: Path) -> Iterator[chess.pgn.Game]:
             yield game
 
 
-def blink_side(game: chess.pgn.Game, player: str) -> chess.Color | None:
-    white, black = game.headers.get("White", "").lower(), game.headers.get("Black", "").lower()
-    if player in white and player not in black:
+def blink_side(game: chess.pgn.Game, player: str, exact: bool = False) -> chess.Color | None:
+    """Blink's colour: the side whose name is `player` (exact) or contains it (case-insensitive)."""
+    white, black = game.headers.get("White", ""), game.headers.get("Black", "")
+    if exact:
+        is_white, is_black = white == player, black == player
+    else:
+        needle = player.lower()
+        is_white, is_black = needle in white.lower(), needle in black.lower()
+    if is_white and not is_black:
         return chess.WHITE
-    if player in black and player not in white:
+    if is_black and not is_white:
         return chess.BLACK
     return None
 
@@ -128,9 +136,9 @@ def classify(result: str, how: str, turns: Sequence[Turn]) -> str:
 
 
 def examine(
-    game: chess.pgn.Game, number: int, source: str, player: str, labeler: SfLabeler
+    game: chess.pgn.Game, number: int, source: str, player: str, labeler: SfLabeler, exact: bool = False
 ) -> Failure | None:
-    side = blink_side(game, player)
+    side = blink_side(game, player, exact)
     if side is None:
         return None
     result = blink_result(game, side)
@@ -145,30 +153,40 @@ def examine(
     return Failure(source, number, name, result, how, peak, worst_drop(turns), classify(result, how, turns))
 
 
+def in_turn(pgns: Sequence[Path]) -> Iterator[tuple[Path, int, chess.pgn.Game]]:
+    """(file, game number, game): the first game of every file, then the second of every file, and so on."""
+    streams = [(Path(p), enumerate(read_games(p), start=1)) for p in pgns]
+    while streams:
+        still = []
+        for path, games in streams:
+            item = next(games, None)
+            if item is not None:
+                yield path, item[0], item[1]
+                still.append((path, games))
+        streams = still
+
+
 def run_failures(
     pgns: Sequence[Path],
     labeler: SfLabeler,
     player: str = "blink",
     max_failures: int = MAX_FAILURES,
     max_examined: int | None = None,
+    exact: bool = False,
 ) -> dict:
-    """The first `max_failures` failures in the PGNs, in file and game order, with class counts.
+    """Up to `max_failures` failures, taking the files' games in turn, with class counts. `player` is
+    Blink's exact name when `exact`, else a case-insensitive part of it.
 
     `max_examined` caps the games looked at (a smoke run's bound on Stockfish searches)."""
     found: list[Failure] = []
     examined = 0
-    for path in pgns:
-        for number, game in enumerate(read_games(path), start=1):
-            if max_examined is not None and examined >= max_examined:
-                break
-            examined += 1
-            failure = examine(game, number, Path(path).name, player.lower(), labeler)
-            if failure is not None:
-                found.append(failure)
-            if len(found) >= max_failures:
-                break
-        if len(found) >= max_failures:
+    for path, number, game in in_turn(pgns):
+        if len(found) >= max_failures or (max_examined is not None and examined >= max_examined):
             break
+        examined += 1
+        failure = examine(game, number, path.name, player, labeler, exact)
+        if failure is not None:
+            found.append(failure)
     return {
         "examined_games": examined,
         "failures": [asdict(f) for f in found],
@@ -177,14 +195,36 @@ def run_failures(
     }
 
 
+def e9_pgns(ctx, state: dict, mode: str) -> list[Path]:
+    """The shipped mode's E5 games against its centred anchors (final slice), from this run or from
+    <out>/E5.json; refused when E5 recorded none or a file is gone."""
+    from blink.eval.orchestrate import earlier_report
+
+    block = ((earlier_report(ctx, state, "E5").get("final") or {}).get(mode)) or {}
+    pgns = [Path(row["pgn"]) for row in block.get("anchors", [])]
+    if not pgns:
+        raise ValueError(
+            f"E9 reads E5's final-slice anchor games in the shipped mode ({mode}) and none are recorded: "
+            "run E5 first, in this run or into the same --out folder"
+        )
+    missing = [str(p) for p in pgns if not p.is_file()]
+    if missing:
+        raise ValueError(f"E9: E5's anchor games are missing: {', '.join(missing)}")
+    return pgns
+
+
 def e9_block(ctx, state: dict) -> dict:
-    """The final-slice PGNs of E5 (or every PGN under <out>/E5 when E5 ran earlier), at 1M nodes."""
+    """The shipped engine's failures in its E5 anchor games, labelled by SF19 at 1M nodes."""
     from blink.eval import fastchess
+    from blink.eval.orchestrate import shipped_mode
     from blink.eval.sflabel import SfLabeler
 
-    pgns = [Path(p) for p in (state.get("E5") or {}).get("final_slice_pgns", [])]
-    pgns = pgns or sorted((ctx.out_dir / "E5").glob("*.pgn"))
+    mode = shipped_mode(ctx, state)
+    player = fastchess.engine_name(ctx.model, mode)
+    pgns = e9_pgns(ctx, state, mode)
     cap = MAX_FAILURES if ctx.games is None else min(MAX_FAILURES, ctx.games)
     with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:
-        result = run_failures(pgns, labeler, max_failures=cap, max_examined=ctx.positions)
-    return {**result, "games": 0, "pgns": []}
+        result = run_failures(
+            pgns, labeler, player=player, max_failures=cap, max_examined=ctx.positions, exact=True
+        )
+    return {**result, "player": player, "source_pgns": [str(p) for p in pgns], "games": 0, "pgns": []}
