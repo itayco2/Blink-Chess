@@ -7,6 +7,7 @@ blink bench throughput|loader|play              measured rates into bench.json (
 blink sweep ablations|sizes|choose              plan P5 and P6
 blink lichess config|check-config               the bot's config.yml and config.casual.yml (plan P9)
 blink lichess snapshot|check|pause|resume-note  public-API numbers, the stop rule, the bot pause
+blink lichess watch                             the stop rule enforced every 2 minutes, no agent needed
 
 Torch is imported only inside the commands that need it, so `blink --help` works torch-free.
 """
@@ -439,13 +440,18 @@ def _refuse(command: str, exc: Exception) -> int:
     return EXIT_REFUSED
 
 
-def _positive(kind: type) -> Callable[[str], int | float]:
-    """An argparse type: an int or float above zero (a zero poll would spin on the public API)."""
+def _positive(kind: type, zero_ok: bool = False) -> Callable[[str], int | float]:
+    """An argparse type: an int or float above zero (a zero poll would spin on the public API).
+
+    `zero_ok` admits zero too: a pause --timeout of 0 stops the bot without waiting for its game.
+    """
 
     def parse(text: str) -> int | float:
         value = kind(text)
-        if value <= 0:
-            raise argparse.ArgumentTypeError(f"must be above zero, got {text}")
+        if value < 0 or (value == 0 and not zero_ok):
+            raise argparse.ArgumentTypeError(
+                f"must be {'0 or more' if zero_ok else 'above zero'}, got {text}"
+            )
         return value
 
     return parse
@@ -513,23 +519,56 @@ def _pause_bot(bot: str, api, args: argparse.Namespace, reason: str) -> None:
         _say(line)
 
 
+def _pgn_dir(args: argparse.Namespace) -> Path:
+    return Path(args.pgn_dir) if args.pgn_dir else paths.home() / "lichess" / "pgn"
+
+
 def cmd_lichess_check(args: argparse.Namespace) -> int:
-    from blink.lichess import monitor, snapshot
+    from blink.lichess import monitor, snapshot, watch
 
     try:
         snapshot.check_name(args.bot)
         api = snapshot.default_api()
-        pgn_dir = Path(args.pgn_dir) if args.pgn_dir else paths.home() / "lichess" / "pgn"
-        verdict = monitor.check(api, args.bot, window=args.window, pgn_dir=pgn_dir)
+        verdict = monitor.check(api, args.bot, window=args.window, pgn_dir=_pgn_dir(args))
     except (ValueError, snapshot.ApiError, OSError) as exc:
         return _refuse("check", exc)
     _say(monitor.format_verdict(args.bot, verdict))
     if verdict.stop and args.stop:
         try:
-            _pause_bot(args.bot, api, args, "stop rule: " + "; ".join(verdict.reasons))
+            action = watch.enforce(
+                verdict,
+                paths.home() / "lichess",
+                lambda reason: _pause_bot(args.bot, api, args, reason),
+                watch.utc_now(),
+                _say,
+            )
         except OSError as exc:
             return _refuse("check --stop", exc)
+        _say(f"action: {action}")
     return 1 if verdict.stop else 0
+
+
+def cmd_lichess_watch(args: argparse.Namespace) -> int:
+    from blink.lichess import monitor, snapshot, watch
+
+    try:
+        snapshot.check_name(args.bot)
+    except ValueError as exc:
+        return _refuse("watch", exc)
+    api = snapshot.default_api()
+    pgn_dir, lichess_dir = _pgn_dir(args), paths.home() / "lichess"
+    deps = watch.WatchDeps(
+        exported=lambda: monitor.exported_games(api, args.bot, args.window),
+        local=lambda: monitor.games_from_pgns(pgn_dir, args.bot),
+        pause_now=lambda reason: _pause_bot(args.bot, api, args, reason),
+        log=_say,
+    )
+    _say(
+        f"watching {args.bot} every {args.every:g} s: PGNs in {pgn_dir}, heartbeat "
+        f"{lichess_dir / watch.HEARTBEAT_NAME}; a firing rule pauses the bot (--timeout {args.timeout:g})"
+    )
+    watch.watch(args.bot, deps, lichess_dir, args.every, args.rounds, args.window)
+    return 0
 
 
 def cmd_lichess_pause(args: argparse.Namespace) -> int:
@@ -550,14 +589,14 @@ def cmd_lichess_resume_note(args: argparse.Namespace) -> int:
     return 0
 
 
-def _pause_options(parser: argparse.ArgumentParser) -> None:
+def _pause_options(parser: argparse.ArgumentParser, timeout: float) -> None:
     from blink.lichess import pause
 
     parser.add_argument(
         "--timeout",
-        type=_positive(float),
-        default=pause.DEFAULT_TIMEOUT_S,
-        help="seconds to wait for no game",
+        type=_positive(float, zero_ok=True),
+        default=timeout,
+        help=f"seconds to wait for no game before stopping the bot (default {timeout:g})",
     )
     parser.add_argument(
         "--poll", type=_positive(float), default=pause.DEFAULT_POLL_S, help="seconds between status reads"
@@ -589,6 +628,8 @@ def _register_lichess_config(actions: argparse._SubParsersAction) -> None:
 
 
 def _register_lichess(sub: argparse._SubParsersAction) -> None:
+    from blink.lichess import pause
+
     lichess = sub.add_parser("lichess", help="the Lichess BOT: configs, public snapshot, stop rule, pause")
     actions = lichess.add_subparsers(dest="lichess_command", required=True)
     _register_lichess_config(actions)
@@ -601,20 +642,25 @@ def _register_lichess(sub: argparse._SubParsersAction) -> None:
     )
     snap.set_defaults(func=cmd_lichess_snapshot)
     check = actions.add_parser("check", help="the stop rule over the last 50 games; exits 1 when it fires")
-    check.add_argument("--bot", required=True)
-    check.add_argument("--window", type=_positive(int), default=50)
-    check.add_argument("--stop", action="store_true", help="pause the bot when the rule fires")
-    check.add_argument(
-        "--pgn-dir", help="lichess-bot's PGNs, for aborted games (default BLINK_HOME/lichess/pgn)"
-    )
-    _pause_options(check)
+    check.add_argument("--stop", action="store_true", help="pause the bot when the rule fires on new games")
+    watcher = actions.add_parser("watch", help="the stop rule every --every seconds, pausing the bot itself")
+    watcher.add_argument("--every", type=_positive(float), default=120.0, help="seconds between checks")
+    watcher.add_argument("--rounds", type=_positive(int), help="stop after this many checks (default never)")
+    for parser in (check, watcher):
+        parser.add_argument("--bot", required=True)
+        parser.add_argument("--window", type=_positive(int), default=50)
+        parser.add_argument(
+            "--pgn-dir", help="lichess-bot's PGNs, for aborted games (default BLINK_HOME/lichess/pgn)"
+        )
+        _pause_options(parser, timeout=0.0)  # a stop-rule pause never waits for the live game
     stop = actions.add_parser("pause", help="flag, wait for no live game, then stop the bot by PID")
     stop.add_argument("--bot", required=True)
     stop.add_argument("--reason", default="GPU window", help="recorded in pause.json and the flag")
-    _pause_options(stop)
+    _pause_options(stop, timeout=pause.DEFAULT_TIMEOUT_S)
     note = actions.add_parser("resume-note", help="delete the PAUSED flag; Itay restarts the bot himself")
     note.set_defaults(func=cmd_lichess_resume_note)
     check.set_defaults(func=cmd_lichess_check)
+    watcher.set_defaults(func=cmd_lichess_watch)
     stop.set_defaults(func=cmd_lichess_pause)
 
 

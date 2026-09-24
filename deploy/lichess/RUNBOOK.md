@@ -121,8 +121,10 @@ refuse a weights file with a different hash.
    `challenge_filter: fine`; under `challenge:` `concurrency: 2` with `games_reserved_for_humans: 1`
    (so one bot game at a time), `preference: human`, `bullet_requires_increment: true`,
    `max_simultaneous_games_per_user: 1`; resign and draw offers off; PGNs in `D:\blink\lichess\pgn`.
-2. Itay: `D:\blink-bot\start-bot.ps1`
-3. Optional auto-start: a Task Scheduler task that runs `start-bot.ps1` "only when user is logged
+2. Itay registers and starts the watcher task (section 8) before the bot's first rated game; the
+   agent confirms its heartbeat in `D:\blink\lichess\watch.json`.
+3. Itay: `D:\blink-bot\start-bot.ps1`
+4. Optional auto-start: a Task Scheduler task that runs `start-bot.ps1` "only when user is logged
    on", with an at-logon trigger only and no restart on failure, so a pause is never undone. Task
    Scheduler stops a task after 72 hours by default, which would end the bot inside the 7-day
    window, so the time limit is switched off:
@@ -135,20 +137,60 @@ refuse a weights file with a different hash.
    Register-ScheduledTask -TaskName 'BlinkBot' -Action $action -Trigger $trigger -Principal $principal -Settings $settings
    ```
 
-## 8. Watching it and the stop rule (agent)
+## 8. The stop rule, enforced by the watcher
+
+The stop rule: **time losses > 2% or aborts by the bot > 1% over the last 50 games** (any kind;
+fewer games count as they are). An abort counts against the bot only when the bot was the side to
+move. lichess-bot aborts a game itself when the opponent never moves, and lila records that as an
+abort too; those opponent no-shows are reported beside the rule and never counted.
+
+The bot runs for days and comes back at every logon, so the rule cannot depend on an agent session
+being alive (plan section 4: every long job's stop rules are enforced without an agent).
+`blink lichess watch` enforces it from a Task Scheduler task of its own:
+
+1. Copy [watch-bot.template.ps1](watch-bot.template.ps1) to `D:\blink-bot\watch-bot.ps1`. It never
+   reads the token and is never started from `start-bot.ps1`.
+2. Itay registers the task once, at G7, beside the bot's. Unlike the bot's task it restarts on
+   failure, because the watcher can only pause the bot, never start it:
+
+   ```powershell
+   $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -File D:\blink-bot\watch-bot.ps1 -Bot <BotName>'
+   $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+   $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
+   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+   Register-ScheduledTask -TaskName 'BlinkBotWatch' -Action $action -Trigger $trigger -Principal $principal -Settings $settings
+   Start-ScheduledTask -TaskName 'BlinkBotWatch'
+   ```
+
+3. Every 2 minutes the watcher reads the PGNs lichess-bot saves in `D:\blink\lichess\pgn` and the
+   public export (no token), and writes its heartbeat to `D:\blink\lichess\watch.json` (time, round,
+   verdict, action); its output goes to `D:\blink\logs\lichess-watch.log`.
+4. When the rule fires on a game no earlier stop acted on, it pauses the bot at once, as section 9
+   does but **without waiting for the live game** (`--timeout 0`): while a pause waits, a broken
+   engine loses that game anyway and lichess-bot keeps accepting new ones. The games it acted on go
+   to `D:\blink\lichess\stop-rule.json`, so the bot Itay restarts is not stopped again for the same
+   games while they are among the last 50; any new time loss or abort by the bot stops it again.
+5. While `D:\blink\lichess\PAUSED` exists the watcher only writes its heartbeat. If the public API
+   fails, it judges the local PGNs alone and says so in the heartbeat.
+6. **(agent)** every status poll reads `watch.json`. A heartbeat older than 5 minutes (while the PC is
+   on) means the watcher is down; the agent records it in STATUS and asks Itay to start the task.
+
+How fast: lichess-bot writes a game's PGN when the game ends, or, for a game whose engine failed,
+when its retries give up (at most 10 minutes). So a crashing engine is paused within about
+12 minutes of its first abort, and one abort by the bot is enough to fire the rule.
+
+The same rule on demand **(agent)**:
 
 ```powershell
-uv run blink lichess check --bot <BotName> --stop     # exits 1 when the rule fires
+uv run blink lichess check --bot <BotName>            # exits 1 when the rule fires
+uv run blink lichess check --bot <BotName> --stop     # also pauses at once, only for new games
 uv run blink lichess snapshot --bot <BotName> --no-write
 ```
 
-- The stop rule: **time losses > 2% or aborts > 1% over the last 50 games** (any kind; fewer games
-  count as they are). With `--stop` a firing rule pauses the bot exactly as section 9 does and
-  records the rule in `D:\blink\lichess\pause.json`; Itay decides when it restarts.
 - Lichess's public game export never contains aborted games (lila exports only finished games), so
-  `check` also counts the `Termination "Abandoned"` PGNs that lichess-bot saves in
-  `D:\blink\lichess\pgn`. The public snapshot's abort rate sees only games that never started
-  (`noStart`).
+  `check` and `watch` also read every game in lichess-bot's PGNs (`Termination "Abandoned"` for
+  aborts, `"Time forfeit"` with the Result tag for time losses). The public snapshot's abort rate
+  sees only games that never started (`noStart`).
 - `snapshot --no-write` prints rating, RD, N, the human share, performance vs humans and vs bots,
   and the time-loss, abort and duplicate-game rates. It writes nothing and commits nothing.
 
@@ -188,5 +230,5 @@ The rating is publishable only at N >= 200 rated blitz games and RD < 75; until 
 ## 11. Staying online
 
 - After the LinkedIn post (G13), keep the bot online for **at least 7 days**: sleep never on AC, the
-  at-logon task from section 7, and no GPU pause in those 7 days unless the stop rule fires.
+  at-logon tasks from sections 7 and 8, and no GPU pause in those 7 days unless the stop rule fires.
 - After the 7 days, run it on the hours listed in its bio.
