@@ -130,3 +130,37 @@ def test_e7_runs_deepminds_gauntlet_then_blink_against_it():
     assert out["gauntlet"]["games"] == 50 + 5 * 200
     assert out["blink_vs_dm"]["elo"]["games"] == 1000
     assert out["games"] == 50 + 1000 + 1000
+
+
+def captured_anchor_play(tmp_path, monkeypatch, epsilon=None):
+    """anchors.fastchess_player with fastchess stubbed: returns (play, the engines each game got)."""
+    import json
+    from types import SimpleNamespace
+
+    from blink.eval import fastchess
+
+    results = tmp_path / "results"
+    results.mkdir(exist_ok=True)
+    if epsilon is not None:
+        (results / "epsilon.json").write_text(json.dumps({"epsilon": epsilon}), encoding="utf-8")
+    seen = []
+
+    def prepare_pair(first, second, games, book, out_dir, concurrency, skip=0):
+        seen.append({"first": first, "second": second, "book": book, "out_dir": out_dir})
+        return SimpleNamespace(pgn=str(out_dir / "g.pgn"))
+
+    monkeypatch.setattr(fastchess, "prepare_pair", prepare_pair)
+    monkeypatch.setattr(fastchess, "execute", lambda gauntlet: gauntlet)
+    monkeypatch.setattr(
+        fastchess, "match_report", lambda r: {"games": 2, "score": 0.5, "pgn": r.pgn, "penta": None}
+    )
+    ctx = SimpleNamespace(device="cpu", out_dir=tmp_path / "out", concurrency=1, results_dir=results)
+    return ctx, seen
+
+
+def test_e5s_fastchess_blink_plays_with_the_epsilon_e2b_chose(tmp_path, monkeypatch):
+    ctx, seen = captured_anchor_play(tmp_path, monkeypatch, epsilon=1 / 256)
+    play = anchors.fastchess_player(ctx, "ship", "value", "E5")
+    play(GRID[0], 2, "final", 0)
+    assert "--epsilon=0.00390625" in seen[0]["first"].args
+    assert seen[0]["first"].name == "Blink-value-ship"

@@ -126,13 +126,16 @@ def audit_engine(name: str) -> str:
     return "dm" if name.lower().startswith("dm-") else nosearch.DEFAULT_ENGINE
 
 
-def blink_engine(model: str, mode: str, device: str = "cuda") -> EngineSpec:
-    """Blink (or DM-9M, for a dm selector) as `python -m blink.uci`, with this harness's interpreter."""
+def blink_engine(model: str, mode: str, device: str = "cuda", epsilon: float | None = None) -> EngineSpec:
+    """Blink (or DM-9M, for a dm selector) as `python -m blink.uci`, with this harness's interpreter.
+
+    `epsilon` is Blink's R4 tie window (E2b's choice); without it blink-uci plays its default, 0."""
     if registry.is_dm(model):
         args = ("-m", "blink.uci", f"--model={model}", f"--device={device}")
     else:
         selector = ("--random",) if model in RANDOM_SELECTORS else (f"--model={model}",)
-        args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}")
+        tie = () if epsilon is None else (f"--epsilon={float(epsilon)!r}",)
+        args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}", *tie)
     return EngineSpec(
         engine_name(model, mode), sys.executable, args, st=BLINK_ST, timemargin_ms=BLINK_MARGIN_MS
     )

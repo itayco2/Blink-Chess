@@ -288,6 +288,7 @@ def _run_guarded(prefix: str, action) -> int:
         orchestrate.ProtocolMismatch,
         orchestrate.TrainingLive,
         orchestrate.MachineBusy,
+        orchestrate.EpsilonChanged,
         FileNotFoundError,
         ValueError,
     ) as exc:

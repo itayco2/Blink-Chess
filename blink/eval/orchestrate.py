@@ -12,6 +12,9 @@ self-check, E5 and DM-9M's E7 gauntlet), at concurrency 5 as in the plan. Every 
 with one model load (one CUDA context, PF58): Blink needs no clock there because its compute never depends
 on time (N4), and Stockfish gets `go movetime 100` (st=0.1) or `go nodes N` with the whole game.
 A `games` override makes every match that long (and every SPRT cap), for smoke runs.
+
+Blink plays every block after E2b with the epsilon E2b chose (results/epsilon.json), in process and under
+fastchess alike (blink-uci gets it as --epsilon); a block refuses to start if that file changed mid-run.
 """
 
 import datetime
@@ -40,6 +43,8 @@ BUSY_CPU_PCT = 25.0
 SMOKE_ORDO_SIMULATIONS = 100
 SMOKE_ORDO_TIMEOUT_S = 120
 CPU_SAMPLE_S = 3.0
+# The blocks after E2b whose Blink plays with the epsilon E2b chose (in process or under fastchess).
+EPSILON_BLOCKS = frozenset({"E3", "E4", "E4b", "E5", "E6", "E7", "E8"})
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,10 @@ class TrainingLive(RuntimeError):
 
 class MachineBusy(RuntimeError):
     """A time-based block was asked for while other work kept the CPU busy (clocks would bend)."""
+
+
+class EpsilonChanged(RuntimeError):
+    """results/epsilon.json changed after earlier blocks of this run played with another value."""
 
 
 @dataclass(frozen=True)
@@ -194,6 +203,24 @@ def guard_time_based(
     return busy
 
 
+def guard_epsilon(block_id: str, results_dir: Path, played: float | None) -> float | None:
+    """The epsilon this block's Blink plays with (None for a block that does not use E2b's choice).
+
+    Refuses the block when results/epsilon.json no longer holds the value earlier blocks of this run
+    played with: the final Elo pools E5, E6 and E7, and one Blink name must be one configuration."""
+    if block_id not in EPSILON_BLOCKS:
+        return None
+    from blink.eval.match import read_epsilon
+
+    now = read_epsilon(results_dir)
+    if played is not None and now != played:
+        raise EpsilonChanged(
+            f"{block_id}: {Path(results_dir) / 'epsilon.json'} now holds epsilon {now!r}, but earlier blocks "
+            f"of this run played with {played!r}: not started"
+        )
+    return now
+
+
 # ------------------------------------------------------------------------------ forfeits and adjudications
 
 
@@ -256,11 +283,14 @@ def run_blocks(
     state: dict = {"protocol": protocol, "started": _now()}
     for block_id in ids:
         busy = guard_time_based(block_id, runs_root, ctx.allow_busy_cpu, load)
+        epsilon = guard_epsilon(block_id, ctx.results_dir, state.get("epsilon"))
         log(f"{block_id}: {BLOCKS[block_id].title}")
         report = runners[block_id](ctx, state)
         forfeits = forfeit_table(Path(p) for p in report.get("pgns", []))
-        report = {**report, "forfeits": forfeits, "cpu_pct_at_start": busy}
+        report = {**report, "forfeits": forfeits, "cpu_pct_at_start": busy, "epsilon": epsilon}
         state[block_id] = report
+        if epsilon is not None:
+            state["epsilon"] = epsilon
         _write_json(ctx.out_dir / f"{block_id}.json", report)
         log(f"{block_id}: {report.get('games', 0):,} games, forfeits {report['forfeits'] or '{}'}")
     return state

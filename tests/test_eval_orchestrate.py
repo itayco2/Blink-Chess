@@ -335,3 +335,28 @@ def test_a_smoke_run_asks_ordo_for_fewer_simulations_and_a_short_timeout(tmp_pat
         ctx(tmp_path), runners=runners, runs_root=tmp_path, log=lambda s: None, ordo=spy, load=IDLE
     )
     assert seen == {"simulations": 1000, "timeout_s": 1800}
+
+
+def test_blocks_record_the_epsilon_they_played_with_and_refuse_a_changed_one(tmp_path):
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "epsilon.json").write_text(json.dumps({"epsilon": 1 / 256}), encoding="utf-8")
+    runners = recorder([])
+
+    def e3_rewrites_epsilon(context, state):
+        (results / "epsilon.json").write_text(json.dumps({"epsilon": 0.0}), encoding="utf-8")
+        return {"games": 2, "pgns": []}
+
+    state = orchestrate.run_blocks(
+        ctx(tmp_path), runners, only=["E2", "E3"], runs_root=tmp_path, log=lambda s: None, load=IDLE
+    )
+    assert state["E3"]["epsilon"] == 1 / 256 and state["E2"]["epsilon"] is None
+    with pytest.raises(orchestrate.EpsilonChanged, match="E4"):
+        orchestrate.run_blocks(
+            ctx(tmp_path),
+            {**runners, "E3": e3_rewrites_epsilon},
+            only=["E3", "E4"],
+            runs_root=tmp_path,
+            log=lambda s: None,
+            load=IDLE,
+        )

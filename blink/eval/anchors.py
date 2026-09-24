@@ -114,11 +114,16 @@ def run_dm_block(
 
 
 def fastchess_player(ctx, selector: str, mode: str, subdir: str) -> AnchorPlay:
-    """The engine under test (Blink, or DM-9M for a dm selector) against one clocked UCI_Elo anchor."""
-    from blink.eval import fastchess
+    """The engine under test (Blink, or DM-9M for a dm selector) against one clocked UCI_Elo anchor.
+
+    Blink gets E2b's epsilon (results/epsilon.json) on its command line: the same value the in-process
+    blocks read, so every game filed under one Blink name is played by one configuration."""
+    from blink.eval import fastchess, match
+
+    epsilon = match.read_epsilon(ctx.results_dir)
 
     def play(anchor: Anchor, games: int, book: str, skip: int) -> Report:
-        first = fastchess.blink_engine(selector, mode, ctx.device)
+        first = fastchess.blink_engine(selector, mode, ctx.device, epsilon=epsilon)
         second = fastchess.stockfish_anchor(anchor.rating, fastchess.stockfish_exe())
         gauntlet = fastchess.prepare_pair(
             first, second, games, book, ctx.out_dir / subdir, ctx.concurrency, skip=skip
