@@ -33,7 +33,7 @@ import numpy as np
 
 from blink.board import encode, moves, value
 from blink.data.children import codes_to_board
-from blink.data.record import NO_MOVE
+from blink.data.record import NO_MOVE, ROOT_DTYPE
 from blink.eval import puzzles
 from blink.eval.sflabel import SfLabeler
 from blink.play.evaluator import Evaluator
@@ -580,8 +580,7 @@ FULL_LIMITS = StaticLimits()
 
 
 def read_roots(path: Path, limit: int) -> np.ndarray:
-    from blink.data.record import ROOT_DTYPE
-
+    """The first `limit` root records of a pack file (a sequential read from the front)."""
     return np.fromfile(path, dtype=ROOT_DTYPE, count=limit)
 
 
