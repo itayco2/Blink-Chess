@@ -1,0 +1,33 @@
+{
+  "url": "https://lichess.org/",
+  "engine": {
+    "dir": "C:/dev/blink-chess/.venv/Scripts",
+    "name": "blink-uci.exe",
+    "working_dir": "",
+    "protocol": "uci",
+    "ponder": false,
+    "uci_ponder": false,
+    "engine_options": {"model": "ship", "mode": "policy", "device": "cuda", "log": "D:/blink/lichess/decisions.jsonl"},
+    "polyglot": {"enabled": false},
+    "draw_or_resign": {
+      "resign_enabled": false,
+      "resign_for_egtb_minus_two": false,
+      "offer_draw_enabled": false,
+      "offer_draw_for_egtb_zero": false
+    },
+    "online_moves": {
+      "chessdb_book": {"enabled": false},
+      "lichess_cloud_analysis": {"enabled": false},
+      "lichess_opening_explorer": {"enabled": false},
+      "online_egtb": {"enabled": false}
+    },
+    "lichess_bot_tbs": {
+      "syzygy": {"enabled": false},
+      "gaviota": {"enabled": false}
+    },
+    "uci_options": {},
+    "silence_stderr": false
+  },
+  "abort_time": 30,
+  "correspondence": {"ponder": false, "uci_ponder": false}
+}
