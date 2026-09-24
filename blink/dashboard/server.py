@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from blink.train.status import list_runs, valid_run_name
+from blink.train.status import exit_code, list_runs, valid_run_name
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8767
@@ -27,6 +27,7 @@ TAIL_FILES = frozenset({"metrics.jsonl", "evals.jsonl"})
 MAX_TAIL_BYTES = 1 << 20
 LIVE_HTML = Path(__file__).with_name("live.html")
 LOOPBACK_NAMES = ("127.0.0.1", "localhost")
+RUN_FIELDS = ("name", "live", "state", "step", "steps", "heartbeat_age_s")
 
 
 def resolve_tail_path(runs_root: Path, run: str, name: str) -> Path:
@@ -57,7 +58,12 @@ def tail_lines(path: Path, offset: int, max_bytes: int = MAX_TAIL_BYTES) -> dict
 
 
 def runs_payload(runs_root: Path) -> dict[str, Any]:
-    return {"runs": [asdict(r) for r in list_runs(runs_root)]}
+    """Only the badge fields: charts come from /api/tail, and a NaN loss must not break strict JSON."""
+    runs = []
+    for report in list_runs(runs_root):
+        fields = asdict(report)
+        runs.append({**{k: fields[k] for k in RUN_FIELDS}, "healthy": exit_code(report) == 0})
+    return {"runs": runs}
 
 
 class DashboardHandler(BaseHTTPRequestHandler):

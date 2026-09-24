@@ -185,3 +185,21 @@ def test_weight_decay_applies_to_matrices_only():
     by_decay = {group["weight_decay"]: group["params"] for group in optimizer.param_groups}
     assert all(p.ndim >= 2 for p in by_decay[0.1])
     assert all(p.ndim < 2 for p in by_decay[0.0])
+
+
+def test_a_batch_source_that_runs_dry_is_named_in_the_error(tmp_path):
+    cfg = tiny_train_config(steps=30, batch_size=16)
+
+    def short(start_step):
+        yield from [fixture_records()[:16]] * 3
+
+    with pytest.raises(RuntimeError, match="ran out of batches at step 3"):
+        loop.train(cfg, _spec(tmp_path / "dry"), short, val=None, log=lambda _: None)
+
+
+def test_an_empty_val_array_skips_evals(tmp_path):
+    cfg = tiny_train_config(steps=5, warmup_steps=1, batch_size=16)
+    run_dir = tmp_path / "noval"
+    empty = fixture_records()[:0]
+    loop.train(cfg, _spec(run_dir), _repeat(fixture_records()[:16]), val=empty, log=lambda _: None)
+    assert not (run_dir / "evals.jsonl").exists()

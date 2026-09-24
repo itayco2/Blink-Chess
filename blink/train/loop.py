@@ -245,7 +245,9 @@ def _run_steps(run: _Run, source: BatchSource, end: int) -> None:
     batches = source(run.step)
     while run.step < end:
         lr = wsd_lr(run.step, cfg.peak_lr, cfg.warmup_steps, cfg.steps, cfg.cooldown_frac)
-        records = next(batches)
+        records = next(batches, None)
+        if records is None:
+            raise RuntimeError(f"the batch source ran out of batches at step {run.step}")
         losses = _train_step(run, make_batch(records, run.device), lr)
         window.add(*losses, clip_norm=cfg.clip_norm, samples=len(records))
         run.step += 1
@@ -265,7 +267,8 @@ def _build(cfg: TrainConfig, spec: RunSpec, val: np.ndarray | None, log: Callabl
     random.seed(cfg.seed)
     device = torch.device(spec.device)
     model = BlinkNet(cfg.model).to(device)
-    val_set = None if val is None else telemetry.make_val_set(val[: cfg.val_size], device)
+    has_val = val is not None and len(val) > 0
+    val_set = telemetry.make_val_set(val[: cfg.val_size], device) if has_val else None
     optimizer = build_optimizer(model, cfg, device.type)
     return _Run(cfg, spec, model, Ema(model, cfg.ema_max), optimizer, device, val_set, log)
 

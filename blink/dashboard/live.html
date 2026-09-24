@@ -277,7 +277,7 @@ function renderRuns(runs) {
     button.setAttribute("aria-pressed", String(r.name === state.run));
     button.textContent = r.name;
     const badge = document.createElement("span");
-    const sick = r.state === "crashed";
+    const sick = r.state === "crashed" || (r.live && !r.healthy);
     badge.className = "badge" + (r.live ? " live" : sick ? " sick" : "");
     badge.textContent = r.live ? "LIVE" : r.state.toUpperCase();
     button.append(badge);

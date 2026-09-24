@@ -155,3 +155,15 @@ def test_the_dashboard_command_serves_the_runs_under_blink_home(tmp_path, monkey
     assert seen == {"root": tmp_path / "runs", "port": 8767}
     assert cli.main(["dashboard", "--port", "9001"]) == 0
     assert seen["port"] == 9001
+
+
+def test_the_runs_api_stays_strict_json_when_a_loss_is_nan(runs_root, live_server):
+    heartbeat.write(runs_root / "alpha" / "heartbeat.json", {"state": "running", "step": 50, "steps": 100})
+    (runs_root / "alpha" / "metrics.jsonl").write_text('{"step": 50, "loss_policy": NaN}\n', encoding="utf-8")
+
+    def refuse(constant):
+        raise ValueError(f"browsers cannot parse {constant}")
+
+    status, body, _ = _get(live_server, "/api/runs")
+    runs = json.loads(body, parse_constant=refuse)["runs"]
+    assert status == 200 and runs[0]["name"] == "alpha" and runs[0]["healthy"] is False
