@@ -245,6 +245,8 @@ def resolve_puzzle_set(name: str) -> Path:
 
 def read_puzzle_rows(path: Path, limit: int | None = None) -> list[dict]:
     """Puzzle rows in DeepMind's (PGN) or Lichess's (FEN) layout, front to back."""
+    if not path.is_file():
+        raise GateError(f"no puzzle set at {path} (use --puzzles bands, dm10k or a CSV path)")
     with open(path, encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         header = set(reader.fieldnames or [])

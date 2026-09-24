@@ -265,3 +265,33 @@ def test_a_model_the_web_runtime_cannot_load_is_an_error_that_carries_nodes_mess
     junk.write_bytes(b"not a model")
     with pytest.raises(qgate.GateError, match=r"the web runtime stopped \(exit 1\): .*Error"):
         qgate.WebRuntime([junk])
+
+
+def test_a_missing_puzzle_set_or_an_unknown_runtime_is_a_gate_error(tmp_path):
+    from blink.export import qgate
+
+    with pytest.raises(qgate.GateError, match="no puzzle set"):
+        qgate.read_puzzle_rows(tmp_path / "missing.csv")
+    with pytest.raises(qgate.GateError, match="runtime"), qgate.evaluators("gpu", tmp_path, tmp_path):
+        pass
+
+
+@pytest.mark.torch
+def test_the_gate_runs_end_to_end_on_the_python_runtime(tmp_path):
+    pytest.importorskip("onnxruntime")
+    from blink.export import onnx as export_onnx
+    from blink.export import qgate, quantize, standin
+
+    fp32 = export_onnx.export(standin.build(seed=0), tmp_path / "model.onnx")
+    int8 = quantize.quantize_int8(fp32, tmp_path / "int8" / "model.onnx")
+    csv_path = tmp_path / "bands.csv"
+    rows = ["PuzzleId,FEN,Moves,Rating"] + [
+        f"{p['PuzzleId']},{p['FEN']},{p['Moves']},{p['Rating']}" for p in PUZZLES[:3]
+    ]
+    csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    report = qgate.run(fp32, int8, "python", "random", str(csv_path), position_limit=64)
+    assert report.runtime.startswith("onnxruntime 1.30.0, CPU, 1 thread")
+    assert report.agreement.positions == 64
+    assert 0.0 <= report.agreement.top1_agreement <= 1.0
+    assert report.overall.n == 3 and report.puzzle_set == "bands.csv"
+    assert [name for name, _ in report.bands] == ["<1000", "1000-1500", "1500-2000", "2000-2500", "2500+"]

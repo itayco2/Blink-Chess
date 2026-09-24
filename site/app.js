@@ -384,7 +384,8 @@ async function showRating() {
 function showModel(card) {
   panel.renderCard($("model-card"), card);
   if (card.label) {
-    $("mode-label").textContent = `${card.label}: the legal move with the highest probability, from one forward pass. Like the bot, Blink plays a mate in one without looking, and avoids draws by rule when clearly winning but takes them when clearly losing. Value mode is not run in the browser.`;
+    const label = card.label.charAt(0).toUpperCase() + card.label.slice(1);
+    $("mode-label").textContent = `${label}: the legal move with the highest probability, from one forward pass. Like the bot, Blink plays a mate in one without looking, and avoids draws by rule when clearly winning but takes them when clearly losing. Value mode is not run in the browser.`;
   }
 }
 

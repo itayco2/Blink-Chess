@@ -235,14 +235,17 @@ def _page_cold_load(browser, url: str, timeout_ms: float) -> dict:
     """The page in a fresh profile (empty cache): seconds from navigation until a move can be made."""
     import time
 
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
     errors: list[str] = []
     page = _open(browser, errors)
     started = time.perf_counter()
     page.goto(url)
     try:
         page.wait_for_function(WAIT_PAGE, timeout=timeout_ms)
-    except Exception as exc:  # playwright's TimeoutError; the report says the page never got ready
-        return {"ready": False, "cold_load_s": None, "console_errors": [*errors, str(exc)[:300]]}
+    except PlaywrightTimeout:
+        waited = f"not ready after {timeout_ms / 1000:g} s"
+        return {"ready": False, "cold_load_s": None, "console_errors": [*errors, waited]}
     seconds = time.perf_counter() - started
     state = page.evaluate("window.__blink.state()")
     page.context.close()
@@ -256,10 +259,15 @@ def _page_cold_load(browser, url: str, timeout_ms: float) -> dict:
 
 
 def _bench_page(browser, url: str, timeout_ms: float) -> tuple[dict, list[str]]:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
     errors: list[str] = []
     page = _open(browser, errors)
     page.goto(url)
-    page.wait_for_function(WAIT_BENCH, timeout=timeout_ms)
+    try:
+        page.wait_for_function(WAIT_BENCH, timeout=timeout_ms)
+    except PlaywrightTimeout as exc:
+        raise BenchError(f"bench.html did not finish within {timeout_ms / 1000:g} s: {errors[:3]}") from exc
     result = page.evaluate("window.__blinkBench")
     page.context.close()
     if result.get("error"):
@@ -335,10 +343,16 @@ def selftest_url(url: str) -> str:
 
 def selftest(url: str, timeout_s: float = 60.0) -> SelfTest:
     """Load the page with ?selftest=1 and read window.__blinkSelfTest (ok, move, ms, histogram, backend)."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
     errors: list[str] = []
     with _edge() as browser:
         page = _open(browser, errors)
         page.goto(selftest_url(url))
-        page.wait_for_function(WAIT_SELFTEST, timeout=timeout_s * 1000)
+        try:
+            page.wait_for_function(WAIT_SELFTEST, timeout=timeout_s * 1000)
+        except PlaywrightTimeout:
+            result = {"ok": False, "error": f"no __blinkSelfTest within {timeout_s:g} s"}
+            return SelfTest(ok=False, result=result, console_errors=tuple(errors))
         result = page.evaluate("window.__blinkSelfTest")
     return SelfTest(ok=result.get("ok") is True, result=result, console_errors=tuple(errors))
