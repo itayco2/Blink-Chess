@@ -248,7 +248,164 @@ def _register_bench(sub: argparse._SubParsersAction) -> None:
     play.set_defaults(func=cmd_bench_play)
 
 
+# ---------------------------------------------------------------- sweep
+
+
+def _read_json(path: Path, what: str) -> dict:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"{what} not found at {path}") from exc
+
+
+def _home_eval(name: str, given: str | None) -> Path:
+    return Path(given) if given else paths.home() / "eval" / name
+
+
+def _repo_config(given: str | None, default: str) -> Path:
+    """A --plan or --config path, or the tracked default under the repo's configs/ folder."""
+    from blink.train.sweep import CONFIG_DIR
+
+    return Path(given) if given else CONFIG_DIR / default
+
+
+def _plan_rate(args: argparse.Namespace, size: str) -> float:
+    from blink.train.bench import best_rates
+
+    if args.rate:
+        return args.rate
+    best = best_rates(_read_json(_home_eval("bench.json", args.bench), "bench.json")).get(size)
+    if best is None:
+        raise ValueError(f"bench.json has no usable throughput row for {size}; run `blink bench throughput`")
+    return float(best["samples_per_s"])
+
+
+def _print_arm_plan(plan, rate: float) -> None:
+    import tomllib
+
+    from blink.train import sweep
+
+    base = tomllib.loads(plan.recipe.read_text(encoding="utf-8"))
+    for arm in plan.arms:
+        if arm.combine:
+            _say(f"abl-{arm.name}: {arm.change}, chosen when it starts by the adopt rule")
+            continue
+        steps = sweep.steps_for(plan.hours, rate, sweep.batch_size_of(base, arm))
+        peak = sweep.merged_config(base, arm, steps)["train"]["peak_lr"]
+        _say(f"abl-{arm.name}: {arm.change}; steps {steps:,}; peak_lr {peak:g}; {arm.overrides}")
+
+
+def cmd_sweep_ablations(args: argparse.Namespace) -> int:
+    from blink.train import sweep
+
+    try:
+        plan = sweep.load_plan(_repo_config(args.plan, "ablations/plan.toml"))
+        rate = _plan_rate(args, plan.size)
+        if args.dry_run:
+            _print_arm_plan(plan, rate)
+            return 0
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(f"blink sweep ablations: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    out = _home_eval("ablations.json", args.out)
+    report = sweep.run_ablations(plan, out, rate, sweep.supervised_runner(_say), log=_say, slip=args.slip)
+    noise = report.get("noise") or {}
+    sigma = noise.get("vaa", {}).get("sigma")
+    _say(f"sigma VAA {sigma}, sigma ok {noise.get('sigma_ok')}; recipe {report['recipe']}")
+    for name, decision in report["decisions"].items():
+        _say(f"  {name}: {'ADOPT' if decision['adopt'] else 'keep D'} ({decision['reason']})")
+    _say(f"-> {out}")
+    return 0
+
+
+def cmd_sweep_sizes(args: argparse.Namespace) -> int:
+    from blink.train import sweep
+
+    try:
+        sizes = [s for s in (args.sizes or "").split(",") if s] or None
+        setup = sweep.load_size_sweep(_repo_config(args.config, "sweep.toml"), sizes=sizes, hours=args.hours)
+        bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(f"blink sweep sizes: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    if args.dry_run:
+        _say(f"sizes {setup.sizes} ({setup.conditional} only above the epoch floor), {setup.hours} h each")
+        return 0
+    out = _home_eval("sweep.json", args.out)
+    rules = sweep.load_rules(_repo_config(args.config, "sweep.toml"))
+    report = sweep.run_sizes(setup, bench, out, sweep.supervised_runner(_say), log=_say, rules=rules)
+    for size, entry in report["sizes"].items():
+        _say(f"  {size}: {entry['status']}, VAA {entry.get('vaa')}, {entry.get('samples_per_s')} samples/s")
+    return 0
+
+
+def _sigma(args: argparse.Namespace) -> float:
+    if args.sigma is not None:
+        return args.sigma
+    noise = _read_json(_home_eval("ablations.json", args.ablations), "ablations.json").get("noise") or {}
+    if "vaa" not in noise:
+        raise ValueError("ablations.json has no noise floor yet (a01-a03); pass --sigma")
+    return float(noise["vaa"]["sigma"])
+
+
+def cmd_sweep_choose(args: argparse.Namespace) -> int:
+    from blink.train import sweep
+
+    sweep_path = _home_eval("sweep.json", args.sweep)
+    try:
+        bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
+        state = _read_json(sweep_path, "sweep.json")
+        config = _repo_config(args.config, "sweep.toml")
+        rules = sweep.load_rules(config) if config.is_file() else sweep.ChooseRules()
+        choice = sweep.choose(bench, state.get("sizes", {}), _sigma(args), rules)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(f"blink sweep choose: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    from blink.train.atomic import write_text_atomic
+
+    write_text_atomic(sweep_path, json.dumps({**state, "choice": choice}, indent=2) + "\n")
+    for size, entry in choice["sizes"].items():
+        _say(
+            f"  {size}: {'eligible' if entry['eligible'] else 'out'} ({entry['reason']}), VAA {entry['vaa']}"
+        )
+    _say(f"N* = {choice['n_star']} ({choice['reason']})")
+    return 0 if choice["n_star"] else 1
+
+
+def _register_sweep(sub: argparse._SubParsersAction) -> None:
+    sweep = sub.add_parser("sweep", help="recipe ablations (P5), the size sweep and the N* choice (P6)")
+    actions = sweep.add_subparsers(dest="sweep_command", required=True)
+    abl = actions.add_parser("ablations", help="run the ablation arms in order (resumable)")
+    abl.add_argument("--plan", help="default: configs/ablations/plan.toml")
+    abl.add_argument(
+        "--rate", type=float, help="samples/s instead of bench.json's best row for the plan's size"
+    )
+    abl.add_argument(
+        "--slip", action="store_true", help="apply the P5 slip rule: drop the plan's slip_cut arms"
+    )
+    sizes = actions.add_parser("sizes", help="S, M, M12 (and L above the epoch floor) at equal hours")
+    sizes.add_argument("--sizes", help="default: the sizes and conditional sizes of configs/sweep.toml")
+    sizes.add_argument("--hours", type=float)
+    choose = actions.add_parser("choose", help="N*: epoch floor > best 6 h VAA > default M")
+    choose.add_argument("--sweep", help="sweep.json (default BLINK_HOME/eval/sweep.json)")
+    choose.add_argument(
+        "--ablations", help="ablations.json, for sigma (default BLINK_HOME/eval/ablations.json)"
+    )
+    choose.add_argument("--sigma", type=float, help="the a01-a03 VAA sigma, instead of ablations.json")
+    for parser in (abl, sizes, choose):
+        parser.add_argument("--bench", help="bench.json (default BLINK_HOME/eval/bench.json)")
+    for parser in (sizes, choose):
+        parser.add_argument("--config", help="default: configs/sweep.toml")
+    for parser in (abl, sizes):
+        parser.add_argument("--out", help="the resumable state file (default under BLINK_HOME/eval)")
+        parser.add_argument("--dry-run", action="store_true", help="print what would run and stop")
+    abl.set_defaults(func=cmd_sweep_ablations)
+    sizes.set_defaults(func=cmd_sweep_sizes)
+    choose.set_defaults(func=cmd_sweep_choose)
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     _register_ops(sub)
     _register_supervise(sub)
     _register_bench(sub)
+    _register_sweep(sub)

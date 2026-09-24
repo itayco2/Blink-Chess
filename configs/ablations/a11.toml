@@ -1,0 +1,5 @@
+# a11: peak learning rate x0.5. Judged on VAA.
+[arm]
+change = "LR x0.5"
+judged_on = "vaa"
+peak_lr_scale = 0.5
