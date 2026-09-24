@@ -235,6 +235,10 @@ def pack(cfg: PackConfig) -> dict:
     return manifest
 
 
+def read_timing(pack_dir: Path) -> dict:
+    return json.loads((Path(pack_dir) / TIMING).read_text(encoding="utf-8"))
+
+
 def read_manifest(pack_dir: Path) -> dict:
     return json.loads((Path(pack_dir) / MANIFEST).read_text(encoding="utf-8"))
 
