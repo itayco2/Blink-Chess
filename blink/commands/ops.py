@@ -12,6 +12,7 @@ Torch is imported only inside the commands that need it, so `blink --help` works
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from blink import paths
 
@@ -142,6 +143,112 @@ def _register_supervise(sub: argparse._SubParsersAction) -> None:
     sup.set_defaults(func=cmd_supervise)
 
 
+# ---------------------------------------------------------------- bench
+
+
+def _ints(text: str) -> list[int]:
+    return [int(part) for part in text.split(",") if part]
+
+
+def _bench_out(args: argparse.Namespace) -> Path:
+    return Path(args.out) if args.out else paths.home() / "eval" / "bench.json"
+
+
+def cmd_bench_throughput(args: argparse.Namespace) -> int:
+    from blink.train import bench
+
+    try:
+        sizes = [bench.resolve_size(size) for size in args.sizes.split(",") if size]
+        specs = [
+            bench.ThroughputSpec(
+                name, path, micro, mode, args.steps, args.warmup, args.effective, args.device
+            )
+            for name, path in sizes
+            for micro in _ints(args.micro)
+            for mode in args.compile.split(",")
+        ]
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"blink bench throughput: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    machine = bench.machine_facts(args.device)
+    rows = bench.run_throughput(specs, log=_say)
+    bench.update_bench(_bench_out(args), "throughput", rows, machine)
+    _say(f"{len(rows)} throughput rows -> {_bench_out(args)}")
+    return 0
+
+
+def cmd_bench_loader(args: argparse.Namespace) -> int:
+    from blink.baselines.train import root_shards
+    from blink.train import bench
+
+    data = Path(args.data) if args.data else paths.home() / "data" / "skeleton"
+    try:
+        shards = root_shards(data)
+    except FileNotFoundError as exc:
+        print(f"blink bench loader: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    result = bench.measure_loader(shards, batch_size=args.batch, passes=args.passes)
+    for row in result["passes"]:
+        _say(
+            f"loader pass {row['pass']}: {row['records']:,} records in {row['seconds']:.2f} s, "
+            f"{row['samples_per_s']:,.0f} samples/s, {row['read_mb_per_s']:,.1f} MB/s"
+        )
+    bench.update_bench(_bench_out(args), "loader", {str(data): result})
+    return 0
+
+
+def cmd_bench_play(args: argparse.Namespace) -> int:
+    from blink.train import bench
+
+    try:
+        sizes = [bench.resolve_size(size) for size in args.sizes.split(",") if size]
+    except FileNotFoundError as exc:
+        print(f"blink bench play: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    specs = [
+        bench.PlaySpec(name, path, rows, concurrency, args.iters, args.warmup, args.device)
+        for name, path in sizes
+        for rows in _ints(args.rows)
+        for concurrency in _ints(args.concurrency)
+    ]
+    machine = bench.machine_facts(args.device)
+    rows = bench.run_play(specs, log=_say)
+    bench.update_bench(_bench_out(args), "play", rows, machine)
+    return 0
+
+
+def _register_bench(sub: argparse._SubParsersAction) -> None:
+    bench = sub.add_parser("bench", help="measured throughput, loader and play latency into bench.json")
+    actions = bench.add_subparsers(dest="bench_command", required=True)
+    throughput = actions.add_parser("throughput", help="training samples/s and peak VRAM per size")
+    throughput.add_argument("--sizes", default="s,m,m12,l", help="configs/<size>.toml names or .toml paths")
+    throughput.add_argument("--micro", default="256,512,1024")
+    throughput.add_argument("--compile", default="off,inductor,cudagraphs")
+    throughput.add_argument("--steps", type=int, default=20, help="timed optimizer steps per row")
+    throughput.add_argument(
+        "--warmup", type=int, default=5, help="untimed steps first (compile happens here)"
+    )
+    throughput.add_argument("--effective", type=int, default=1024, help="effective batch (accumulation)")
+    throughput.set_defaults(func=cmd_bench_throughput)
+    loader = actions.add_parser("loader", help="ShardLoader samples/s and read MB/s")
+    loader.add_argument("--data", help="a shard directory (default BLINK_HOME/data/skeleton)")
+    loader.add_argument("--batch", type=int, default=1024)
+    loader.add_argument("--passes", type=int, default=2)
+    loader.set_defaults(func=cmd_bench_loader)
+    play = actions.add_parser("play", help="value-mode latency at 1 and L+1 rows, 1/2/5 processes")
+    play.add_argument("--sizes", default="s,m,m12,l")
+    play.add_argument("--rows", default="1,219")
+    play.add_argument("--concurrency", default="1,2,5")
+    play.add_argument("--iters", type=int, default=200)
+    play.add_argument("--warmup", type=int, default=20)
+    for parser in (throughput, loader, play):
+        parser.add_argument("--out", help="bench.json path (default BLINK_HOME/eval/bench.json)")
+    for parser in (throughput, play):
+        parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    play.set_defaults(func=cmd_bench_play)
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     _register_ops(sub)
     _register_supervise(sub)
+    _register_bench(sub)
