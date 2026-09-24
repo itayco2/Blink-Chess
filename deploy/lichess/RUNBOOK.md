@@ -100,10 +100,13 @@ uv run blink lichess config --only rated --model ship --mode <shipped mode>
 uv run blink lichess check-config --config D:\blink-bot\config.yml
 ```
 
-`check-config` exits 0 only with `0 problems`. For the rated config it also compares the recorded
-sha256 and mode with `shipped` in `results/results.json` and with the weights file itself, so a
-config that points at anything but the evaluated model fails. `--sha <sha>` makes the generator
-refuse a weights file with a different hash.
+`check-config` exits 0 only with `0 problems`, and it fails closed: anything it cannot verify is a
+problem, not a note. The engine exe must exist. For the rated config the weights file must be found
+and hash to the recorded sha256 (all 64 hex digits), and `results/results.json` (run it from the
+repo root) must exist and name the shipped model, whose sha and mode the config must match; so a
+config that points at anything but the evaluated model fails. `--results none` skips only the
+results.json comparison, on purpose, and says so. `--sha <sha>` makes the generator refuse a weights
+file with a different hash.
 
 ## 6. Casual smoke (gate G5, during P7, CPU)
 

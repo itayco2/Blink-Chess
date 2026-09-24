@@ -283,8 +283,10 @@ def test_generated_configs_are_ascii_json_that_yaml_reads_the_same(tmp_path):
         assert json.loads(text) == botconfig.load_config(path)
 
 
-def test_the_cli_generates_both_configs_and_check_config_passes_them(tmp_path, capsys):
+def test_the_cli_generates_both_configs_and_check_config_passes_them(monkeypatch, tmp_path, capsys):
     weights = fake_weights(tmp_path)
+    monkeypatch.setattr(botconfig, "weights_file", lambda selector: weights)  # torch-free too
+    monkeypatch.setattr(botconfig, "engine_present", lambda path: True)  # no bot install on CI
     out = tmp_path / "bot"
     argv = ["lichess", "config", "--model", str(weights), "--mode", "policy", "--sha", SHA]
     assert cli.main([*argv, "--casual-model", "run:preview:ema", "--out-dir", str(out)]) == 0
@@ -402,3 +404,73 @@ def test_two_engines_started_at_once_from_the_rated_flags_write_two_whole_logs(t
     for path in logs:
         records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         assert [(r["game"], r["ply"]) for r in records] == [("g1", 0), ("g1", 1), ("g1", 2)]
+
+
+# ---------------------------------------------------------------- the rated check fails closed
+# check-config is the gate before the rated bot starts: anything it cannot verify is a problem, not a
+# note, so a config whose engine cannot start or whose model cannot be checked never reads 0 problems.
+
+
+def rated_file(tmp_path: Path) -> tuple[Path, Path]:
+    weights = fake_weights(tmp_path)
+    spec = botconfig.BotSpec(str(weights), "value", SHA)
+    written = botconfig.generate(spec, tmp_path / "bot", kinds=("rated",), resolve=lambda s: weights)
+    return written["rated"], weights
+
+
+def results_file(tmp_path: Path, shipped: results_schema.Shipped | None) -> Path:
+    results = results_schema.Results(
+        strength=(),
+        diagnostics=(),
+        shipped=shipped,
+        eval_md_sha="e" * 12,
+        generated_at="2026-10-08T12:00:00+03:00",
+    )
+    path = tmp_path / "results.json"
+    path.write_text(results_schema.to_json(results), encoding="utf-8")
+    return path
+
+
+def check(path: Path, weights: Path | None, results: Path | None = None, exe: bool = True):
+    return botconfig.check_file(path, results=results, resolve=lambda s: weights, exists=lambda p: exe)
+
+
+def test_a_rated_check_passes_only_against_the_shipped_model_in_results_json(tmp_path):
+    path, weights = rated_file(tmp_path)
+    shipped = results_schema.Shipped(agent="Blink-M", mode="value", sha=SHA)
+    assert check(path, weights, results_file(tmp_path, shipped)).problems == ()
+
+
+def test_a_rated_check_fails_closed_without_results_json_or_a_shipped_model_in_it(tmp_path):
+    path, weights = rated_file(tmp_path)
+    missing = check(path, weights, tmp_path / "absent.json").problems
+    assert any("absent.json" in p and "--results none" in p for p in missing), missing
+    unshipped = check(path, weights, results_file(tmp_path, None)).problems
+    assert any("no shipped model" in p for p in unshipped), unshipped
+    skipped = check(path, weights, None)  # --results none: skipped on purpose, and said so
+    assert skipped.problems == () and any("--results none" in n for n in skipped.notes)
+
+
+def test_a_rated_check_fails_when_the_weights_file_cannot_be_found(tmp_path):
+    path, _ = rated_file(tmp_path)
+    found = check(path, None).problems
+    assert any("weights file" in p and "cannot be found" in p for p in found), found
+
+
+@pytest.mark.parametrize("kind", ["rated", "casual"])
+def test_check_config_fails_when_the_engine_exe_does_not_exist(tmp_path, kind):
+    weights = fake_weights(tmp_path)
+    spec = botconfig.BotSpec(str(weights), "value", SHA)
+    path = botconfig.generate(spec, tmp_path / "bot", kinds=(kind,), resolve=lambda s: weights)[kind]
+    found = check(path, weights, exe=False).problems
+    assert any("blink-uci.exe" in p and "does not exist" in p for p in found), found
+
+
+def test_a_rated_config_records_the_full_sha256_of_its_weights(tmp_path):
+    rated = copy.deepcopy(generate(tmp_path)["rated"])
+    rated["blink"]["sha"] = SHA[:12]
+    assert any("64 hex" in p for p in botconfig.problems(rated, "rated", frozenset()))
+    spec = botconfig.BotSpec(model="C:/nowhere/missing.pt", mode="value", sha="abcdef1")
+    with pytest.raises(botconfig.ConfigError, match="64 hex"):
+        botconfig.generate(spec, tmp_path / "out", kinds=("rated",), resolve=lambda selector: None)
+    assert not (tmp_path / "out" / "config.yml").exists()
