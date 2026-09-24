@@ -13,7 +13,9 @@ writes them as a v1-layout pack the trainer reads unchanged:
   sits in the shard of the first fixed root that implies it, so train_cNNN.bin holds the children of
   train_rNNN.bin's roots. Children of PVs beyond the fifth cannot be rebuilt from a root record; the
   roots that had them are counted in the manifest.
-- val_roots.bin (required), valprobe.npz and mateset.npz, copied from the source.
+- val_roots.bin and valprobe.npz (both required: s10m records top-1 on the first and VAA on the
+  second, and a run without a probe records no VAA at all) and mateset.npz when the source has one
+  (nothing s10m trains or evaluates reads it), copied from the source.
 - manifest.json, written last: the source's rebalance table, blocklist, split rule and grouped salt
   (what the trainer's world id reads), the fixed set's description, the child counts, and every
   file's records, bytes and sha256. It carries no timestamp, so rebuilding the same set gives the same
@@ -25,9 +27,10 @@ shard once.
 
 import hashlib
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -40,8 +43,14 @@ FORMAT = "blink-ladder-v1"
 DEFAULT_POSITIONS = 10_000_000
 REBUILD_CHUNK = 500_000  # roots per children_of call, bounding the RAM of the unpacked boards
 KEPT_PVS = 1 + NUM_ALTERNATIVES
-REQUIRED_EVAL = "val_roots.bin"
-EVAL_FILES = (REQUIRED_EVAL, "valprobe.npz", "mateset.npz")
+REQUIRED_EVAL: Mapping[str, str] = MappingProxyType(  # each file s10m reads, and what builds it
+    {
+        "val_roots.bin": "rebuild the v1 pack (blink data bigpack)",
+        "valprobe.npz": "run `blink data valprobe --pack {pack}` first",
+    }
+)
+OPTIONAL_EVAL = ("mateset.npz",)
+EVAL_FILES = (*REQUIRED_EVAL, *OPTIONAL_EVAL)
 SOURCE_KEYS = ("record_bytes", "blocklist", "split_rule", "grouped", "rebalance")
 SHARD_RULE = (
     "roots: train_rNNN.bin is the fixed set's front part of the source's train_rNNN.bin, in its order; "
@@ -88,8 +97,9 @@ def check_source(pack_dir: Path) -> dict[str, Any]:
             f"{pack_dir} has no rebalance table yet, so s10m would train unweighted: "
             f"run `blink data rebalance --pack {pack_dir}` first"
         )
-    if not (pack_dir / REQUIRED_EVAL).is_file():
-        raise FileNotFoundError(f"{pack_dir} has no {REQUIRED_EVAL}")
+    for name, remedy in REQUIRED_EVAL.items():
+        if not (pack_dir / name).is_file():
+            raise FileNotFoundError(f"{pack_dir} has no {name}: {remedy.format(pack=pack_dir)}")
     return manifest
 
 
@@ -188,13 +198,16 @@ def write_children(out: Path, kids: np.ndarray, rank: np.ndarray, shard: np.ndar
     return entries
 
 
-def copy_eval_files(source: Path, out: Path) -> dict[str, dict]:
+def copy_eval_files(source: Path, out: Path, log: Log) -> dict[str, dict]:
+    """The required files (check_source found them) and each optional one the source has."""
     entries = {}
     for name in EVAL_FILES:
-        if (source / name).is_file():
-            data = (source / name).read_bytes()
-            pack.write_atomic(out / name, data)
-            entries[name] = _entry(data, source=str(source / name))
+        if not (source / name).is_file():
+            log(f"ladder: {name} is not in the source, so the ladder pack has none")
+            continue
+        data = (source / name).read_bytes()
+        pack.write_atomic(out / name, data)
+        entries[name] = _entry(data, source=str(source / name))
     return entries
 
 
@@ -235,7 +248,7 @@ def build(cfg: LadderConfig, log: Log = print) -> dict[str, Any]:
         },
         **{key: source[key] for key in SOURCE_KEYS if key in source},
         "shards": shards,
-        "eval_files": copy_eval_files(source_dir, out),
+        "eval_files": copy_eval_files(source_dir, out, log),
     }
     check_written(out, description)
     return bigpack.write_manifest(out, manifest)

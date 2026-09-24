@@ -4,7 +4,8 @@ SF19 via fastchess).
 The ladder's rungs are sides like any model: random (rung 0), material (rung 1) and the learned
 baselines linear, mlp (BLINK_HOME/runs/baseline-<kind>/model.pt) or baseline:<path> (rungs 2 and 3).
 Material and the learned rungs play value mode through the one ValueAgent and rules R1-R5 Blink's value
-mode uses. The learned rungs import torch only when one plays, so `blink --help` stays torch-free.
+mode uses; their policy is flat, so their R4 ties are drawn with the side's seed (ValueAgent.tie_seed).
+The learned rungs import torch only when one plays, so `blink --help` stays torch-free.
 """
 
 import argparse
@@ -31,13 +32,20 @@ def is_baseline(side: str) -> bool:
     return side == MATERIAL or side in LEARNED_BASELINES or side.startswith(BASELINE_PREFIX)
 
 
-def baseline_side(side: str, device: str, epsilon: float) -> agents.ValueAgent:
-    """material, linear, mlp or baseline:<path>, in value mode with the match's epsilon (rule R4)."""
-    if side == MATERIAL:
-        return factory.material_agent(epsilon=epsilon)
-    from blink.baselines.evaluator import baseline_agent  # torch, only when a learned rung plays
+def baseline_side(side: str, device: str, epsilon: float, seed: int) -> agents.ValueAgent:
+    """material, linear, mlp or baseline:<path>, in value mode with the match's epsilon (rule R4).
 
-    return replace(baseline_agent(side.removeprefix(BASELINE_PREFIX), device=device), epsilon=epsilon)
+    A baseline's policy is flat, so its R4 ties are drawn by (seed, game, position), as MaterialAgent's
+    were. Always taking the lowest vocab index, material shuffled its king while random repeated the
+    position: 15 of 20 dev games drawn by threefold repetition, material 7 to 15 points up.
+    """
+    if side == MATERIAL:
+        agent = factory.material_agent()
+    else:
+        from blink.baselines.evaluator import baseline_agent  # torch, only when a learned rung plays
+
+        agent = baseline_agent(side.removeprefix(BASELINE_PREFIX), device=device)
+    return replace(agent, epsilon=epsilon, tie_seed=seed)
 
 
 def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> agents.Agent:
@@ -46,7 +54,7 @@ def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> 
     if side == "random":
         return agents.RandomAgent(seed=seed)
     if is_baseline(side):
-        return baseline_side(side, device, epsilon)
+        return baseline_side(side, device, epsilon, seed)
     if registry.is_dm(side):
         return registry.load_agent(side, device=device)
     evaluator = factory.load_evaluator(side, device=device, seed=seed)

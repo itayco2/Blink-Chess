@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import chess
@@ -14,15 +15,26 @@ from blink import cli
 from blink.commands import play as play_command
 from blink.eval import roundrobin
 from blink.play import agents, factory, rules
-from blink.play.oracles import MaterialEvaluator
+from blink.play.oracles import LADDER_CP_PER_POINT, MaterialEvaluator
 
 REPO = Path(__file__).resolve().parent.parent
 MATE_IN_ONE = "6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1"
 STALEMATE_TRAP = "k7/2K5/8/1P6/8/8/8/8 w - - 0 1"  # b5-b6 stalemates; no mate in one
+DEV_OPENINGS = (  # 8moves_v3 openings 1-10, the first the P3 gate plays on the dev slice
+    "1. Nf3 d5 2. g3 c6 3. Bg2 Nf6 4. d3 Bg4 5. h3 Bh5 6. b3 e6 7. Bb2 Qa5+ 8. Qd2 Qxd2+",
+    "1. d4 Nf6 2. c4 e6 3. Nf3 b6 4. g3 Ba6 5. Qa4 Bb7 6. Bg2 c5 7. dxc5 Bxc5 8. O-O Be7",
+    "1. d4 d6 2. c4 e5 3. d5 f5 4. e4 fxe4 5. Nc3 Nf6 6. Nge2 Bf5 7. Ng3 Bg6 8. Bg5 Nbd7",
+    "1. d4 Nf6 2. Bg5 e6 3. e4 h6 4. Bxf6 Qxf6 5. Nc3 Bb4 6. Qd2 d6 7. O-O-O Nd7 8. Kb1 O-O",
+    "1. d4 Nf6 2. c4 c6 3. Nc3 d5 4. cxd5 cxd5 5. Nf3 Nc6 6. Bf4 Qb6 7. Na4 Qa5+ 8. Bd2 Qd8",
+    "1. e4 c6 2. d4 d5 3. e5 Bf5 4. h4 h5 5. c4 e6 6. Nc3 Be7 7. Qb3 Qb6 8. c5 Qc7",
+    "1. e4 c5 2. Nf3 e6 3. c3 d5 4. e5 d4 5. Bd3 Bd7 6. O-O Bc6 7. b3 Ne7 8. cxd4 Ng6",
+    "1. e4 e6 2. d4 d5 3. Nd2 c5 4. exd5 exd5 5. Ngf3 Nf6 6. dxc5 Bxc5 7. Nb3 Be7 8. Be2 O-O",
+    "1. d4 d5 2. c4 c6 3. Nc3 e6 4. e4 Bb4 5. Bd2 dxc4 6. Qg4 Bf8 7. Bxc4 Qxd4 8. Qe2 Qd8",
+    "1. d4 e6 2. Nf3 Nf6 3. Bf4 c5 4. c3 cxd4 5. cxd4 Qb6 6. Qc2 Nc6 7. e3 Nb4 8. Qb3 Nbd5",
+)
 
 
-def write_book(path: Path) -> Path:
-    games = ["1. e4 e5 2. Nf3 Nc6", "1. d4 d5 2. c4 e6", "1. c4 c5"]
+def write_book(path: Path, games=("1. e4 e5 2. Nf3 Nc6", "1. d4 d5 2. c4 e6", "1. c4 c5")) -> Path:
     path.write_text(
         "\n\n".join(f'[Event "?"]\n[Result "*"]\n\n{g} *' for g in games) + "\n", encoding="utf-8"
     )
@@ -56,8 +68,15 @@ def ladder_home(tmp_path, monkeypatch) -> Path:
 
 def test_the_match_plays_material_through_the_one_value_agent_every_baseline_uses():
     material = side("material")
-    assert material == agents.ValueAgent(MaterialEvaluator(), name="Material")
-    assert material == factory.material_agent()
+    ladder_value = MaterialEvaluator(cp_per_point=LADDER_CP_PER_POINT, exact=True)
+    assert material == agents.ValueAgent(ladder_value, name="Material", tie_seed=0)
+    assert material == replace(factory.material_agent(), tie_seed=0)
+
+
+def test_the_ladder_sides_draw_their_flat_ties_with_the_side_seed_and_blink_sides_never_do():
+    assert play_command.side_agent("material", "value", "cpu", 7, 0.0).tie_seed == 7
+    blink_value = play_command.side_agent("random-net", "value", "cpu", 7, 0.0)
+    assert isinstance(blink_value, agents.ValueAgent) and blink_value.tie_seed is None
 
 
 @pytest.mark.torch
@@ -76,13 +95,13 @@ def test_every_ladder_side_in_a_match_uses_the_same_agent_wrapper_and_rules(sele
 
 
 @pytest.mark.torch
-def test_the_match_sides_equal_the_baselines_own_agents_apart_from_epsilon(ladder_home):
+def test_the_match_sides_equal_the_baselines_own_agents_apart_from_epsilon_and_tie_seed(ladder_home):
     from blink.baselines import evaluator
 
-    assert side("material") == evaluator.baseline_agent("material")
+    assert side("material") == replace(evaluator.baseline_agent("material"), tie_seed=0)
     for kind, name in (("linear", "Linear"), ("mlp", "MLP")):
         agent = side(kind, epsilon=0.02)
-        assert agent.name == name and agent.epsilon == 0.02
+        assert agent.name == name and agent.epsilon == 0.02 and agent.tie_seed == 0
         assert type(agent.evaluator) is evaluator.BaselineEvaluator
     assert side("material", epsilon=0.02).epsilon == 0.02
 
@@ -181,6 +200,19 @@ def test_a_round_robin_plays_every_pair_on_the_same_openings(tmp_path, capsys):
     assert record["table"]["random"]["material"] == pytest.approx(1 - record["table"]["material"]["random"])
     printed = capsys.readouterr().out
     assert "random-net" in printed and "score" in printed and str(out / "round_robin.json") in printed
+
+
+def test_material_scores_at_least_90_percent_against_random_on_the_first_dev_openings(tmp_path, capsys):
+    """The P3 gate (>= 95% over 100 games) at a size a test can play. A sign bug scores <= 50%. Here a rung
+    that took the lowest vocab index among equal moves scored 57.5% (it shuffled its king while random
+    repeated the position), and one whose value stopped growing past +10 scored 85% (it gave pieces back
+    until the game was drawn by insufficient material)."""
+    out = tmp_path / "rr"
+    book = str(write_book(tmp_path / "dev10.pgn", DEV_OPENINGS))
+    argv = ["match", "--round-robin", "random,material", "--games", "20", "--book", book, "--device", "cpu"]
+    assert cli.main([*argv, "--out", str(out)]) == 0
+    record = json.loads((out / "round_robin.json").read_text(encoding="utf-8"))
+    assert record["table"]["material"]["random"] >= 0.9, capsys.readouterr().out
 
 
 @pytest.mark.torch

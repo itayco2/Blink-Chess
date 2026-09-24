@@ -241,6 +241,24 @@ def test_an_unfinished_or_unbalanced_pack_is_refused(source, tmp_path, edit, mes
     assert not (tmp_path / "out" / "manifest.json").exists()
 
 
+def test_a_source_without_a_valprobe_is_refused_since_s10m_would_record_no_vaa(source, tmp_path):
+    copy = _pack_copy(source, tmp_path)
+    (copy / "valprobe.npz").unlink()
+    with pytest.raises(FileNotFoundError, match="blink data valprobe"):
+        ladder.build(ladder.LadderConfig(pack=copy, out=tmp_path / "out", positions=10), log=lambda _: None)
+    assert not (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_a_source_without_a_mateset_builds_and_says_so(source, tmp_path):
+    assert not (source / "mateset.npz").exists()
+    lines: list[str] = []
+    manifest = ladder.build(
+        ladder.LadderConfig(pack=source, out=tmp_path / "o", positions=10), log=lines.append
+    )
+    assert set(manifest["eval_files"]) == {"val_roots.bin", "valprobe.npz"}
+    assert any("mateset.npz" in line and "not in the source" in line for line in lines)
+
+
 def test_more_positions_than_the_pack_holds_is_refused(source, tmp_path):
     with pytest.raises(ValueError, match="fewer than the 1,000,000"):
         ladder.build(

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from blink.board import encode, moves
-from blink.play import agents
+from blink.play import agents, factory, oracles, rules
 from blink.play.evaluator import Evaluation
 from blink.play.oracles import MaterialEvaluator, RandomLogitEvaluator, one_hot_value
 
@@ -135,6 +135,32 @@ def test_value_mode_wins_a_free_queen_with_an_oracle_evaluator():
         assert decision.win > 0.9
 
 
+def material_rows(balances) -> np.ndarray:
+    """One code row per balance: that many points as own queens, then pawns (the opponent's when negative)."""
+    rows = np.full((len(balances), 64), encode.EMPTY, dtype=np.uint8)
+    for row, balance in zip(rows, balances, strict=True):
+        queens, pawns = divmod(abs(int(balance)), 9)
+        base = encode.OWN if balance > 0 else encode.OPP
+        row[:queens] = base + chess.QUEEN - 1
+        row[queens : queens + pawns] = base + chess.PAWN - 1
+    return rows
+
+
+def test_the_ladder_material_value_ranks_every_balance_a_game_can_reach():
+    """The oracle's value saturates: past +10 value's 1,000 cp clamp gives every balance the same value, so
+    value mode could not tell a rook up from two queens up and let random win its pieces back (15 of 100
+    dev games drawn by insufficient material). Rung 1's value keeps every balance up to nine queens apart."""
+    balances = np.arange(-oracles.MAX_BALANCE, oracles.MAX_BALANCE + 1)
+    rows = material_rows(balances)
+    assert oracles.material_balance(rows).tolist() == balances.tolist()
+    ladder = oracles.MaterialEvaluator(cp_per_point=oracles.LADDER_CP_PER_POINT, exact=True)
+    win = ladder.evaluate(rows).win_probability()
+    assert (np.diff(win) > 0).all()
+    assert win[oracles.MAX_BALANCE] == pytest.approx(0.5, abs=1e-6)  # level material is worth a rule draw
+    saturated = MaterialEvaluator().evaluate(material_rows([14, 20])).win_probability()
+    assert saturated[0] == saturated[1]
+
+
 def test_mate_in_one_is_taken_with_a_random_network():
     for fen, mate in TWO_BACK_RANK_MATES.items():
         for agent_cls in (agents.PolicyAgent, agents.ValueAgent):
@@ -193,6 +219,53 @@ def test_value_mode_breaks_exact_ties_by_the_root_policy_logit():
     decision = agents.ValueAgent(evaluator).choose(board)
     assert decision.move.uci() == "c2c4"
     assert "R4" in decision.rules
+
+
+def lowest_index_move(board: chess.Board) -> chess.Move:
+    return min(board.legal_moves, key=lambda move: moves.encode_move(board, move))
+
+
+def test_without_a_tie_seed_a_flat_policy_tie_goes_to_the_lowest_vocab_index():
+    board = chess.Board()  # every move keeps material level, and the material policy is flat: all 20 tie
+    for game in ("g1", "g2", "g3"):
+        decision = agents.ValueAgent(MaterialEvaluator()).choose(board, game=game)
+        assert decision.move == lowest_index_move(board) and "R4" in decision.rules
+
+
+def test_a_tie_seed_draws_a_flat_policy_tie_by_seed_game_and_position():
+    board = chess.Board()
+    agent = agents.ValueAgent(MaterialEvaluator(), tie_seed=3)
+    picks = [agent.choose(board, game=f"g{k}") for k in range(12)]
+    assert len({pick.move for pick in picks}) > 1
+    assert all("R4" in pick.rules and (pick.n_calls, pick.n_rows) == (1, 21) for pick in picks)
+    assert [agent.choose(board, game=f"g{k}").move for k in range(12)] == [pick.move for pick in picks]
+    other_seed = agents.ValueAgent(MaterialEvaluator(), tie_seed=4)
+    assert [other_seed.choose(board, game=f"g{k}").move for k in range(12)] != [pick.move for pick in picks]
+
+
+def test_a_tie_seed_draws_again_when_a_position_repeats_with_new_move_counters():
+    """The FEN's move counters are in the draw, so a baseline shuffling pieces does not retrace its steps
+    while its opponent repeats the position (what drew material against random by threefold repetition)."""
+    start, again = chess.Board(), board_after(KNIGHT_SHUFFLE[:4])
+    assert rules.repetition_key(start) == rules.repetition_key(again) and start.fen() != again.fen()
+    agent = agents.ValueAgent(MaterialEvaluator(), tie_seed=0)
+    first = [agent.choose(start, game=f"g{k}").move for k in range(12)]
+    assert [agent.choose(again, game=f"g{k}").move for k in range(12)] != first
+
+
+def test_a_tie_seed_never_overrides_a_better_value_or_a_higher_root_logit():
+    board = chess.Board()
+    better = TableEvaluator({key(after(board, "e2e4")): 0.2})
+    higher = TableEvaluator({}, {index_of(board, "d2d4"): 1.0})
+    for game in ("g1", "g2", "g3", "g4"):
+        assert agents.ValueAgent(better, tie_seed=5).choose(board, game=game).move.uci() == "e2e4"
+        assert agents.ValueAgent(higher, tie_seed=5).choose(board, game=game).move.uci() == "d2d4"
+
+
+def test_blinks_own_agents_carry_no_tie_seed():
+    """N4, no randomisation: only the ladder's flat-policy baselines draw their ties."""
+    assert agents.ValueAgent(RandomLogitEvaluator()).tie_seed is None
+    assert factory.make_agent("value", RandomLogitEvaluator()).tie_seed is None
 
 
 def test_the_clock_guard_switches_value_mode_to_one_look():

@@ -52,6 +52,11 @@ def _probe(args: argparse.Namespace, root: Path | None):
     if path is None and root is not None and (root / "valprobe.npz").is_file():
         path = root / "valprobe.npz"
     if path is None:
+        print(
+            "valprobe: none, so VAA will not be recorded "
+            "(pass --valprobe, or build DATA/valprobe.npz with `blink data valprobe`)",
+            flush=True,
+        )
         return None
     probe = vaa.load_probe(path)
     print(f"valprobe: {probe.n_roots:,} roots, {len(probe.child_board):,} children from {path}", flush=True)

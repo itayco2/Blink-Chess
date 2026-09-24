@@ -196,6 +196,20 @@ def test_a_v1_pack_mixes_root_and_child_shards_with_the_manifest_weights(
     assert all("ema_vaa" in row for row in evals) and "vaa" in evals[-1] and evals[-1]["vaa_n"] == 12
 
 
+def test_a_pack_without_a_valprobe_says_vaa_will_not_be_recorded(tmp_path, capsys):
+    from argparse import Namespace
+
+    from blink.commands import train_data
+    from blink.model.config import TrainConfig
+
+    _v1_pack(tmp_path / "v1", weights=[1.0] * 48)
+    (tmp_path / "v1" / "valprobe.npz").unlink()
+    cfg = TrainConfig(batch_size=20, child_frac=0.25, val_size=8)
+    plan = train_data.plan(Namespace(source_raw=None, data=str(tmp_path / "v1"), valprobe=None), cfg)
+    assert plan.probe is None
+    assert "valprobe: none, so VAA will not be recorded" in capsys.readouterr().out
+
+
 def test_a_v1_world_names_the_packs_blocklist_sha_and_grouped_salt():
     """WORLD = sha1(contract, manifest sha, blocklist sha, split rule and salt): the v1 keys feed it."""
     import hashlib
