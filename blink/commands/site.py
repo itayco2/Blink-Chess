@@ -1,4 +1,4 @@
-"""`blink site serve | stage | smoke | pieces | vendor`: the browser page, its deploy tree and its checks."""
+"""`blink site serve | stage | smoke | bench | replay | pieces | vendor`: the browser page and its checks."""
 
 import argparse
 import json
@@ -48,6 +48,22 @@ def _cmd_smoke(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _cmd_replay(args: argparse.Namespace) -> int:
+    from blink import paths
+    from blink.site import replay
+
+    try:
+        run = replay.run_dir(paths.home() / "runs", args.run)
+    except replay.ReplayError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    summary = replay.build(run, Path(args.out), every=args.every)
+    print(json.dumps(summary, indent=2))
+    rows = f"{summary['metrics_rows']} metrics rows and {summary['evals_rows']} eval rows"
+    print(f"ok: {rows} (one per {args.every:,} steps) in {args.out}")
+    return 0
+
+
 def _cmd_pieces(args: argparse.Namespace) -> int:
     from blink.site import pieces
 
@@ -87,6 +103,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     smoke_cmd.add_argument("--seed", type=int, default=0)
     smoke_cmd.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for the model")
     smoke_cmd.set_defaults(func=_cmd_smoke)
+
+    replay_cmd = tasks.add_parser(
+        "replay", help="freeze a run's curves into site/replay (1 row per 2,000 steps)"
+    )
+    replay_cmd.add_argument("--run", required=True, help="a run under BLINK_HOME/runs")
+    replay_cmd.add_argument("--every", type=int, default=2000, help="steps per kept row")
+    replay_cmd.add_argument("--out", default=str(SITE_DIR / "replay"))
+    replay_cmd.set_defaults(func=_cmd_replay)
 
     pieces_cmd = tasks.add_parser("pieces", help="build the cburnett sprite from the 12 Commons SVGs")
     pieces_cmd.add_argument("--src", required=True, help="directory holding Chess_{k,q,r,b,n,p}{l,d}t45.svg")

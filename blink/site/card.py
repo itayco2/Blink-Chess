@@ -80,7 +80,7 @@ def render(card: dict) -> str:
 def write(card: dict, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(render(card), encoding="utf-8")
+    tmp.write_text(render(card), encoding="utf-8", newline="\n")
     os.replace(tmp, path)
     return path
 

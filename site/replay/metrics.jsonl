@@ -1,0 +1,3 @@
+{"step": 1, "loss_policy": 7.539027214050293, "loss_value": 4.852029800415039, "lr": 5e-06, "grad_norm": 0.9368518590927124, "clip_frac": 0.0, "samples_per_s": 453.9757279024756, "gpu_mem_gb": 0.23828125}
+{"step": 2000, "loss_policy": 3.2767340087890626, "loss_value": 3.371332702636719, "lr": 0.001, "grad_norm": 5.832557983398438, "clip_frac": 1.0, "samples_per_s": 19001.004381190913, "gpu_mem_gb": 0.314453125}
+{"step": 3000, "loss_policy": 2.942666320800781, "loss_value": 3.2521603393554686, "lr": 0.0, "grad_norm": 5.1985931396484375, "clip_frac": 1.0, "samples_per_s": 19125.30992672489, "gpu_mem_gb": 0.314453125}

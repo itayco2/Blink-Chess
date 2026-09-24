@@ -263,5 +263,5 @@ def test_a_model_the_web_runtime_cannot_load_is_an_error_that_carries_nodes_mess
         pytest.skip("node or site/node_modules is absent (run npm ci --prefix site)")
     junk = tmp_path / "model.onnx"
     junk.write_bytes(b"not a model")
-    with pytest.raises(qgate.GateError, match="the web runtime stopped \(exit 1\): .*Error"):
+    with pytest.raises(qgate.GateError, match=r"the web runtime stopped \(exit 1\): .*Error"):
         qgate.WebRuntime([junk])

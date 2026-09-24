@@ -127,7 +127,7 @@ def _cmd_qgate(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     gate = report.to_dict()
-    int8.with_name("qgate.json").write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8")
+    int8.with_name("qgate.json").write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8", newline="\n")
     card_path = int8.with_name(card.CARD_FILE)
     if card_path.is_file():
         card.write(card.with_gate(card.read(card_path), gate), card_path)
