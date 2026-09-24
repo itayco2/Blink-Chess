@@ -139,8 +139,12 @@ def test_a_loader_without_records_is_refused(tmp_path):
         ShardLoader([empty], batch_size=4, seed=0)
     with pytest.raises(ValueError, match="no shard"):
         ShardLoader([], batch_size=4, seed=0)
-    with pytest.raises(ValueError, match="batch_size"):
+    with pytest.raises(ValueError, match="batch_size=0"):
         ShardLoader([empty], batch_size=0, seed=0)
+    with pytest.raises(ValueError, match="seed=-1"):
+        ShardLoader([empty], batch_size=4, seed=-1)
+    with pytest.raises(ValueError, match="start_batch=-3"):
+        ShardLoader([empty], batch_size=4, seed=0, start_batch=-3)
 
 
 def test_the_prefetch_thread_stops_when_the_consumer_stops(shards):

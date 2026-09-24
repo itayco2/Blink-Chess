@@ -82,7 +82,10 @@ class ShardLoader:
         if not paths:
             raise ValueError("ShardLoader got no shard paths")
         if batch_size < 1 or seed < 0 or start_batch < 0:
-            raise ValueError(f"need batch_size >= 1, seed >= 0, start_batch >= 0; got {batch_size}, {seed}")
+            raise ValueError(
+                "need batch_size >= 1, seed >= 0, start_batch >= 0; "
+                f"got batch_size={batch_size}, seed={seed}, start_batch={start_batch}"
+            )
         self.paths = tuple(Path(p) for p in paths)
         self.batch_size = batch_size
         self.seed = seed
