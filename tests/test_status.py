@@ -116,3 +116,15 @@ def test_a_running_trainer_is_live_before_its_first_step(tmp_path):
         release.set()
         worker.join(timeout=120)
     assert status.run_status(spec.run_dir).state == "finished"
+
+
+def test_the_status_text_shows_the_phase_clip_and_vaa_with_a_failed_check(tmp_path):
+    run_dir = _run(tmp_path)
+    heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 60, "steps": 100}, now=1.0)
+    metrics = {"step": 60, "loss_policy": 3.2, "phase": "eval", "clip": 12.5, "clip_frac": 0.02}
+    (run_dir / "metrics.jsonl").write_text(json.dumps(metrics) + "\n", encoding="utf-8")
+    failed = {"step": 5, "check": "5%", "vaa": 0.31, "ema_vaa": 0.33, "vaa_check_failed": {"check": "5%"}}
+    (run_dir / "evals.jsonl").write_text(json.dumps(failed) + "\n", encoding="utf-8")
+    text = status.format_status(status.run_status(run_dir, now=2.0))
+    assert "[eval]" in text and "clip 12.5" in text
+    assert "VAA 0.31 (ema 0.33)" in text and "check 5% FAILED" in text
