@@ -1,5 +1,6 @@
 """DeepMindAgent: DeepMind's released ActionValueEngine play logic, L rows per decision, no fallback."""
 
+import io
 from pathlib import Path
 
 import chess
@@ -164,3 +165,12 @@ def test_with_the_real_weights_the_agent_plays_the_jax_argmax():
         assert decision.move.uci() == saved["moves"][start + int(np.argmax(win))]
         checked += 1
     assert checked >= 10
+
+
+def test_through_uci_the_rows_carry_the_counters_of_the_move_history():
+    scorer = WinTable()
+    engine = uci.UciEngine(lambda: dm_agent.DeepMindAgent(scorer), io.StringIO())
+    for line in ("uci", "isready", "position startpos moves e2e4 e7e5 g1f3 b8c6 f1c4 g8f6", "go wtime 1000"):
+        engine.handle(line)
+    counters = "".join(deepmind.CHARACTERS[t] for t in scorer.calls[-1][0, 71:77])
+    assert counters == "4..4.."  # halfmove 4 (Nf3 Nc6 Bc4 Nf6 since 2...e5), fullmove 4, not "0 1"

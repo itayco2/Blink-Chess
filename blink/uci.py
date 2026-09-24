@@ -169,21 +169,21 @@ def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout:
     stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
     selector = "random" if args.random else args.model
-    deepmind = registry.is_dm(selector)
+    is_deepmind = registry.is_dm(selector)
     try:
-        (registry.check_available if deepmind else factory.check_available)(selector)
+        (registry.check_available if is_deepmind else factory.check_available)(selector)
     except factory.ModelUnavailable as exc:
         print(f"blink-uci: {exc}", file=sys.stderr)
         return 2
     sink = factory.JsonlSink(args.log) if args.log else None
 
     def make() -> Agent:
-        if deepmind:  # DeepMind's released play logic: L rows per move, no Blink mode
+        if is_deepmind:  # DeepMind's released play logic: L rows per move, no Blink mode
             return registry.load_agent(selector, device=args.device, sink=sink)
         evaluator = factory.load_evaluator(selector, device=args.device, seed=args.seed)
         return factory.make_agent(args.mode, evaluator, epsilon=args.epsilon, sink=sink)
 
-    name = args.name or (registry.parse(selector).name if deepmind else f"{ENGINE_NAME}-{args.mode}")
+    name = args.name or (registry.parse(selector).name if is_deepmind else f"{ENGINE_NAME}-{args.mode}")
     engine = UciEngine(make, stdout, name=name)
     for line in iter(stdin.readline, ""):
         if not engine.handle(line.strip()):
