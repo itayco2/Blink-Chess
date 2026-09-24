@@ -117,3 +117,24 @@ def test_blink_rate_reports_fitted_and_unfittable_players(tmp_path, monkeypatch,
     assert json.loads((tmp_path / "o" / "rating.json").read_text(encoding="utf-8"))["excluded"] == {
         "A": "all losses"
     }
+
+
+def test_blink_rate_rates_exactly_the_pgns_a_list_names(tmp_path, monkeypatch, capsys):
+    listed, stray = tmp_path / "listed.pgn", tmp_path / "stray.pgn"
+    for path in (listed, stray):
+        path.write_text('[White "A"]\n[Black "SF1320"]\n[Result "0-1"]\n\n1. e4 0-1\n', encoding="utf-8")
+    (tmp_path / "list.txt").write_text(f"# rated by results.json\n{listed}\n\n", encoding="utf-8")
+    rated = []
+
+    def fake_run(files, anchors, out, simulations):
+        rated.extend(files)
+        out.mkdir(parents=True, exist_ok=True)
+        tally = rating.tally_players(files)
+        return rating.OrdoFit((), (), rating.unfittable(tally, anchors), tally, ("ordo",), {})
+
+    monkeypatch.setattr(rating, "run_ordo", fake_run)
+    args = ["rate", "--pgn-list", str(tmp_path / "list.txt"), "--out", str(tmp_path / "o")]
+    assert cli.main(args) == 0 and rated == [listed]
+    (tmp_path / "list.txt").write_text(f"{tmp_path / 'gone.pgn'}\n", encoding="utf-8")
+    assert cli.main(args) == 2
+    assert "gone.pgn" in capsys.readouterr().err

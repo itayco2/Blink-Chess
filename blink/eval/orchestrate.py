@@ -47,6 +47,7 @@ BUSY_CPU_PCT = 25.0
 # A smoke run's few games can leave Ordo's error simulations crawling (40 games: 20 simulations > 100 s).
 SMOKE_ORDO_SIMULATIONS = 100
 SMOKE_ORDO_TIMEOUT_S = 120
+FINAL_SLICE_LIST = "final_slice_pgns.txt"  # next to results.json: the exact PGNs its Elo was fitted on
 CPU_SAMPLE_S = 3.0
 # The blocks after E2b whose Blink plays with the epsilon E2b chose (in process or under fastchess).
 EPSILON_BLOCKS = frozenset({"E3", "E4", "E4b", "E5", "E6", "E7", "E8"})
@@ -639,7 +640,11 @@ def _puzzle_fields(agent: str, state: dict) -> dict:
     return {"dm_puzzles_pct": 100 * done["accuracy"], "dm_puzzles_ci": (100 * low, 100 * high)}
 
 
-def strength_rows(fit, state: dict, shipped: str | None) -> tuple:
+def reproduce_command(listing: Path) -> str:
+    return f"uv run blink rate --pgn-list {Path(listing).as_posix()} --anchors configs/anchors.csv"
+
+
+def strength_rows(fit, state: dict, shipped: str | None, reproduce: str) -> tuple:
     from blink.report.results_schema import StrengthRow
 
     rows = []
@@ -654,7 +659,7 @@ def strength_rows(fit, state: dict, shipped: str | None) -> tuple:
             StrengthRow(
                 agent=agent,
                 kind=kind,
-                reproduce="uv run blink rate --pgn <eval out>/E5 --anchors configs/anchors.csv",
+                reproduce=reproduce,
                 sf_nodes_equiv=crossover if agent == shipped else None,
                 **fields,
                 **_puzzle_fields(agent, state),
@@ -687,20 +692,29 @@ def weights_sha(selector: str) -> str:
     return sha256_file(path) if Path(path).is_file() else f"unknown: no file at {path}"
 
 
-def build_results(state: dict, ctx: EvalContext, fit) -> object:
+def build_results(state: dict, ctx: EvalContext, fit, listing: Path | None = None) -> object:
     from blink.eval.fastchess import engine_name
     from blink.report.results_schema import Results, Shipped
 
     mode = (state.get("E3") or {}).get("mode") or ctx.mode
     shipped_name = engine_name(ctx.model, mode) if mode else None
     shipped = Shipped(shipped_name, mode, weights_sha(ctx.model)) if mode else None
+    reproduce = reproduce_command(listing or ctx.results_dir / FINAL_SLICE_LIST)
     return Results(
-        strength=strength_rows(fit, state, shipped_name) if fit is not None else (),
+        strength=strength_rows(fit, state, shipped_name, reproduce) if fit is not None else (),
         diagnostics=diagnostics_rows(state, mode),
         shipped=shipped,
         eval_md_sha=state["protocol"]["sha256"],
         generated_at=_now(),
     )
+
+
+def write_pgn_list(pgns: Sequence[Path], path: Path) -> Path:
+    """The PGNs Ordo rated, one path per line: `blink rate --pgn-list <this file>` refits exactly them."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("".join(f"{p}\n" for p in pgns))
+    return path
 
 
 def _fit(pgns: Sequence[Path], ctx: EvalContext, ordo: Callable) -> tuple[object, str | None]:
@@ -736,13 +750,14 @@ def run_all(
     state = run_blocks(ctx, runners or default_runners(), only, runs_root, log, load)
     pgns = [Path(p) for p in final_slice_pgns(state) if Path(p).is_file()]
     fit, ordo_error = _fit(pgns, ctx, ordo or rating.run_ordo)
-    results = build_results(state, ctx, fit)
-    ctx.results_dir.mkdir(parents=True, exist_ok=True)
+    listing = write_pgn_list(pgns, ctx.results_dir / FINAL_SLICE_LIST)
+    results = build_results(state, ctx, fit, listing)
     path = ctx.results_dir / "results.json"
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(to_json(results) + "\n")
     summary = {
         "results": str(path),
+        "final_slice_pgns": str(listing),
         "ordo": fit.as_dict() if fit is not None else None,
         "ordo_error": ordo_error,
         "forfeits": {block: state[block]["forfeits"] for block in BLOCK_ORDER if block in state},

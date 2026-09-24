@@ -231,8 +231,26 @@ def _cmd_sprt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _listed_pgns(lists: list[Path]) -> list[Path]:
+    """The paths in --pgn-list files (one per line; blank lines and # comments skipped); all must exist."""
+    listed = [
+        Path(line.strip())
+        for listing in lists
+        for line in listing.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    missing = [str(p) for p in listed if not p.is_file()]
+    if missing:
+        raise FileNotFoundError(f"listed PGNs not found: {', '.join(missing)}")
+    return listed
+
+
 def _cmd_rate(args: argparse.Namespace) -> int:
-    files = [f for target in args.pgn for f in nosearch.pgn_files(target)]
+    try:
+        listed = _listed_pgns(args.pgn_list)
+    except OSError as exc:
+        return _fail("blink rate", exc)
+    files = [f for target in [*args.pgn, *listed] for f in nosearch.pgn_files(target)]
     if not files:
         print("blink rate: no PGN files", file=sys.stderr)
         return 2
@@ -391,8 +409,13 @@ def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubPa
     _register_sprt(ev_sub)
     _register_blocks(ev_sub)
     rt = subparsers.add_parser("rate", help="Ordo with fixed SF19 anchors over PGNs (-W -D -s 1000)")
+    rt.add_argument("--pgn", type=Path, action="append", default=[], help="a PGN file or folder; repeatable")
     rt.add_argument(
-        "--pgn", type=Path, action="append", required=True, help="a PGN file or folder; repeatable"
+        "--pgn-list",
+        type=Path,
+        action="append",
+        default=[],
+        help="a file of PGN paths, one per line (results/final_slice_pgns.txt); repeatable",
     )
     rt.add_argument("--anchors", type=Path, default=Path("configs") / "anchors.csv")
     rt.add_argument("--simulations", type=int, default=rating.ORDO_SIMULATIONS)

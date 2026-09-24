@@ -402,3 +402,13 @@ def test_a_block_with_a_non_compliant_audit_fails_the_run(tmp_path, capsys):
     assert any("no-search" in line and "Blink-value-run_x" in line for line in state["gate_failures"])
     assert evaluate._run_guarded("blink eval block", lambda: state) == 1
     assert "no-search" in capsys.readouterr().err
+
+
+def test_run_all_writes_the_exact_pgn_list_it_rated_and_the_reproduce_command_rates_that_list(tmp_path):
+    out = run_all(tmp_path)
+    listing = tmp_path / "results" / "final_slice_pgns.txt"
+    assert listing.read_text(encoding="utf-8").splitlines() == [str(tmp_path / "final.pgn")]
+    assert out["final_slice_pgns"] == str(listing)
+    results = results_schema.from_json((tmp_path / "results" / "results.json").read_text(encoding="utf-8"))
+    commands = {row.reproduce for row in results.strength}
+    assert commands == {f"uv run blink rate --pgn-list {listing.as_posix()} --anchors configs/anchors.csv"}

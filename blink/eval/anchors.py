@@ -28,6 +28,7 @@ BLINK_VS_DM_GAMES = 1000
 DEFAULT_PRIOR = 1800
 IN_BAND = (0.25, 0.75)
 FALLBACK_TC = "60+0.6"  # E0 (3): the anchors' control when SF's st=0.1 self-check fails (plan P8)
+LOCATOR_SUFFIX = "-locator"  # the only dev-slice games these blocks play are the locators'
 
 Report = dict
 AnchorPlay = Callable[[Anchor, int, str, int], Report]  # (anchor, games, book slice, openings to skip)
@@ -131,7 +132,8 @@ def fastchess_player(ctx, selector: str, mode: str, subdir: str, anchor_tc: str 
     at st=0.1 or at `anchor_tc` (the self-check fallback); Blink keeps st=1 either way.
 
     Blink gets E2b's epsilon (results/epsilon.json) on its command line: the same value the in-process
-    blocks read, so every game filed under one Blink name is played by one configuration."""
+    blocks read, so every game filed under one Blink name is played by one configuration. The locator's
+    dev-slice games go to <subdir>-locator, so <subdir> holds final-slice games only."""
     from blink.eval import fastchess, match
 
     epsilon = match.read_epsilon(ctx.results_dir)
@@ -141,9 +143,8 @@ def fastchess_player(ctx, selector: str, mode: str, subdir: str, anchor_tc: str 
         second = fastchess.stockfish_anchor(anchor.rating, fastchess.stockfish_exe())
         if anchor_tc:
             second = fastchess.with_tc(second, anchor_tc)
-        gauntlet = fastchess.prepare_pair(
-            first, second, games, book, ctx.out_dir / subdir, ctx.concurrency, skip=skip
-        )
+        folder = ctx.out_dir / (subdir if book == "final" else f"{subdir}{LOCATOR_SUFFIX}")
+        gauntlet = fastchess.prepare_pair(first, second, games, book, folder, ctx.concurrency, skip=skip)
         return fastchess.match_report(fastchess.execute(gauntlet))
 
     return play

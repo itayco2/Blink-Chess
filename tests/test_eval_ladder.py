@@ -164,3 +164,13 @@ def test_e5s_fastchess_blink_plays_with_the_epsilon_e2b_chose(tmp_path, monkeypa
     play(GRID[0], 2, "final", 0)
     assert "--epsilon=0.00390625" in seen[0]["first"].args
     assert seen[0]["first"].name == "Blink-value-ship"
+
+
+def test_locator_games_go_to_their_own_folder_so_a_folder_of_final_slice_games_holds_no_dev_game(
+    tmp_path, monkeypatch
+):
+    ctx, seen = captured_anchor_play(tmp_path, monkeypatch)
+    play = anchors.fastchess_player(ctx, "ship", "value", "E5")
+    play(GRID[0], 2, "dev", 0)
+    play(GRID[0], 2, "final", 0)
+    assert [(s["book"], s["out_dir"].name) for s in seen] == [("dev", "E5-locator"), ("final", "E5")]
