@@ -185,7 +185,7 @@ def write_compute(report: dict, out: Path) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     tmp.replace(out)
     return out
 
