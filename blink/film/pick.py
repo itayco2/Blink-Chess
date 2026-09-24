@@ -19,6 +19,7 @@ from pathlib import Path
 import chess
 
 from blink.film import extract
+from blink.train.atomic import write_text_atomic
 
 CANDIDATES = 200
 SALT = b"blink-film"
@@ -109,5 +110,5 @@ def write_ranking(stories: list[Story], out: Path, run: str, frames: int) -> Pat
     payload = {"run": run, "frames": frames, "weights": [W_FINAL, W_CHANGES, W_SWING], "ranked": ranked}
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8", newline="\n")
+    write_text_atomic(out, json.dumps(payload, indent=1) + "\n")
     return out

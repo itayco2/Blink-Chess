@@ -29,6 +29,7 @@ import numpy as np
 
 from blink.board import encode, moves, value
 from blink.report import compute
+from blink.train.atomic import write_text_atomic
 
 FILM_FRAMES = 21
 FORMAT = 1
@@ -109,16 +110,17 @@ def never_in_training(position: FilmPosition, blocklist_path: Path) -> dict:
         board.push_uci(uci)
         line.append(encode.position_hash(board))
     target = encode.position_hash(chess.Board(position.fen))
-    blocked = blocklist.contains(hashes, np.array(line, dtype=np.uint64))
-    if not blocklist.contains(hashes, np.array([target], dtype=np.uint64))[0]:
+    line_blocked = bool(blocklist.contains(hashes, np.array(line, dtype=np.uint64)).all())
+    position_blocked = bool(blocklist.contains(hashes, np.array([target], dtype=np.uint64))[0])
+    if not position_blocked:
         raise FilmError(
             f"puzzle {position.puzzle_id} is not in the blocklist {blocklist_path}: it may be in training"
         )
     return {
         "blocklist": Path(blocklist_path).name,
         "blocklist_sha256": _sha256(blocklist_path),
-        "position_blocked": True,
-        "line_blocked": bool(blocked.all()),
+        "position_blocked": position_blocked,
+        "line_blocked": line_blocked,
     }
 
 
@@ -346,7 +348,7 @@ def extract(
 def write_film(film: dict, out: Path) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(film, indent=1) + "\n", encoding="utf-8", newline="\n")
+    write_text_atomic(out, json.dumps(film, indent=1) + "\n")
     return out
 
 

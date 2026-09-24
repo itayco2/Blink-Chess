@@ -16,6 +16,7 @@ from pathlib import Path
 
 from blink.report import compute as compute_mod
 from blink.report import results_schema as rs
+from blink.train.atomic import write_text_atomic
 
 START = "<!-- scoreboard:start -->"
 END = "<!-- scoreboard:end -->"
@@ -336,7 +337,7 @@ def _span(text: str) -> tuple[int, int]:
 def write_readme(path: Path, block: str) -> None:
     text = Path(path).read_text(encoding="utf-8")
     begin, end = _span(text)
-    Path(path).write_text(text[:begin] + block + text[end:], encoding="utf-8", newline="\n")
+    write_text_atomic(Path(path), text[:begin] + block + text[end:])
 
 
 def check_readme(path: Path, block: str) -> list[str]:

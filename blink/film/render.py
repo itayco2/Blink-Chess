@@ -29,6 +29,7 @@ from pathlib import Path
 from blink.film import extract
 from blink.report import claims
 from blink.report import results_schema as rs
+from blink.train.atomic import write_text_atomic
 
 PAGE_DIR = Path(__file__).resolve().parent / "page"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -348,9 +349,15 @@ def render(
         "measured_frames": film.get("measured_frames"), "probe": info, "page_errors": page_errors,
         "problems": problems,
     }  # fmt: skip
-    sidecar = Path(out).with_suffix(".json")
-    sidecar.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8", newline="\n")
+    write_sidecar(report, out)
     return report
+
+
+def write_sidecar(report: dict, video: Path) -> Path:
+    """The render report next to its video (film_en.mp4 -> film_en.json), via a .tmp and a replace."""
+    sidecar = Path(video).with_suffix(".json")
+    write_text_atomic(sidecar, json.dumps(report, indent=2) + "\n")
+    return sidecar
 
 
 def format_report(report: dict) -> str:

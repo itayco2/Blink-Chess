@@ -20,6 +20,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from blink.train.atomic import write_text_atomic
+
 SCHEMA_VERSION = 1
 POWER_FIELD = "gpu_power_w"
 NVSMI_LOG = "nvidia-smi.csv"
@@ -192,9 +194,7 @@ def project_compute(
 def write_compute(report: dict, out: Path) -> Path:
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
-    tmp.replace(out)
+    write_text_atomic(out, json.dumps(report, indent=2, sort_keys=True) + "\n")
     return out
 
 
