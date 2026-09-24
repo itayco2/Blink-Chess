@@ -1,10 +1,12 @@
 """`blink lichess pause` and `resume-note`: the agent's only action on a running bot is stopping its PID."""
 
+import ast
 import contextlib
 import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import psutil
 import pytest
@@ -309,3 +311,33 @@ def test_a_pause_that_cannot_write_its_flag_is_refused_cleanly(monkeypatch, tmp_
     monkeypatch.setattr(pause, "default_deps", lambda name, api, root: never)
     assert cli.main(["lichess", "pause", "--bot", "BlinkBot"]) == 2
     assert "blink lichess pause" in capsys.readouterr().err
+
+
+def _code_names(path) -> set[str]:
+    """Every name, attribute and non-docstring string constant a module's code uses."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.FunctionDef | ast.ClassDef)
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            found.add(node.value)
+    return found
+
+
+def test_no_lichess_module_reads_a_process_environment_or_the_token_file():
+    """psutil's Process.environ() would hand over the bot's token; the plan forbids reading it."""
+    for path in Path(pause.__file__).parent.glob("*.py"):
+        used = _code_names(path)
+        assert not {"environ", "getenv", "environb", "putenv"} & used, path.name
+        assert not any("dpapi" in text.lower() for text in used), path.name
