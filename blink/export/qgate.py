@@ -10,12 +10,18 @@ Three pre-registered checks, each comparing int8 with fp32 on the same runtime:
 
 The default runtime is the browser's own: onnxruntime-web's WASM backend on one thread, run in Node by
 site/tests/ortpipe.mjs. onnxruntime's Python CPU build runs other int8 kernels, whose logits differ from
-onnxruntime-web's by up to about 1 on the skeleton, so only the web runtime measures what the page plays;
-`--runtime python` measures the Python build instead.
+onnxruntime-web's by up to about 1 on the skeleton, so only the web runtime measures what the page plays.
+Every check also feeds one position per call, as the page does ([1, 64] per look): DynamicQuantizeLinear
+picks one activation scale per tensor, so an int8 row's logits change with the rows batched beside it
+(by up to 0.2 on the stand-in), while fp32's do not.
+
+Only the pre-registered sample can pass: the web runtime, the 10,000 games10k positions at batch 1 and the
+whole band set with no empty band. Any other run (--runtime python, --positions random, a limit) is
+exploratory: GateReport.deviations() names how it departs, passed is false, and `blink export qgate`
+writes qgate.json but leaves the model card alone.
 """
 
 import csv
-import itertools
 import json
 import shutil
 import struct
@@ -43,9 +49,12 @@ MAX_PUZZLE_DROP_PT = 0.5
 MAX_MEAN_ABS_DWIN_PT = 1.0
 GATE_POSITIONS = 10_000
 GATE_SEED = 11
-BATCH = 256
-PUZZLE_SETS = {"bands": ("eval", "lichess_bands.csv"), "dm10k": ("downloads", "puzzles.csv")}
-POSITION_SETS = {"games10k": ("data", "games10k.npy")}
+PAGE_BATCH = 1  # rows per network call on the page; int8's activation scale spans the whole batch
+GATE_POSITION_SET = "games10k"
+GATE_PUZZLE_FILE = "lichess_bands.csv"
+WEB_RUNTIME = "onnxruntime-web"  # the web runtime's label starts with this
+PUZZLE_SETS = {"bands": ("eval", GATE_PUZZLE_FILE), "dm10k": ("downloads", "puzzles.csv")}
+POSITION_SETS = {GATE_POSITION_SET: ("data", "games10k.npy")}
 RUNTIMES = ("web", "python")
 ORTPIPE = Path(__file__).resolve().parents[2] / "site" / "tests" / "ortpipe.mjs"
 MAGIC = b"BLNK"
@@ -83,6 +92,7 @@ class PuzzleTally:
 @dataclass(frozen=True)
 class Agreement:
     positions: int
+    batch_size: int  # rows per network call; the page's is PAGE_BATCH
     top1_agreement: float
     mean_abs_dwin_pt: float
     max_abs_dwin_pt: float
@@ -99,8 +109,43 @@ class GateReport:
     agreement: Agreement
     overall: PuzzleTally
     bands: tuple[tuple[str, PuzzleTally], ...]
+    puzzle_set_rows: int  # puzzles in the whole set file, whatever the limit
+
+    def deviations(self) -> list[str]:
+        """How this run departs from the pre-registered sample; any departure makes it exploratory."""
+        a = self.agreement
+        checks = (
+            (
+                self.runtime.startswith(WEB_RUNTIME),
+                f"runtime is {self.runtime}, not {WEB_RUNTIME} (the page's)",
+            ),
+            (
+                self.positions_source == GATE_POSITION_SET,
+                f"positions are {self.positions_source}, not {GATE_POSITION_SET}",
+            ),
+            (
+                a.positions == GATE_POSITIONS,
+                f"agreement on {a.positions:,} positions, not {GATE_POSITIONS:,}",
+            ),
+            (
+                a.batch_size == PAGE_BATCH,
+                f"agreement measured at batch {a.batch_size}, not the page's {PAGE_BATCH}",
+            ),
+            (self.puzzle_set == GATE_PUZZLE_FILE, f"puzzles from {self.puzzle_set}, not {GATE_PUZZLE_FILE}"),
+            (
+                self.overall.n == self.puzzle_set_rows,
+                f"{self.overall.n:,} of the set's {self.puzzle_set_rows:,} puzzles were measured",
+            ),
+        )
+        out = [reason for ok, reason in checks if not ok]
+        return out + [f"band {name} has no puzzles" for name, tally in self.bands if tally.n == 0]
+
+    @property
+    def exploratory(self) -> bool:
+        return bool(self.deviations())
 
     def failures(self) -> list[str]:
+        """The thresholds this run misses on its own sample; deviations() judges the sample itself."""
         out = []
         a = self.agreement
         if a.top1_agreement < MIN_TOP1_AGREEMENT:
@@ -120,7 +165,7 @@ class GateReport:
 
     @property
     def passed(self) -> bool:
-        return not self.failures()
+        return not self.failures() and not self.exploratory
 
     def to_dict(self) -> dict:
         return {
@@ -129,6 +174,7 @@ class GateReport:
             **asdict(self.agreement),
             "puzzles": {
                 "set": self.puzzle_set,
+                "set_rows": self.puzzle_set_rows,
                 "overall": self.overall.to_dict(),
                 "bands": {name: tally.to_dict() for name, tally in self.bands},
             },
@@ -138,6 +184,8 @@ class GateReport:
                 "max_mean_abs_dwin_pt": MAX_MEAN_ABS_DWIN_PT,
             },
             "failures": self.failures(),
+            "deviations": self.deviations(),
+            "exploratory": self.exploratory,
             "passed": self.passed,
         }
 
@@ -151,13 +199,22 @@ def example() -> GateReport:
         ("2000-2500", PuzzleTally(1409, 150, 149)),
         ("2500+", PuzzleTally(365, 20, 20)),
     )
+    agreement = Agreement(
+        positions=GATE_POSITIONS,
+        batch_size=PAGE_BATCH,
+        top1_agreement=0.9931,
+        mean_abs_dwin_pt=0.21,
+        max_abs_dwin_pt=2.4,
+        disagreement_margin_p50_pt=3.1,
+    )
     return GateReport(
-        runtime="onnxruntime-web 1.30.0, wasm, 1 thread (Node v22.14.0)",
-        positions_source="games10k",
-        puzzle_set="lichess_bands.csv",
-        agreement=Agreement(GATE_POSITIONS, 0.9931, 0.21, 2.4, 3.1),
+        runtime=f"{WEB_RUNTIME} 1.30.0, wasm, 1 thread (Node v22.14.0)",
+        positions_source=GATE_POSITION_SET,
+        puzzle_set=GATE_PUZZLE_FILE,
+        agreement=agreement,
         overall=PuzzleTally(5281, 1670, 1667),
         bands=bands,
+        puzzle_set_rows=5281,
     )
 
 
@@ -174,24 +231,28 @@ def _disagreement_margin(logits: np.ndarray, masks: np.ndarray, int8_pick: np.nd
     return 100 * (probs.max(axis=1) - probs[rows, int8_pick])
 
 
+def evaluate_rows(evaluator: Evaluator, codes: np.ndarray, batch_size: int = PAGE_BATCH) -> Evaluation:
+    """Every row of `codes`, `batch_size` rows per network call (the page's one by default)."""
+    parts = [
+        evaluator.evaluate(codes[start : start + batch_size]) for start in range(0, len(codes), batch_size)
+    ]
+    policy = np.concatenate([part.policy_logits for part in parts])
+    return Evaluation(policy_logits=policy, value_probs=np.concatenate([part.value_probs for part in parts]))
+
+
 def measure_agreement(
-    fp32: Evaluator, int8: Evaluator, codes: np.ndarray, masks: np.ndarray, batch_size: int = BATCH
+    fp32: Evaluator, int8: Evaluator, codes: np.ndarray, masks: np.ndarray, batch_size: int = PAGE_BATCH
 ) -> Agreement:
-    """Legal-masked top-1 agreement and the change in win% (in points), batch by batch."""
-    same, dwin, margins = [], [], []
-    for start in range(0, len(codes), batch_size):
-        rows = slice(start, start + batch_size)
-        a, b = fp32.evaluate(codes[rows]), int8.evaluate(codes[rows])
-        pick_a = _masked_top1(a.policy_logits, masks[rows])
-        pick_b = _masked_top1(b.policy_logits, masks[rows])
-        differ = pick_a != pick_b
-        same.append(~differ)
-        dwin.append(100 * np.abs(a.win_probability() - b.win_probability()))
-        margins.append(_disagreement_margin(a.policy_logits[differ], masks[rows][differ], pick_b[differ]))
-    agree, change, margin = np.concatenate(same), np.concatenate(dwin), np.concatenate(margins)
+    """Legal-masked top-1 agreement and the change in win% (in points), both models at `batch_size`."""
+    a, b = evaluate_rows(fp32, codes, batch_size), evaluate_rows(int8, codes, batch_size)
+    pick_a, pick_b = _masked_top1(a.policy_logits, masks), _masked_top1(b.policy_logits, masks)
+    differ = pick_a != pick_b
+    change = 100 * np.abs(a.win_probability() - b.win_probability())
+    margin = _disagreement_margin(a.policy_logits[differ], masks[differ], pick_b[differ])
     return Agreement(
-        positions=len(agree),
-        top1_agreement=float(agree.mean()),
+        positions=len(codes),
+        batch_size=batch_size,
+        top1_agreement=float((~differ).mean()),
         mean_abs_dwin_pt=float(change.mean()),
         max_abs_dwin_pt=float(change.max()),
         disagreement_margin_p50_pt=float(np.median(margin)) if len(margin) else None,
@@ -243,8 +304,8 @@ def resolve_puzzle_set(name: str) -> Path:
     return paths.home().joinpath(*PUZZLE_SETS[name]) if name in PUZZLE_SETS else Path(name)
 
 
-def read_puzzle_rows(path: Path, limit: int | None = None) -> list[dict]:
-    """Puzzle rows in DeepMind's (PGN) or Lichess's (FEN) layout, front to back."""
+def read_puzzle_rows(path: Path) -> list[dict]:
+    """Every puzzle row, in DeepMind's (PGN) or Lichess's (FEN) layout, front to back."""
     if not path.is_file():
         raise GateError(f"no puzzle set at {path} (use --puzzles bands, dm10k or a CSV path)")
     with open(path, encoding="utf-8", newline="") as handle:
@@ -254,7 +315,7 @@ def read_puzzle_rows(path: Path, limit: int | None = None) -> list[dict]:
             raise GateError(
                 f"{path} needs PuzzleId, Rating, Moves and PGN or FEN; its header is {sorted(header)}"
             )
-        return list(itertools.islice(reader, limit))
+        return list(reader)
 
 
 # ----------------------------------------------------------------------------- runtimes
@@ -309,7 +370,7 @@ class WebRuntime:
             raise GateError(f"the web runtime did not start: {self._stderr_text()}")
         (length,) = struct.unpack("<I", self._read(4))
         info = json.loads(self._read(length).decode("utf-8"))
-        return f"onnxruntime-web {info['ort']}, wasm, 1 thread (Node {info['node']})"
+        return f"{WEB_RUNTIME} {info['ort']}, wasm, 1 thread (Node {info['node']})"
 
     def _stderr_text(self) -> str:
         self._stderr.seek(0)
@@ -387,11 +448,12 @@ def run(
     puzzle_limit: int | None = None,
     position_limit: int | None = None,
 ) -> GateReport:
-    """Measure the three checks on one runtime; the verdict is GateReport.failures()."""
+    """Measure the three checks on one runtime, one row per call; the verdict is GateReport.passed."""
     codes, masks = gate_positions(position_set, position_limit or GATE_POSITIONS)
     puzzle_path = resolve_puzzle_set(puzzle_set)
-    rows = read_puzzle_rows(puzzle_path, puzzle_limit)
+    every_row = read_puzzle_rows(puzzle_path)
+    rows = every_row if puzzle_limit is None else every_row[:puzzle_limit]
     with evaluators(runtime, fp32, int8) as (label, full, quantized):
         agreement = measure_agreement(full, quantized, codes, masks)
         overall, bands = measure_puzzles(PolicyAgent(full), PolicyAgent(quantized), rows)
-    return GateReport(label, position_set, puzzle_path.name, agreement, overall, bands)
+    return GateReport(label, position_set, puzzle_path.name, agreement, overall, bands, len(every_row))

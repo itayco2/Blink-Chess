@@ -19,12 +19,14 @@
       "runtime": "onnxruntime-web 1.30.0, wasm, 1 thread (Node v22.14.0)",
       "positions_source": "games10k",
       "positions": 10000,
+      "batch_size": 1,
       "top1_agreement": 0.9931,
       "mean_abs_dwin_pt": 0.21,
       "max_abs_dwin_pt": 2.4,
       "disagreement_margin_p50_pt": 3.1,
       "puzzles": {
         "set": "lichess_bands.csv",
+        "set_rows": 5281,
         "overall": {
           "n": 5281,
           "fp32_correct": 1670,
@@ -82,6 +84,8 @@
         "max_mean_abs_dwin_pt": 1.0
       },
       "failures": [],
+      "deviations": [],
+      "exploratory": false,
       "passed": true
     }
   }

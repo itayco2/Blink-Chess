@@ -77,6 +77,18 @@ def test_a_card_without_a_quantization_block_cannot_take_gate_numbers():
         card.with_gate(fp32, qgate.example().to_dict())
 
 
+def test_an_exploratory_gate_report_can_never_reach_the_card():
+    import dataclasses
+
+    from blink.export import qgate
+    from blink.site import card
+
+    base = card.browser_card(_fp32_card(), 400_000, "ab" * 32, precision="int8", method="dynamic")
+    tryout = dataclasses.replace(qgate.example(), positions_source="random").to_dict()
+    with pytest.raises(ValueError, match="exploratory"):
+        card.with_gate(base, tryout)
+
+
 def test_cards_round_trip_through_their_file(tmp_path):
     from blink.site import card
 

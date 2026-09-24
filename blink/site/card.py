@@ -67,9 +67,11 @@ def for_file(fp32_card: dict, model: Path, precision: str, method: str | None = 
 
 
 def with_gate(card: dict, gate: dict) -> dict:
-    """A new card holding the quantization gate's report."""
+    """A new card holding the quantization gate's report (never an exploratory run's)."""
     if not card.get("quantization"):
         raise ValueError("only an int8 card has quantization numbers to hold")
+    if gate.get("exploratory", True):
+        raise ValueError(f"an exploratory gate run cannot stamp the card: {gate.get('deviations')}")
     return {**card, "quantization": {**card["quantization"], "gate": gate}}
 
 

@@ -99,7 +99,8 @@ def _print_gate(report) -> None:
     a = report.agreement
     print(f"runtime: {report.runtime}")
     share = f"{100 * a.top1_agreement:.2f}%"
-    print(f"top-1 agreement: {share} of {a.positions:,} positions ({report.positions_source})")
+    where = f"{report.positions_source}, {a.batch_size} per call"
+    print(f"top-1 agreement: {share} of {a.positions:,} positions ({where})")
     print(f"win% change: mean {a.mean_abs_dwin_pt:.3f} pt, max {a.max_abs_dwin_pt:.2f} pt")
     o = report.overall
     print(f"puzzles ({report.puzzle_set}, n={o.n:,}): fp32 {o.fp32_pct:.2f}%, int8 {o.int8_pct:.2f}%")
@@ -129,11 +130,15 @@ def _cmd_qgate(args: argparse.Namespace) -> int:
     gate = report.to_dict()
     int8.with_name("qgate.json").write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8", newline="\n")
     card_path = int8.with_name(card.CARD_FILE)
-    if card_path.is_file():
+    if card_path.is_file() and not report.exploratory:
         card.write(card.with_gate(card.read(card_path), gate), card_path)
     _print_gate(report)
     for failure in report.failures():
         print(f"FAIL: {failure}")
+    for deviation in report.deviations():
+        print(f"EXPLORATORY: {deviation}")
+    if report.exploratory:
+        print("card not stamped: only the pre-registered sample (the defaults, no limits) can pass the gate")
     if report.passed:
         print(f"ok: int8 passes the quantization gate ({card_path})")
     return 0 if report.passed else 1
@@ -199,14 +204,21 @@ def register(sub: argparse._SubParsersAction) -> None:
     gate = tasks.add_parser(
         "qgate", help="int8 vs fp32: 99%% top-1, puzzles within 0.5 pt, |dwin%%| within 1"
     )
+    tryout = "; anything but the default makes the run exploratory (never a pass, card untouched)"
     gate.add_argument("--model", default="ship", help="export dir holding model.onnx and int8/model.onnx")
     gate.add_argument(
-        "--runtime", choices=("web", "python"), default="web", help="web: onnxruntime-web in Node"
+        "--runtime", choices=("web", "python"), default="web", help="web: onnxruntime-web in Node" + tryout
     )
-    gate.add_argument("--positions", default="games10k", help="games10k | random | <root records .npy>")
-    gate.add_argument("--position-limit", type=int, help="default 10,000")
-    gate.add_argument("--puzzles", default="bands", help="bands (lichess_bands.csv) | dm10k | <csv>")
-    gate.add_argument("--puzzle-limit", type=int)
+    gate.add_argument(
+        "--positions", default="games10k", help="games10k | random | <root records .npy>" + tryout
+    )
+    gate.add_argument("--position-limit", type=int, help="default 10,000" + tryout)
+    gate.add_argument("--puzzles", default="bands", help="bands (lichess_bands.csv) | dm10k | <csv>" + tryout)
+    gate.add_argument(
+        "--puzzle-limit",
+        type=int,
+        help="the first N rows (the band set is sorted by rating, so low bands come first)" + tryout,
+    )
     gate.set_defaults(func=_cmd_qgate)
 
     vocab = tasks.add_parser("vocab", help="write site/vocab.json from the frozen contract")
