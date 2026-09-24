@@ -3,7 +3,12 @@
 #   - set steps = T_long * N*'s measured samples/s / 1024 (T_long = 120 h: 661,078 at M's 1,567);
 #   - set vaa_reference to N*'s 6 h sweep run name and vaa_sigma to the a01-a03 noise floor.
 # blink supervise -- train --config configs/long.toml --run long --data D:\blink\data\v1
-# Preview at 30%: blink train --run long --data D:\blink\data\v1 --preview-cooldown 3h --from-step <30%>
+# The 30% pause for the preview cooldown (P7). The 30% check step is round(0.3 * steps), 198,323 at
+# 661,078 steps (blink.train.vaa.check_steps); the check writes a kept checkpoint there. So:
+#   1. train the main run with --max-steps 198323: it stops at the 30% check, checkpoint written;
+#   2. blink train --run long --data D:\blink\data\v1 --preview-cooldown 3h --from-step 198323
+#      (writes runs/long-preview only; its end is checked against the reference's final VAA);
+#   3. resume the main run: the same command with --resume and without --max-steps.
 base = "m.toml"
 
 [train]
