@@ -2,6 +2,10 @@
 (>= 1,658 samples/s, one epoch of training roots in T_long = 96 h) > best 6 h VAA > default M (a best
 VAA within 2 sigma of M's means M; if M fails the floor, the largest passing size). A size must also
 fit the VRAM budget at micro-batch >= 256 and keep value-mode p99 <= 100 ms at L+1 rows.
+
+The p99 is read only from bench play rows timed in the one play mode the rules name (p99_precision,
+p99_compile; blink.play.fastmode), so a size is judged at the mode Blink will actually play in. The
+defaults, fp32 uncompiled, are the plan's play runtime.
 """
 
 import dataclasses
@@ -11,7 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from blink.train.bench import best_rates
+from blink.play import fastmode
+from blink.train.bench import best_rates, play_mode
 
 SIZE_ORDER = ("t", "s", "m", "m12", "l")
 TOLERANCE = 1e-9  # float slack for every pre-registered comparison (the sweep's too)
@@ -27,7 +32,21 @@ class ChooseRules:
     p99_ms_max: float = 100.0
     p99_rows: int = 219
     p99_concurrency: tuple[int, ...] = (5, 2)
+    p99_precision: str = fastmode.DEFAULT_PRECISION  # the play mode the p99 is judged in
+    p99_compile: bool = False
     sigma_factor: float = 2.0
+
+    def __post_init__(self) -> None:
+        if self.p99_precision not in fastmode.PRECISIONS:
+            raise ValueError(
+                f"p99_precision must be one of {fastmode.PRECISIONS}, got {self.p99_precision!r}"
+            )
+        if not isinstance(self.p99_compile, bool):
+            raise ValueError(f"p99_compile must be true or false, got {self.p99_compile!r}")
+
+    @property
+    def play_mode(self) -> tuple[str, bool]:
+        return self.p99_precision, self.p99_compile
 
     @property
     def samples_per_epoch(self) -> float:
@@ -44,11 +63,15 @@ def load_rules(path: Path) -> ChooseRules:
 
 
 def p99_of(bench: Mapping[str, Any], size: str, rules: ChooseRules) -> dict[str, float | None]:
-    """Value-mode p99 at L+1 rows for each concurrency the rules name (None when not measured)."""
+    """Value-mode p99 at L+1 rows for each concurrency the rules name, from rows timed in the rules'
+    play mode only (None when not measured in it)."""
     found = {
         row["concurrency"]: row.get("p99_ms")
         for row in bench.get("play", [])
-        if row.get("size") == size and row.get("rows") == rules.p99_rows and not row.get("error")
+        if row.get("size") == size
+        and row.get("rows") == rules.p99_rows
+        and not row.get("error")
+        and play_mode(row) == rules.play_mode
     }
     return {str(c): found.get(c) for c in rules.p99_concurrency}
 
@@ -73,10 +96,13 @@ def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: Ch
         return {**entry, "failed": "floor", "reason": why}
     missing = [c for c, v in p99.items() if v is None]
     over = {c: v for c, v in p99.items() if v is not None and v > rules.p99_ms_max}
+    mode = fastmode.describe(*rules.play_mode)
     if missing:
-        return {**entry, "failed": "p99", "reason": f"value-mode p99 not measured at concurrency {missing}"}
+        why = f"value-mode p99 not measured at concurrency {missing} in {mode}"
+        return {**entry, "failed": "p99", "reason": why}
     if over:
-        return {**entry, "failed": "p99", "reason": f"value-mode p99 over {rules.p99_ms_max:.0f} ms: {over}"}
+        why = f"value-mode p99 over {rules.p99_ms_max:.0f} ms in {mode}: {over}"
+        return {**entry, "failed": "p99", "reason": why}
     if vaa is None:
         return {**entry, "failed": "vaa", "reason": "no 6 h VAA"}
     return {**entry, "eligible": True, "reason": "passes every constraint"}

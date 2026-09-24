@@ -5,6 +5,10 @@ UCI_LimitStrength=true, UCI_Elo=<anchor>, Threads=1, Hash=16. Openings are playe
 the book slice, each once per colour (-repeat). No resignation and no win adjudication; the one draw
 adjudication is `-maxmoves 300` (600 engine plies). `-pgnout nodes=true` writes Blink's per-move row
 count into the PGN, and the no-search audit runs on that PGN as soon as the games finish.
+
+Blink plays fp32 uncompiled unless a gauntlet asks for a fast mode (blink.play.fastmode): then the
+engine gets `--precision=bf16` and/or `--compile`, and its name (and so its PGN) carries the mode, so
+games of different modes never share a name. Default engine names and commands are unchanged.
 """
 
 import os
@@ -19,6 +23,7 @@ from pathlib import Path
 import blink
 from blink import paths
 from blink.eval import books, nosearch
+from blink.play import fastmode
 from blink.play.factory import RANDOM_SELECTORS
 
 BLINK_ST, BLINK_MARGIN_MS = 1.0, 500
@@ -67,18 +72,27 @@ class EngineSpec:
         return out
 
 
-def engine_name(model: str, mode: str) -> str:
+def engine_name(
+    model: str, mode: str, precision: str = fastmode.DEFAULT_PRECISION, compile: bool = False
+) -> str:
     tag = NAME_UNSAFE.sub("_", model).strip("_")[:40]
-    return f"Blink-{mode}-{tag}"
+    return f"Blink-{mode}-{tag}{fastmode.tag(precision, compile)}"
 
 
-def blink_engine(model: str, mode: str, device: str = "cuda") -> EngineSpec:
+def blink_engine(
+    model: str,
+    mode: str,
+    device: str = "cuda",
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
+) -> EngineSpec:
     """Blink as `python -m blink.uci`, with the interpreter that runs this harness."""
+    fastmode.check(precision, device)
     selector = ("--random",) if model in RANDOM_SELECTORS else (f"--model={model}",)
-    args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}")
-    return EngineSpec(
-        engine_name(model, mode), sys.executable, args, st=BLINK_ST, timemargin_ms=BLINK_MARGIN_MS
-    )
+    fast = fastmode.uci_args(precision, compile)
+    args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}", *fast)
+    name = engine_name(model, mode, precision, compile)
+    return EngineSpec(name, sys.executable, args, st=BLINK_ST, timemargin_ms=BLINK_MARGIN_MS)
 
 
 def stockfish_anchor(elo: int, exe: Path) -> EngineSpec:
@@ -203,9 +217,11 @@ def prepare_gauntlet(
     concurrency: int = 5,
     max_moves: int = MAX_MOVES,
     tc: str | None = None,
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
 ) -> Gauntlet:
     """Blink against one SF19 anchor: engines, book slice and a fresh timestamped PGN under out_dir."""
-    blink_spec = blink_engine(model, mode, device)
+    blink_spec = blink_engine(model, mode, device, precision, compile)
     anchor_spec = stockfish_anchor(anchor, stockfish_exe())
     if tc:
         blink_spec, anchor_spec = with_tc(blink_spec, tc), with_tc(anchor_spec, tc)

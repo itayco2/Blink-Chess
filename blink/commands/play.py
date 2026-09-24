@@ -18,7 +18,7 @@ from pathlib import Path
 
 from blink import paths
 from blink.eval import books, fastchess, match, roundrobin
-from blink.play import agents, factory, rules
+from blink.play import agents, factory, fastmode, rules
 from blink.reference import gauntlet as dm_gauntlet
 from blink.reference import registry
 
@@ -147,6 +147,11 @@ def _gauntlet_ok(report: dict) -> bool:
 def _cmd_gauntlet(args: argparse.Namespace) -> int:
     out_dir = args.out or paths.home() / "games" / "gauntlet"
     is_deepmind = registry.is_dm(args.model)
+    fast = {"precision": args.precision, "compile": args.compile}
+    refusal = fastmode.refusal(**fast, device=args.device, deepmind=is_deepmind)
+    if refusal:
+        print(f"blink gauntlet: {refusal}", file=sys.stderr)
+        return 2
     if not args.dry_run:
         (registry.check_available if is_deepmind else factory.check_available)(args.model)
     # DeepMind's engine plays under its own name and has its own moves audited (plan E7).
@@ -164,6 +169,7 @@ def _cmd_gauntlet(args: argparse.Namespace) -> int:
             concurrency=args.concurrency,
             max_moves=args.max_moves,
             tc=args.tc,
+            **({} if is_deepmind else fast),
         )
         if args.dry_run:
             print(subprocess.list2cmdline(gauntlet.command()))
@@ -222,6 +228,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     g.add_argument("--concurrency", type=int, default=5)
     g.add_argument("--max-moves", type=int, default=fastchess.MAX_MOVES)
     g.add_argument("--tc", default=None, help="a cutechess time control for both engines instead of st")
+    fastmode.add_arguments(g)
     g.add_argument(
         "--out", type=Path, default=None, help="folder for PGNs (default BLINK_HOME/games/gauntlet)"
     )

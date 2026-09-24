@@ -10,6 +10,10 @@ where nodes is the number of positions the network scored for this move (1 in po
 value mode, 0 when a mate in one was played by rule R2). fastchess writes that count into every PGN
 (`-pgnout nodes=true`), which is how `blink audit no-search` proves compliance from the games alone.
 Castling is always printed as the king's two-square move (e1g1).
+
+`--precision bf16` and `--compile` (blink.play.fastmode) opt into the fast play modes; without them
+the engine plays fp32 uncompiled under its usual name. With them the name carries the mode
+(Blink-value-bf16-compile), and a bf16 request off CUDA is refused before any UCI traffic.
 """
 
 import argparse
@@ -24,7 +28,7 @@ from typing import TextIO
 import chess
 
 from blink.board import value
-from blink.play import factory, rules
+from blink.play import factory, fastmode, rules
 from blink.play.agents import Agent, Decision, ValueAgent
 from blink.reference import registry
 
@@ -156,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=factory.MODES, default="policy")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    fastmode.add_arguments(parser)
     parser.add_argument("--random", action="store_true", help="a random-logit network, for harness tests")
     parser.add_argument("--seed", type=int, default=0, help="seed of the random-logit network")
     parser.add_argument("--epsilon", type=float, default=rules.DEFAULT_EPSILON, help="R4 tie window")
@@ -170,6 +175,10 @@ def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout:
     stdout = stdout if stdout is not None else sys.stdout
     selector = "random" if args.random else args.model
     is_deepmind = registry.is_dm(selector)
+    refusal = fastmode.refusal(args.precision, args.compile, args.device, deepmind=is_deepmind)
+    if refusal:
+        print(f"blink-uci: {refusal}", file=sys.stderr)
+        return 2
     try:
         (registry.check_available if is_deepmind else factory.check_available)(selector)
     except factory.ModelUnavailable as exc:
@@ -180,10 +189,13 @@ def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout:
     def make() -> Agent:
         if is_deepmind:  # DeepMind's released play logic: L rows per move, no Blink mode
             return registry.load_agent(selector, device=args.device, sink=sink)
-        evaluator = factory.load_evaluator(selector, device=args.device, seed=args.seed)
+        evaluator = factory.load_evaluator(
+            selector, device=args.device, seed=args.seed, precision=args.precision, compile=args.compile
+        )
         return factory.make_agent(args.mode, evaluator, epsilon=args.epsilon, sink=sink)
 
-    name = args.name or (registry.parse(selector).name if is_deepmind else f"{ENGINE_NAME}-{args.mode}")
+    tag = fastmode.tag(args.precision, args.compile)
+    name = args.name or (registry.parse(selector).name if is_deepmind else f"{ENGINE_NAME}-{args.mode}{tag}")
     engine = UciEngine(make, stdout, name=name)
     for line in iter(stdin.readline, ""):
         if not engine.handle(line.strip()):

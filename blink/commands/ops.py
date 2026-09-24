@@ -4,6 +4,7 @@ blink ops launch --name NAME -- <blink args>    a fully detached job (Win32_Proc
 blink ops ps                                    Blink processes and launched jobs, with their heartbeats
 blink supervise --run NAME -- train ...         the trainer as a child, every P7 stop rule enforced
 blink bench throughput|loader|play              measured rates into bench.json (plan P4)
+blink bench parity                              a fast play mode's moves against fp32's, on val roots
 blink sweep ablations|sizes|choose              plan P5 and P6
 blink sweep rescore                             score finished arms post hoc (games10k, mateset)
 
@@ -16,6 +17,7 @@ import sys
 from pathlib import Path
 
 from blink import paths
+from blink.play import fastmode
 
 EXIT_REFUSED = 2
 
@@ -238,19 +240,101 @@ def cmd_bench_play(args: argparse.Namespace) -> int:
 
     try:
         sizes = [bench.resolve_size(size) for size in args.sizes.split(",") if size]
-    except FileNotFoundError as exc:
+        mode = {"precision": args.precision, "compile": args.compile}
+        specs = [
+            bench.PlaySpec(name, path, rows, concurrency, args.iters, args.warmup, args.device, **mode)
+            for name, path in sizes
+            for rows in _ints(args.rows)
+            for concurrency in _ints(args.concurrency)
+        ]
+    except (FileNotFoundError, ValueError) as exc:
         print(f"blink bench play: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    specs = [
-        bench.PlaySpec(name, path, rows, concurrency, args.iters, args.warmup, args.device)
-        for name, path in sizes
-        for rows in _ints(args.rows)
-        for concurrency in _ints(args.concurrency)
-    ]
     machine = bench.machine_facts(args.device)
     rows = bench.run_play(specs, log=_say)
     bench.update_bench(_bench_out(args), "play", rows, machine)
     return 0
+
+
+def _parity_out(args: argparse.Namespace) -> Path:
+    from blink.eval.fastchess import NAME_UNSAFE
+
+    if args.out:
+        return Path(args.out)
+    name = NAME_UNSAFE.sub("_", args.model).strip("_") + fastmode.tag(args.precision, args.compile)
+    return paths.home() / "eval" / "parity" / f"{name}.json"
+
+
+def _parity_evaluators(args: argparse.Namespace):
+    """fp32 and the fast mode on one model object: the fast one compiles its own trunk wrapper."""
+    from blink.model.evaluator import TorchEvaluator
+    from blink.model.loading import load_model
+
+    model = load_model(args.model, device=args.device)
+    fast = TorchEvaluator(model, args.device, precision=args.precision, compile=args.compile)
+    if args.compile:
+        fast.warm_up()
+    return TorchEvaluator(model, args.device), fast
+
+
+def cmd_bench_parity(args: argparse.Namespace) -> int:
+    import time
+
+    from blink.eval import parity
+    from blink.train.atomic import write_text_atomic
+    from blink.train.posthoc import gpu_refusal
+
+    data = Path(args.data) if args.data else paths.home() / "data" / "v1"
+    refusal = fastmode.refusal(args.precision, args.compile, args.device) or gpu_refusal(args.device)
+    try:
+        if refusal:
+            raise ValueError(refusal)
+        boards = parity.val_positions(data, args.positions)
+        reference, fast = _parity_evaluators(args)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"blink bench parity: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    mode = fastmode.describe(args.precision, args.compile)
+    _say(f"parity of {args.model} {mode} against fp32 on {len(boards)} val roots of {data}")
+    started = time.perf_counter()
+    report = parity.compare(reference, fast, boards, epsilon=args.epsilon, log=_say)
+    result = {
+        "model": args.model,
+        "device": args.device,
+        "precision": args.precision,
+        "compile": args.compile,
+        "reference": {"precision": fastmode.DEFAULT_PRECISION, "compile": False},
+        "data": str(data),
+        "requested": args.positions,
+        "epsilon": args.epsilon,
+        "seconds": round(time.perf_counter() - started, 1),
+        **report,
+    }
+    out = _parity_out(args)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(out, json.dumps(result, indent=2) + "\n")
+    _say(
+        f"policy top-1 agreement {report['policy_top1_agreement']}, value choice agreement "
+        f"{report['value_choice_agreement']}, max |d win%| {report['max_abs_dwin_pct']} pt "
+        f"({report['scored']} positions scored, {report['mate_now']} mates in one by R2) -> {out}"
+    )
+    return 0
+
+
+def _register_parity(actions: argparse._SubParsersAction) -> None:
+    from blink.play import rules
+
+    parity = actions.add_parser(
+        "parity", help="policy top-1, value choice and win% of a fast mode against fp32 on val roots"
+    )
+    parity.add_argument("--model", required=True, help="run:<name>[:ema] | ship | release:<tag> | <path>")
+    parity.add_argument("--positions", type=int, default=2000, help="val roots, taken as VAA takes them")
+    parity.add_argument("--data", help="the pack holding val_roots.bin (default BLINK_HOME/data/v1)")
+    parity.add_argument("--epsilon", type=float, default=rules.DEFAULT_EPSILON, help="R4 tie window")
+    parity.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    parity.add_argument("--out", help="JSON report (default BLINK_HOME/eval/parity/<model><mode>.json)")
+    fastmode.add_arguments(parity)
+    parity.set_defaults(func=cmd_bench_parity)
 
 
 def _register_bench(sub: argparse._SubParsersAction) -> None:
@@ -276,12 +360,14 @@ def _register_bench(sub: argparse._SubParsersAction) -> None:
     play.add_argument("--rows", default="1,219")
     play.add_argument("--concurrency", default="1,2,5")
     play.add_argument("--iters", type=int, default=200)
-    play.add_argument("--warmup", type=int, default=20)
+    play.add_argument("--warmup", type=int, default=20, help="untimed calls first (compile happens here)")
+    fastmode.add_arguments(play)
     for parser in (throughput, loader, play):
         parser.add_argument("--out", help="bench.json path (default BLINK_HOME/eval/bench.json)")
     for parser in (throughput, play):
         parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     play.set_defaults(func=cmd_bench_play)
+    _register_parity(actions)
 
 
 # ---------------------------------------------------------------- sweep

@@ -9,6 +9,9 @@
 A weights file is either a full training checkpoint ({"config": TrainConfig dict, "model", "ema", ...})
 or a slim file ({"config": TrainConfig or ModelConfig dict, "model"}). Files load with
 weights_only=True, so a weights file can never run code.
+
+load_evaluator plays fp32 with no compile unless asked (blink.play.fastmode): the mode is checked
+before any weights load, and a compiled evaluator is warmed up before it is returned.
 """
 
 from pathlib import Path
@@ -19,6 +22,7 @@ from blink import paths
 from blink.model.config import ModelConfig, config_from_dict
 from blink.model.evaluator import TorchEvaluator
 from blink.model.transformer import BlinkNet
+from blink.play import fastmode
 from blink.train.checkpoint import latest_checkpoint, load_checkpoint
 from blink.train.status import valid_run_name
 
@@ -72,5 +76,14 @@ def load_model(selector: str, device: str = "cuda") -> BlinkNet:
     return model.to(torch.device(device)).eval()
 
 
-def load_evaluator(selector: str, device: str = "cuda") -> TorchEvaluator:
-    return TorchEvaluator(load_model(selector, device), device)
+def load_evaluator(
+    selector: str,
+    device: str = "cuda",
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
+) -> TorchEvaluator:
+    fastmode.check(precision, device)
+    evaluator = TorchEvaluator(load_model(selector, device), device, precision=precision, compile=compile)
+    if compile:
+        evaluator.warm_up()
+    return evaluator

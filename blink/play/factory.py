@@ -13,7 +13,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from blink.play import rules
+from blink.play import fastmode, rules
 from blink.play.agents import Agent, PolicyAgent, ValueAgent
 from blink.play.budget import DecisionRecord
 from blink.play.evaluator import Evaluator
@@ -48,14 +48,23 @@ def check_available(selector: str) -> None:
         raise ModelUnavailable(_loader_missing_message(selector, ModuleNotFoundError(LOADER)))
 
 
-def load_evaluator(selector: str, device: str = "cuda", seed: int = 0) -> Evaluator:
+def load_evaluator(
+    selector: str,
+    device: str = "cuda",
+    seed: int = 0,
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
+) -> Evaluator:
+    """A real model in the given play mode (fp32, no compile by default; blink.play.fastmode), or the
+    random-logit evaluator, which has no precision or compile of its own. bf16 off CUDA is refused."""
+    fastmode.check(precision, device)
     if selector in RANDOM_SELECTORS:
         return RandomLogitEvaluator(seed)
     try:
         from blink.model.loading import load_evaluator as load_model
     except ImportError as exc:
         raise ModelUnavailable(_loader_missing_message(selector, exc)) from exc
-    return load_model(selector, device=device)
+    return load_model(selector, device=device, precision=precision, compile=compile)
 
 
 def material_agent(epsilon: float = rules.DEFAULT_EPSILON) -> ValueAgent:
