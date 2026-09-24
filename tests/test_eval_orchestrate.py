@@ -186,7 +186,7 @@ def run_all(tmp_path):
         "E3": {"mode": "value"},
         "E4": {"crossover": {"nodes": 2048}},
         "E5": {"final_slice_pgns": [str(pgn)]},
-        "E8": {"rules_on": {"pct": 91.0}},
+        "E8": {"rules_on": {"pct": 91.0, "n": 500}},
     }
     return orchestrate.run_all(
         ctx(tmp_path),
@@ -209,7 +209,8 @@ def test_run_all_writes_results_json_through_the_schema(tmp_path):
     assert rows["Random"].elo is None and rows["Random"].kind == "ladder"
     assert rows["DM-9M"].dm_puzzles_pct == pytest.approx(86.1)
     value_row = next(r for r in results.diagnostics if r.mode == "value")
-    assert value_row.conversion_pct == 91.0 and results.shipped.mode == "value"
+    assert (value_row.conversion_pct, value_row.conversion_n) == (91.0, 500)
+    assert results.shipped.mode == "value"
     assert results.eval_md_sha == out["state"]["protocol"]["sha256"]
     assert json.loads((tmp_path / "out" / "summary.json").read_text(encoding="utf-8"))["games"]["E5"] == 2
 

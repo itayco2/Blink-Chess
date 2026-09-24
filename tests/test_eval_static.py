@@ -201,6 +201,35 @@ def test_e2_runs_end_to_end_and_fills_two_diagnostics_rows(tmp_path):
     assert rows[1].vaa is not None and rows[1].top1 is None
 
 
+def test_diagnostics_rows_give_each_band_its_n_and_drop_a_rating_without_its_interval():
+    bands = {
+        "<1000": {"value": 0.97, "n": 1_203, "wilson95": [0.96, 0.98]},
+        "2500+": {"value": None, "n": 0, "wilson95": [0.0, 1.0]},
+    }
+    e2 = {
+        "test_iid": None,
+        "grouped_gap": None,
+        "games10k": None,
+        "mateset": None,
+        "puzzles": {
+            "dm10k": {
+                "value": {
+                    "bands": bands,
+                    "puzzle_rating_equivalent": {"value": 1905.0, "n": 1_203, "ci95": [1880.0, 1931.0]},
+                },
+                "policy": {
+                    "bands": bands,
+                    "puzzle_rating_equivalent": {"value": 1500.0, "n": 3, "ci95": None},
+                },
+            }
+        },
+    }
+    policy, value_row = static.diagnostics_rows(e2, "Blink-test")
+    assert value_row.band_pct == {"<1000": pytest.approx(97.0)} and value_row.band_n == {"<1000": 1_203}
+    assert (value_row.puzzle_rating_equiv, value_row.puzzle_rating_ci) == (1905.0, (1880.0, 1931.0))
+    assert (policy.puzzle_rating_equiv, policy.puzzle_rating_ci) == (None, None)
+
+
 def test_decoded_record_boards_encode_back_to_the_record():
     rec = record("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1", "e8g8", cp=0)
     root = static.root_from_record(rec)

@@ -669,14 +669,15 @@ def strength_rows(fit, state: dict, shipped: str | None, reproduce: str) -> tupl
 
 
 def diagnostics_rows(state: dict, shipped_mode_name: str | None) -> tuple:
+    """E2's rows; the shipped mode's also carries E8's rules-on conversion and its game count."""
     from blink.report.results_schema import DiagnosticsRow
 
-    e8 = state.get("E8") or {}
-    conversion = (e8.get("rules_on") or {}).get("pct")
+    rules_on = (state.get("E8") or {}).get("rules_on") or {}
+    conversion = {"conversion_pct": rules_on.get("pct"), "conversion_n": rules_on.get("n")}
     rows = []
     for row in (state.get("E2") or {}).get("diagnostics", []):
         ci = row.get("puzzle_rating_ci")
-        extra = {"conversion_pct": conversion} if row["mode"] == shipped_mode_name else {}
+        extra = conversion if row["mode"] == shipped_mode_name else {}
         rows.append(DiagnosticsRow(**{**row, "puzzle_rating_ci": tuple(ci) if ci else None, **extra}))
     return tuple(rows)
 

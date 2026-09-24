@@ -687,17 +687,21 @@ def _value(entry: dict | None, *keys: str) -> float | None:
 
 
 def diagnostics_rows(e2: dict, agent: str) -> list:
-    """The two DiagnosticsRows (policy, value) that results.json carries for this model."""
+    """The two DiagnosticsRows (policy, value) that results.json carries for this model.
+
+    The schema never lets a number go out without what its interval is built from: each band's
+    percentage carries its puzzle count (band_n), and a puzzle-rating equivalent whose bootstrap gave
+    no interval is left out of the row (it stays in e2's own report).
+    """
     from blink.report.results_schema import DiagnosticsRow
 
     iid, gap, games = e2["test_iid"] or {}, e2["grouped_gap"] or {}, e2["games10k"] or {}
     rows = []
     for mode in ("policy", "value"):
         dm = (e2["puzzles"].get("dm10k") or {}).get(mode) or {}
-        band = {
-            name: 100 * b["value"] for name, b in (dm.get("bands") or {}).items() if b["value"] is not None
-        }
+        scored = {name: b for name, b in (dm.get("bands") or {}).items() if b["value"] is not None}
         equiv = dm.get("puzzle_rating_equivalent") or {}
+        ci = equiv.get("ci95")
         rows.append(
             DiagnosticsRow(
                 agent=agent,
@@ -713,11 +717,12 @@ def diagnostics_rows(e2: dict, agent: str) -> list:
                 ece_after=_value(iid, "ece_after", "value"),
                 regret_games10k=_value(games.get("regret"), mode, "value"),
                 grouped_gap=gap.get("top1" if mode == "policy" else "vaa"),
-                band_pct=band,
+                band_pct={name: 100 * b["value"] for name, b in scored.items()},
+                band_n={name: b["n"] for name, b in scored.items()},
                 mate_shortest=_value((e2["mateset"] or {}).get(mode), "shortest", "value"),
                 mate_preserving=_value((e2["mateset"] or {}).get(mode), "preserving", "value"),
-                puzzle_rating_equiv=equiv.get("value"),
-                puzzle_rating_ci=tuple(equiv["ci95"]) if equiv.get("ci95") else None,
+                puzzle_rating_equiv=equiv.get("value") if ci else None,
+                puzzle_rating_ci=tuple(ci) if ci else None,
             )
         )
     return rows
