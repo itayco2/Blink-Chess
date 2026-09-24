@@ -2,16 +2,20 @@
 // (onnxruntime-web, WASM, one thread); this module owns the game, the board and what is drawn.
 // Blink's move is the legal move with the highest policy probability, one forward pass and no search,
 // with the bot's rule checks from rules.js: a mate in one is played without looking (R2), and draws
-// by rule are avoided when clearly winning and taken when clearly losing (R3).
+// by rule are avoided when clearly winning and taken when clearly losing (R3). panel.js draws the model
+// card and the value histogram; rating.js reads the bot's live Lichess rating (config.json names it).
 
 import { Chessboard, COLOR, FEN, INPUT_EVENT_TYPE } from "./vendor/cm-chessboard/Chessboard.js";
 import { Chess, validateFen } from "./vendor/chess.js/chess.js";
+import * as panel from "./panel.js";
+import * as rating from "./rating.js";
 import * as rules from "./rules.js";
 import * as tok from "./tokenizer.js";
 
 const MODEL_URL = "models/model.onnx";
 const CARD_URL = "models/model.json";
 const VOCAB_URL = "vocab.json";
+const CONFIG_URL = "config.json";
 const ARROWS = 3;
 const SQUARE = 100; // arrow overlay units per square: the overlay's viewBox is 0 0 800 800
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -31,6 +35,9 @@ const app = {
   replies: 0,
   timings: [],
   lastLook: null,
+  card: {},
+  backend: null,
+  rating: null,
 };
 
 // --- The worker: one queued request at a time --------------------------------------------------------
@@ -64,7 +71,7 @@ function createEngine() {
     return result;
   };
   return {
-    load: (url) => call({ type: "load", url: new URL(url, document.baseURI).href }),
+    load: (url, sha256) => call({ type: "load", url: new URL(url, document.baseURI).href, sha256 }),
     evaluate: (codes) => call({ type: "evaluate", codes: Array.from(codes) }),
   };
 }
@@ -182,6 +189,7 @@ async function startGame(fen) {
   app.lastLook = null;
   clearArrows();
   renderWin(null);
+  renderValue(null);
   renderMoves();
   $("top-moves").replaceChildren();
   $("rule-note").textContent = "";
@@ -263,9 +271,22 @@ function median(values) {
   return sorted[Math.floor((sorted.length - 1) / 2)];
 }
 
+function renderValue(look) {
+  panel.renderHistogram($("value-hist"), look && look.bins, look ? look.turn : "w");
+  if (!look) {
+    $("hist-note").textContent = "The value head's 128 bins of White's win chance appear after Blink's next look.";
+  } else if (!look.bins) {
+    $("hist-note").textContent = "No look this move: a mate in one is played without the network (R2).";
+  } else {
+    const white = look.turn === "w" ? look.win : 1 - look.win;
+    $("hist-note").textContent = `Value head, 128 bins of White's win chance (White's side on the left): mean ${(white * 100).toFixed(1)}%, from the same forward pass as the move.`;
+  }
+}
+
 function renderLook(look) {
   drawArrows(look.top);
   renderWin(look.turn === "w" ? look.win : 1 - look.win);
+  renderValue(look);
   $("ms-last").textContent = look.calls ? look.ms.toFixed(0) : "0";
   const timed = app.timings.length ? `median ${median(app.timings).toFixed(0)} ms over ${app.timings.length}` : "";
   $("ms-median").textContent = timed ? `(${timed})` : "";
@@ -340,25 +361,40 @@ function onFenSubmit(event) {
   }
 }
 
-async function loadModelCard() {
-  const response = await fetch(CARD_URL);
-  const card = response.ok ? await response.json() : {};
-  const parts = [card.selector || "model.onnx"];
-  if (card.parameters) {
-    parts.push(`${card.parameters.toLocaleString("en-US")} parameters`);
+async function getJson(url) {
+  const response = await fetch(url, { cache: "no-cache" });
+  return response.ok ? response.json() : {};
+}
+
+async function showRating() {
+  const config = await getJson(CONFIG_URL);
+  app.rating = await rating.fetchRating(config);
+  $("rating").replaceChildren();
+  if (app.rating.publishable && app.rating.url) {
+    const link = document.createElement("a");
+    link.href = app.rating.url;
+    link.textContent = app.rating.text;
+    $("rating").appendChild(link);
+  } else {
+    $("rating").textContent = app.rating.text;
   }
-  if (card.bytes) {
-    parts.push(`${(card.bytes / 1e6).toFixed(1)} MB`);
+  $("rating-note").textContent = app.rating.note ? `(${app.rating.note})` : "";
+}
+
+function showModel(card) {
+  panel.renderCard($("model-card"), card);
+  if (card.label) {
+    $("mode-label").textContent = `${card.label}: the legal move with the highest probability, from one forward pass. Like the bot, Blink plays a mate in one without looking, and avoids draws by rule when clearly winning but takes them when clearly losing. Value mode is not run in the browser.`;
   }
-  const note = card.selector === "stand-in" ? ". Random, untrained weights: its moves test the pipeline, not chess." : "";
-  $("model-card").textContent = parts.join(", ") + note;
 }
 
 async function runSelfTest() {
   const game = new Chess();
   const look = await lookOnce(game);
   const legal = game.moves({ verbose: true }).some((move) => move.lan === look.move.uci);
-  window.__blinkSelfTest = Object.freeze({ ok: legal && look.calls === 1 && Number.isFinite(look.win), move: look.move.uci, ms: look.ms });
+  const histogram = Array.isArray(look.bins) && look.bins.length === app.vocab.numBins;
+  const ok = legal && look.calls === 1 && Number.isFinite(look.win) && histogram;
+  window.__blinkSelfTest = Object.freeze({ ok, move: look.move.uci, ms: look.ms, histogram, backend: app.backend.backend, source: app.backend.source });
 }
 
 function exposeHooks() {
@@ -376,6 +412,10 @@ function exposeHooks() {
       lastRule: app.lastLook ? app.lastLook.rule : null,
       timings: [...app.timings],
       gameOver: app.game.isGameOver(),
+      histogramBins: Number($("value-hist").dataset.bins || 0),
+      backend: app.backend ? { backend: app.backend.backend, threads: app.backend.threads, source: app.backend.source } : null,
+      card: app.card.label || null,
+      rating: app.rating ? app.rating.text : null,
     }),
     legalMoves: () => app.game.moves({ verbose: true }).map((move) => ({ from: move.from, to: move.to, uci: move.lan })),
   });
@@ -390,11 +430,15 @@ async function main() {
   exposeHooks();
   try {
     app.vocab = tok.createVocab(await (await fetch(VOCAB_URL)).json());
+    app.card = await getJson(CARD_URL);
+    showModel(app.card);
+    showRating().catch((error) => console.warn("the Lichess rating did not load", error));
     app.engine = createEngine();
-    const info = await app.engine.load(MODEL_URL);
+    app.backend = await app.engine.load(MODEL_URL, app.card.sha256);
+    $("backend").textContent = `Backend: ${panel.backendLabel(app.backend, app.card)}`;
     app.ready = true;
-    setStatus(`Model loaded in ${Math.round(info.loadMs)} ms. Your move`);
-    await loadModelCard();
+    const where = app.backend.source === "cache" ? "from this browser's cache" : "downloaded";
+    setStatus(`Model loaded in ${Math.round(app.backend.loadMs)} ms (${where}). Your move`);
     if (new URLSearchParams(location.search).has("selftest")) {
       await runSelfTest();
     }
