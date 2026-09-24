@@ -61,6 +61,25 @@ def test_workers_are_spawn_safe_and_skip_nothing_when_resumed(tmp_path):
     assert os.cpu_count() is None or games10k.default_procs() <= os.cpu_count()
 
 
+def test_games10k_is_replaced_whole_so_a_training_check_never_reads_half_a_file(tmp_path, monkeypatch):
+    """Arms read games10k.npy at their checks while the labeller may be writing it again."""
+    path = tmp_path / games10k.OUTPUT
+    old = np.zeros(3, dtype=ROOT_DTYPE)
+    games10k.write_records(path, old)
+
+    def disk_full(handle, array, **kwargs):
+        handle.write(b"\x93NUMPY half a header")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(games10k.np, "save", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        games10k.write_records(path, np.ones(5, dtype=ROOT_DTYPE))
+    monkeypatch.undo()
+    assert np.array_equal(np.load(path), old)
+    games10k.write_records(path, np.ones(5, dtype=ROOT_DTYPE))
+    assert len(np.load(path)) == 5 and [p.name for p in tmp_path.iterdir()] == [games10k.OUTPUT]
+
+
 def test_the_trainer_finds_games10k_where_the_labeller_writes_it(tmp_path, monkeypatch):
     monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
     assert games10k.default_path() == tmp_path / "home" / "data" / games10k.OUTPUT

@@ -118,6 +118,69 @@ def test_the_lazy_set_logs_an_unreadable_file_once_and_keeps_training(tmp_path):
     assert len(logs) == 1 and "games10k_top1" in logs[0] and "board" in logs[0]
 
 
+def _half_written_mateset(tmp_path):
+    whole = _mateset_file(tmp_path).read_bytes()
+    path = tmp_path / "half.npz"
+    path.write_bytes(whole[: len(whole) // 2])
+    return path
+
+
+@pytest.mark.parametrize(
+    ("name", "loader", "damaged"),
+    [
+        ("games10k", games10k_eval.load, lambda tmp: (tmp / "empty.npy", b"")),
+        ("mateset", mateset_eval.load, lambda tmp: (tmp / "empty.npz", b"")),
+        ("mateset", mateset_eval.load, lambda tmp: (_half_written_mateset(tmp), None)),
+    ],
+    ids=["empty games10k", "empty mateset", "truncated mateset"],
+)
+def test_the_lazy_set_logs_an_empty_or_truncated_file_and_keeps_training(tmp_path, name, loader, damaged):
+    """np.load raises EOFError on an empty file and zipfile.BadZipFile on half an .npz: neither is an
+    OSError or a ValueError, and either would have ended the run at its first check."""
+    path, content = damaged(tmp_path)
+    if content is not None:
+        path.write_bytes(content)
+    logs = []
+    lazy = checksets.Lazy(name, path, loader, "its metrics")
+    assert lazy.get(logs.append) is None and lazy.get(logs.append) is None
+    assert len(logs) == 1 and "cannot use" in logs[0] and "its metrics not scored" in logs[0]
+
+
+def test_a_check_set_that_fails_to_score_leaves_the_row_and_the_run_going(tmp_path, monkeypatch):
+    """An evaluation input or result never ends a run: the row keeps its VAA without the set's keys."""
+
+    def out_of_memory(run, chunk, tick=None):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(checksets, "metrics", out_of_memory)
+    rows, logs = _train(tmp_path, games10k=_games_file(tmp_path), mateset=_mateset_file(tmp_path))
+    assert {step for step, row in rows.items() if "check" in row} == set(CHECKS)
+    assert all("vaa" in rows[step] and not (GAMES_KEYS | MATE_KEYS) & set(rows[step]) for step in CHECKS)
+    skipped = [line for line in logs if "CUDA out of memory" in line]
+    assert len(skipped) == len(CHECKS) and "not scored" in skipped[0]
+
+
+def test_weights_that_go_nan_before_a_check_reach_the_supervisor_as_a_non_finite_loss(tmp_path, monkeypatch):
+    """The mateset's tie-break found no child near a NaN best value and raised ValueError at the 5% check:
+    the supervisor took that for an ordinary crash and resumed at the same LR instead of rolling back.
+    The check now scores what it can, and the next metrics row raises FloatingPointError as before."""
+    real = loop._train_step
+
+    def diverging(run, data, lr):
+        out = real(run, data, lr)
+        if run.step == 1:  # this step makes run.step 2: the 5% check
+            with torch.no_grad():
+                for parameter in run.model.parameters():
+                    parameter.fill_(float("nan"))
+        return out
+
+    monkeypatch.setattr(loop, "_train_step", diverging)
+    with pytest.raises(FloatingPointError, match="non-finite loss"):
+        _train(tmp_path, games10k=_games_file(tmp_path), mateset=_mateset_file(tmp_path))
+    rows = [json.loads(line) for line in (tmp_path / "run" / "evals.jsonl").read_text().splitlines()]
+    assert {row["step"]: row.get("check") for row in rows}[2] == "5%"
+
+
 @pytest.mark.cuda
 def test_a_cuda_run_scores_both_sets_at_its_checks(tmp_path):
     """On CUDA, games10k runs in fp32 chunks and the mateset in VAA's bf16 chunks, as on the GPU box."""

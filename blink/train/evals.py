@@ -11,7 +11,8 @@ compares root set with root set, each with its own noise floor: full rows with v
 rows only once vaa_sigma_subset has been measured. With `vaa_checks` the check's rule is applied; a
 failed rule sets `vaa_check_failed` True in the row, which the supervisor reads. A check row also
 scores games10k top-1 and the mateset's mate rates when the run has those files (blink.train.checksets:
-arms a07 and a08 are judged on them). `eval_s` records the row's cost so the overhead can be measured.
+arms a07 and a08 are judged on them); when scoring them fails the row is written without them and the
+log says why. `eval_s` records the row's cost so the overhead can be measured.
 """
 
 import time
@@ -103,6 +104,19 @@ def _describe(record: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _check_set_metrics(run, tick: Callable[[], None] | None) -> dict[str, Any]:
+    """The games10k and mateset keys, or none when scoring them fails: an evaluation input or result
+    never ends a run. Weights gone NaN, say, must reach the supervisor as the next metrics row's
+    non-finite loss (its NaN rollback), not as a crash in a check."""
+    try:
+        return checksets.metrics(run, _chunk(run), tick)
+    except Exception as exc:  # a CUDA OOM, a set that no longer fits the model: logged, never fatal
+        run.log(
+            f"step {run.step}: games10k and mateset not scored at this check ({type(exc).__name__}: {exc})"
+        )
+        return {}
+
+
 def evaluate(run, label: str | None = None, tick: Callable[[], None] | None = None) -> None:
     """Write one evals row for the current step (nothing when the run has neither val nor probe).
 
@@ -112,7 +126,7 @@ def evaluate(run, label: str | None = None, tick: Callable[[], None] | None = No
     if not metrics:
         return
     if label is not None:
-        metrics.update(checksets.metrics(run, _chunk(run), tick))
+        metrics.update(_check_set_metrics(run, tick))
     record = {"step": run.step, "samples": run.step * run.cfg.batch_size, **metrics}
     if label is not None:
         record.update(_check(run, label, record))

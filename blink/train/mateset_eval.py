@@ -95,8 +95,12 @@ def choose(
 def choices(
     w_child: np.ndarray, root_logits: np.ndarray, probe: vaa.Probe, epsilon: float = rules.DEFAULT_EPSILON
 ) -> np.ndarray:
-    """The chosen child (an index into the probe's children) of every root; -1 for a root without one."""
+    """The chosen child (an index into the probe's children) of every root; -1 for a root without one.
+
+    A NaN value (weights that diverged) is never the best: it counts as -inf, since with a NaN best
+    R4's tie set would be empty and the choice would raise instead of scoring what it can."""
     values = np.where(probe.child_terminal == vaa.RULE_DRAW, vaa.DRAW_VALUE, 1.0 - w_child)  # R3
+    values = np.where(np.isnan(values), -np.inf, values)
     mates = probe.child_terminal == vaa.CHECKMATE
     chosen = np.full(probe.n_roots, -1, dtype=np.int64)
     for root in range(probe.n_roots):

@@ -96,6 +96,17 @@ def test_one_root_s_choice_follows_r2_then_the_value_then_r4():
     assert tied == 1  # value mode lists children in vocabulary order, and the first of a tie wins
 
 
+def test_a_nan_value_never_wins_and_never_crashes_the_choice():
+    """Diverged weights give NaN values: R4's tie set was empty and np.argmax raised on it."""
+    probe = _mateset(ROOTS).probe
+    logits = np.zeros((probe.n_roots, moves.NUM_MOVES), dtype=np.float32)
+    w_child = np.full(len(probe.child_board), np.nan, dtype=np.float32)
+    chosen = mateset_eval.choices(w_child, logits, probe)
+    assert (chosen >= 0).all() and chosen[3] == 9  # R2 still plays the checkmate
+    w_child[1] = 0.1  # one finite child: the mover's 0.9 beats every NaN
+    assert mateset_eval.choices(w_child, logits, probe)[0] == 1
+
+
 def _root(board: chess.Board, best: str) -> np.ndarray:
     record = np.zeros(1, dtype=ROOT_DTYPE)
     record["board"] = encode.pack(encode.encode_board(board))

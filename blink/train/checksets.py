@@ -7,8 +7,10 @@ and mate_preserving must come from the same model to be judged beside them.
 
 Each file is loaded once per run, at the first check, and kept. A run without one (a skeleton pack, a
 raw-source run, a machine without BLINK_HOME/data/games10k.npy) trains exactly as before: the metric
-is not written, and the log says once what was skipped and why. An unreadable file is logged the same
-way rather than stopping a training run over an evaluation input.
+is not written, and the log says once what was skipped and why. An unreadable file (missing fields, an
+empty file, half an .npz from a writer that was cut off) is logged the same way rather than stopping a
+training run over an evaluation input; blink.train.evals likewise writes a check row without these
+keys when scoring them fails.
 """
 
 from collections.abc import Callable
@@ -53,8 +55,9 @@ class Lazy[T]:
             return None
         try:
             value = self.loader(path)
-        except (OSError, ValueError, KeyError) as exc:
-            log(f"{self.name}: cannot use {path} ({exc}); {self.metrics} not scored in this run")
+        except Exception as exc:  # np.load: EOFError on an empty file, BadZipFile on half an .npz
+            why = f"{type(exc).__name__}: {exc}"
+            log(f"{self.name}: cannot use {path} ({why}); {self.metrics} not scored in this run")
             return None
         log(f"{self.name}: {self.describe(value)} from {path}")
         return value
