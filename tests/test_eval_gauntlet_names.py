@@ -68,3 +68,33 @@ def test_stockfish_at_a_node_budget_is_full_strength_with_no_clock():
     assert not any(t.startswith(("st=", "tc=", "timemargin=")) for t in tokens)
     assert not any("UCI_LimitStrength" in t or "UCI_Elo" in t for t in tokens)
     assert "option.Threads=1" in tokens and "option.Hash=16" in tokens
+
+
+def test_two_long_selectors_that_share_their_first_40_characters_get_different_names():
+    """Ordo tallies by name: two models under one name would merge into one Elo row."""
+    ema = fastchess.engine_name(r"D:\blink\runs\size-m12\checkpoints\final_ema.pt", "value")
+    raw = fastchess.engine_name(r"D:\blink\runs\size-m12\checkpoints\final_raw.pt", "value")
+    assert ema != raw
+    assert ema.startswith("Blink-value-D_blink_runs_size-m12_checkp")
+    assert len(ema) == len(raw) == len("Blink-value-") + fastchess.NAME_TAG_MAX
+    assert fastchess.engine_name("run:s10m", "value") == "Blink-value-run_s10m"
+
+
+def test_two_selectors_that_would_play_under_one_name_are_refused():
+    fastchess.check_distinct_names(["ship", "run:s10m", "ship"], "value")
+    with pytest.raises(ValueError, match="Blink-policy-run_a_b"):
+        fastchess.check_distinct_names(["run:a b", "run_a_b"], "policy")
+
+
+def test_e5_refuses_side_models_that_collide_before_any_game(monkeypatch):
+    from types import SimpleNamespace
+
+    from blink.eval import anchors
+
+    def no_games(*args, **kwargs):
+        raise AssertionError("no game may start")
+
+    monkeypatch.setattr(anchors, "run_anchor_block", no_games)
+    ctx = SimpleNamespace(model="run:a b", side_models=("run_a_b",))
+    with pytest.raises(ValueError, match="both play as"):
+        anchors.e5_block(ctx, {})

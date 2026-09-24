@@ -12,6 +12,7 @@ Blink name its games would be filed as Blink's and the "blink" audit filter woul
 Stockfish at a fixed node count (the E4 node ladder) is `SF19-n<nodes>`, full strength.
 """
 
+import hashlib
 import os
 import re
 import subprocess
@@ -40,6 +41,8 @@ SUMMARY = re.compile(
 ELO = re.compile(r"^Elo: .*$", re.MULTILINE)
 PTNML = re.compile(r"Ptnml\(0-2\): \[(\d+), (\d+), (\d+), (\d+), (\d+)\]")
 NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+NAME_TAG_MAX = 40  # a model tag longer than this keeps its head plus a hash of the whole selector
+NAME_HASH_CHARS = 7
 
 
 def tools_dir() -> Path:
@@ -89,12 +92,33 @@ def dm_name(selector: str) -> str:
         raise ModelUnavailable(str(exc)) from exc
 
 
+def model_tag(model: str) -> str:
+    """The selector made name-safe. A long one keeps its first characters plus a short hash of the whole
+    selector, so two models whose tags share a head never play under one name (Ordo tallies by name)."""
+    tag = NAME_UNSAFE.sub("_", model).strip("_")
+    if len(tag) <= NAME_TAG_MAX:
+        return tag
+    digest = hashlib.sha256(model.encode("utf-8")).hexdigest()[:NAME_HASH_CHARS]
+    return f"{tag[: NAME_TAG_MAX - NAME_HASH_CHARS - 1]}-{digest}"
+
+
 def engine_name(model: str, mode: str) -> str:
     """The fastchess name of the engine under test: DM-9M[-ema] for a dm selector (PF60), else Blink's."""
     if registry.is_dm(model):
         return dm_name(model)
-    tag = NAME_UNSAFE.sub("_", model).strip("_")[:40]
-    return f"Blink-{mode}-{tag}"
+    return f"Blink-{mode}-{model_tag(model)}"
+
+
+def check_distinct_names(selectors: Sequence[str], mode: str) -> None:
+    """Refuse two different selectors that would play under one name: Ordo would merge their games."""
+    seen: dict[str, str] = {}
+    for selector in selectors:
+        name = engine_name(selector, mode)
+        first = seen.setdefault(name, selector)
+        if first != selector:
+            raise ValueError(
+                f"{first!r} and {selector!r} would both play as {name}: give one a distinct path"
+            )
 
 
 def audit_engine(name: str) -> str:

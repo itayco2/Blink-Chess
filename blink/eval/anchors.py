@@ -136,8 +136,11 @@ def _prior(state: dict) -> float:
 
 
 def e5_block(ctx, state: dict) -> dict:
+    from blink.eval import fastchess
     from blink.play.factory import MODES
 
+    for mode in MODES:
+        fastchess.check_distinct_names([ctx.model, *ctx.side_models], mode)
     grid = rating.read_anchors()
     final = {
         mode: run_anchor_block(
