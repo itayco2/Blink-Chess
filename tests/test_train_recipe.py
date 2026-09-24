@@ -151,12 +151,14 @@ def test_the_heartbeat_keeps_beating_inside_an_eval(tmp_path, monkeypatch):
     assert {b["step"] for b in during} >= {0, 4}
 
 
-def _reference_run(runs_root, name: str, ema_vaa: float) -> None:
+def _reference_run(runs_root, name: str, ema_vaa: float, roots: int) -> None:
+    """A finished sweep run: full-valprobe check rows, and a subset row that the 5% rule must ignore."""
     ref = runs_root / name
     ref.mkdir(parents=True)
     config = {"config": dataclasses.asdict(tiny_train_config(steps=1000, batch_size=16))}
     (ref / "config.json").write_text(json.dumps(config), encoding="utf-8")
-    rows = [{"step": s, "ema_vaa": ema_vaa} for s in (100, 200)]
+    subset = {"step": 50, "ema_vaa": 1.0 - ema_vaa, "vaa_set": "subset", "vaa_n": 10}
+    rows = [subset] + [{"step": s, "ema_vaa": ema_vaa, "vaa_set": "full", "vaa_n": roots} for s in (100, 200)]
     (ref / "evals.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
@@ -164,8 +166,8 @@ def _reference_run(runs_root, name: str, ema_vaa: float) -> None:
 def test_the_5_percent_check_writes_vaa_check_failed_when_the_run_falls_behind(
     tmp_path, reference_vaa, fails
 ):
-    _reference_run(tmp_path, "s6h", reference_vaa)
     probe = vaa.probe_from_roots(fixture_records()[:30])
+    _reference_run(tmp_path, "s6h", reference_vaa, roots=int((np.diff(probe.child_offset) > 0).sum()))
     cfg = tiny_train_config(
         steps=40, eval_every=40, vaa_checks=True, vaa_sigma=0.0, vaa_reference="s6h", batch_size=16
     )

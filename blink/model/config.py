@@ -60,7 +60,8 @@ class TrainConfig:
     val_size: int = 2000
     vaa_subset: int = 2000  # valprobe roots scored at every eval; the full valprobe runs at the checks
     vaa_checks: bool = False  # apply the P7 check rules at 5%, 25% and 50% of the steps
-    vaa_sigma: float = 0.01  # the 3-seed VAA noise floor (a fraction: 0.01 is 1 point)
+    vaa_sigma: float = 0.01  # the 3-seed VAA noise floor on the full valprobe (a fraction: 0.01 is 1 point)
+    vaa_sigma_subset: float = 0.0  # the same floor on the vaa_subset roots; 0 = not measured (full rows only)
     vaa_reference: str = ""  # the run whose VAA the 5% check compares against (a run name)
     film: bool = False  # save the 21 film frames under film/
     ckpt_every_steps: int = 1000
@@ -96,7 +97,14 @@ class TrainConfig:
         for name in positive:
             if getattr(self, name) <= 0:
                 raise ValueError(f"train.{name} must be positive, got {getattr(self, name)}")
-        for name in ("ckpt_every_minutes", "heartbeat_s", "vaa_sigma", "keep_every_hours"):
+        non_negative = (
+            "ckpt_every_minutes",
+            "heartbeat_s",
+            "vaa_sigma",
+            "vaa_sigma_subset",
+            "keep_every_hours",
+        )
+        for name in non_negative:
             if getattr(self, name) < 0:  # 0 is meaningful: off, and every step
                 raise ValueError(f"train.{name} must not be negative, got {getattr(self, name)}")
 

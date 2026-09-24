@@ -150,12 +150,22 @@ def test_check_steps_sit_at_5_25_30_50_and_100_percent():
     assert vaa.check_steps(10_000, preview=True) == {10_000: "preview"}
 
 
+def _full(step: int, ema_vaa: float, roots: int = 20000) -> dict:
+    """A full-valprobe check row as the trainer writes it (1,024 samples per step)."""
+    return {"step": step, "samples": step * 1024, "ema_vaa": ema_vaa, "vaa_set": "full", "vaa_n": roots}
+
+
+def _sub(step: int, ema_vaa: float, roots: int = 2000) -> dict:
+    """A 2k-step eval row: the EMA's VAA on the first `roots` valprobe roots only."""
+    return {"step": step, "samples": step * 1024, "ema_vaa": ema_vaa, "vaa_set": "subset", "vaa_n": roots}
+
+
 def _reference() -> vaa.Reference:
     rows = (
-        {"step": 1000, "samples": 1_024_000, "ema_vaa": 0.30},
-        {"step": 2000, "samples": 2_048_000, "ema_vaa": 0.40},
-        {"step": 3000, "samples": 3_072_000, "ema_vaa": 0.45},
-        {"step": 4000, "samples": 4_096_000, "ema_vaa": 0.55},  # cooldown: never the 5% reference
+        _full(1000, 0.30),
+        _full(2000, 0.40),
+        _full(3000, 0.45),
+        _full(4000, 0.55),  # cooldown: never the 5% reference
     )
     return vaa.Reference(name="s6h", rows=rows, cooldown_start=3500)
 
@@ -217,17 +227,58 @@ def test_a_full_pass_also_scores_its_first_roots_as_the_subset():
     assert (full["vaa"], full["n"]) == (pytest.approx(2 / 3), 3)
 
 
-def test_the_5_percent_check_compares_subset_with_subset_when_the_reference_row_is_a_subset_row():
-    rows = (
-        {"step": 1000, "samples": 1_024_000, "ema_vaa": 0.40, "vaa_set": "subset", "vaa_n": 2000},
-        {"step": 4000, "samples": 4_096_000, "ema_vaa": 0.50, "vaa_set": "full", "vaa_n": 20000},
-    )
-    ref = vaa.Reference(name="m6h", rows=rows, cooldown_start=3500)
-    same_roots = vaa.apply_check("5%", 0.45, [], ref, 2_000_000, sigma=0.01, subset=(2000, 0.37))
-    assert same_roots["vaa_check_failed"] is True and same_roots["check_failure"]["ema_vaa"] == 0.37
-    assert "subset" in same_roots["check_rule"]
-    other_size = vaa.apply_check("5%", 0.45, [], ref, 2_000_000, sigma=0.01, subset=(1000, 0.37))
+def _mixed_reference() -> vaa.Reference:
+    """Full-valprobe rows at its checks, subset rows every 2k steps (as a real sweep run writes them)."""
+    check = {**_full(1000, 0.30), "ema_vaa_subset": 0.33, "vaa_subset_n": 2000}
+    rows = (check, _sub(2000, 0.40), _sub(3000, 0.44), _full(4000, 0.55))
+    return vaa.Reference(name="m6h", rows=rows, cooldown_start=3500)
+
+
+def test_the_5_percent_check_never_compares_subset_rows_with_the_full_probe_sigma():
+    """vaa_sigma is measured on the full valprobe: without a subset sigma only full rows are compared."""
+    ref = _mixed_reference()
+    kwargs = {"sigma": 0.01, "subset": (2000, 0.37), "n": 20000}
+    ok = vaa.apply_check("5%", 0.35, [], ref, 3_100_000, **kwargs)
+    assert "vaa_check_failed" not in ok and ok["check_threshold"] == pytest.approx(0.28)
+    assert "full" in ok["check_rule"] and "step 1000" in ok["check_rule"]
+    bad = vaa.apply_check("5%", 0.27, [], ref, 3_100_000, **kwargs)
+    assert bad["vaa_check_failed"] is True and bad["check_failure"]["ema_vaa"] == 0.27
+
+
+def test_the_5_percent_check_meets_a_subset_row_only_with_the_measured_subset_sigma():
+    ref = _mixed_reference()
+    kwargs = {"sigma": 0.01, "sigma_subset": 0.03, "n": 20000}
+    ok = vaa.apply_check("5%", 0.10, [], ref, 3_100_000, subset=(2000, 0.39), **kwargs)
+    assert "vaa_check_failed" not in ok and ok["check_threshold"] == pytest.approx(0.44 - 0.06)
+    assert "subset of 2000" in ok["check_rule"] and "step 3000" in ok["check_rule"]
+    bad = vaa.apply_check("5%", 0.99, [], ref, 3_100_000, subset=(2000, 0.37), **kwargs)
+    assert bad["vaa_check_failed"] is True and bad["check_failure"]["ema_vaa"] == 0.37
+    other_size = vaa.apply_check("5%", 0.35, [], ref, 3_100_000, subset=(1000, 0.10), **kwargs)
     assert "vaa_check_failed" not in other_size and "full" in other_size["check_rule"]
+
+
+def test_a_check_row_s_own_subset_vaa_counts_as_a_subset_reference():
+    ref = _mixed_reference()
+    row = vaa.apply_check("5%", 0.0, [], ref, 1_500_000, 0.01, subset=(2000, 0.30), sigma_subset=0.01)
+    assert row["check_threshold"] == pytest.approx(0.33 - 0.02) and row["vaa_check_failed"] is True
+
+
+def test_the_5_percent_check_is_skipped_when_the_reference_has_no_stable_full_valprobe_row():
+    ref = vaa.Reference(name="m6h", rows=(_sub(2000, 0.40), _full(4000, 0.55)), cooldown_start=3500)
+    row = vaa.apply_check("5%", 0.0, [], ref, 3_100_000, sigma=0.01, subset=(2000, 0.0), n=20000)
+    assert "vaa_check_failed" not in row and "full-valprobe" in row["check_skipped"]
+
+
+def test_the_5_percent_check_is_skipped_when_the_reference_scored_another_valprobe():
+    row = vaa.apply_check("5%", 0.0, [], _reference(), 3_100_000, sigma=0.01, n=19000)
+    assert "vaa_check_failed" not in row and "19000" in row["check_skipped"]
+
+
+def test_the_preview_is_checked_against_the_reference_s_last_full_valprobe_vaa():
+    """A reference stopped between checks ends on a subset row; its final full-probe VAA is earlier."""
+    ref = vaa.Reference(name="m6h", rows=(_full(1000, 0.30), _sub(2000, 0.60)), cooldown_start=3500)
+    assert ref.final() == 0.30
+    assert "vaa_check_failed" not in vaa.apply_check("preview", 0.31, [], ref, 0, sigma=0.01)
 
 
 def test_scoring_ticks_after_every_chunk_so_a_long_check_keeps_the_heartbeat_fresh():

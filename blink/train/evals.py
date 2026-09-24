@@ -6,8 +6,9 @@ and EMA) and the EMA's VAA on the fixed first `vaa_subset` roots of the valprobe
 2,000 roots' 57,275 children cost 1.6% of 2,000 training steps at S (4.48 s against 281 s) and about
 1.2% at M, where scoring raw and EMA cost about twice that (plan target: 1%). At a check step
 (5, 25, 30, 50 and 100% of the planned steps) VAA runs on the full valprobe for the raw weights (vaa)
-and the EMA (ema_vaa), and the same passes give the EMA's subset VAA (ema_vaa_subset), so the 5% rule
-can meet a reference's subset row on the same roots. With `vaa_checks` the check's rule is applied; a
+and the EMA (ema_vaa), and the same passes give the EMA's subset VAA (ema_vaa_subset). The 5% rule
+compares root set with root set, each with its own noise floor: full rows with vaa_sigma, and subset
+rows only once vaa_sigma_subset has been measured. With `vaa_checks` the check's rule is applied; a
 failed rule sets `vaa_check_failed` True in the row, which the supervisor reads. `eval_s` records the
 row's cost so the overhead can be measured.
 """
@@ -61,6 +62,8 @@ def _check(run, label: str, record: dict[str, Any]) -> dict[str, Any]:
         record["samples"],
         run.cfg.vaa_sigma,
         subset=subset,
+        sigma_subset=run.cfg.vaa_sigma_subset,
+        n=record["vaa_n"],
     )
 
 

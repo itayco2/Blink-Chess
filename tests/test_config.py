@@ -119,6 +119,7 @@ def test_auto_clip_needs_warmup_steps_to_measure():
         {"child_frac": -0.1},
         {"vaa_subset": 0},
         {"vaa_sigma": -0.01},
+        {"vaa_sigma_subset": -0.01},
         {"keep_every_hours": -1.0},
     ],
 )

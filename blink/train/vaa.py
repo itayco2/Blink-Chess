@@ -203,6 +203,16 @@ def check_steps(total: int, preview: bool = False) -> dict[int, str]:
     return {max(1, math.floor(frac * total + 0.5)): label for frac, label in CHECK_FRACS}
 
 
+def vaa_on(row: dict[str, Any], roots: int | None = None) -> float | None:
+    """An evals row's EMA VAA on the full valprobe (roots None) or on its first `roots` roots: a 2k-step
+    row holds only the subset, a check row holds the full probe and its subset (ema_vaa_subset)."""
+    if roots is None:
+        return row["ema_vaa"] if row.get("vaa_set") == "full" and "ema_vaa" in row else None
+    if row.get("vaa_set") == "subset" and row.get("vaa_n") == roots:
+        return row.get("ema_vaa")
+    return row.get("ema_vaa_subset") if row.get("vaa_subset_n") == roots else None
+
+
 @dataclass(frozen=True)
 class Reference:
     """The evals of the run a long run is checked against (the N* 6 h sweep run)."""
@@ -211,21 +221,23 @@ class Reference:
     rows: tuple[dict[str, Any], ...]
     cooldown_start: int
 
-    def stable_row(self, samples: int) -> dict[str, Any] | None:
-        """Its latest stable-phase eval row (with an EMA VAA) with at most `samples` samples seen."""
-        stable = [r for r in self.rows if r["step"] < self.cooldown_start and "ema_vaa" in r]
+    def stable_row(self, samples: int, roots: int | None = None) -> dict[str, Any] | None:
+        """Its latest stable-phase row with a VAA on those roots (vaa_on) and at most `samples` samples
+        seen; its first such row when every one has seen more."""
+        stable = [r for r in self.rows if r["step"] < self.cooldown_start and vaa_on(r, roots) is not None]
         if not stable:
             return None
         seen = [r for r in stable if r["samples"] <= samples]
         return seen[-1] if seen else stable[0]
 
-    def stable_at(self, samples: int) -> float | None:
-        """Its EMA VAA at the latest stable-phase eval with at most `samples` samples seen."""
-        row = self.stable_row(samples)
-        return None if row is None else row["ema_vaa"]
+    def stable_at(self, samples: int, roots: int | None = None) -> float | None:
+        """Its EMA VAA on those roots at the latest stable-phase eval with at most `samples` samples seen."""
+        row = self.stable_row(samples, roots)
+        return None if row is None else vaa_on(row, roots)
 
     def final(self) -> float | None:
-        rows = [r for r in self.rows if "ema_vaa" in r]
+        """Its last full-valprobe EMA VAA (a run stopped between checks ends on a subset row)."""
+        rows = [r for r in self.rows if vaa_on(r) is not None]
         return rows[-1]["ema_vaa"] if rows else None
 
 
@@ -253,22 +265,46 @@ def _failed(label: str, ema_vaa: float, threshold: float, rule: str, **extra: An
     }
 
 
-def _five_percent(
-    ema_vaa: float, reference: Reference | None, samples: int, sigma: float, subset: tuple[int, float] | None
+def _at_least(
+    own: float, row: dict[str, Any], ref: float, sigma: float, roots: str, name: str
 ) -> dict[str, Any]:
-    """EMA VAA >= the reference's stable-phase EMA VAA at equal samples - 2 sigma, on the same roots:
-    a reference subset row is met with this check's own subset VAA when the subsets are the same size."""
-    row = None if reference is None else reference.stable_row(samples)
-    if row is None:
-        return {"check": "5%", "check_skipped": "no reference run with stable-phase VAA"}
-    own, roots = ema_vaa, "full"
-    if row.get("vaa_set") == "subset" and subset is not None and subset[0] == row.get("vaa_n"):
-        own, roots = subset[1], "subset"
-    threshold = row["ema_vaa"] - 2 * sigma
-    rule = f"ema_vaa ({roots}) >= {reference.name} stable VAA at equal samples - 2 sigma"
+    """The 5% rule's verdict: own >= the reference row's VAA - 2 sigma (sigma measured on these roots)."""
+    threshold = ref - 2 * sigma
+    seen = f"step {row['step']}, {row['samples']:,} samples"
+    rule = f"ema_vaa ({roots}) >= {name} stable VAA ({seen}) - 2 x {sigma:g}"
     if own < threshold:
-        return _failed("5%", own, threshold, rule, reference=reference.name)
+        return _failed("5%", own, threshold, rule, reference=name)
     return {"check": "5%", "check_rule": rule, "check_threshold": threshold}
+
+
+def _five_percent(
+    ema_vaa: float,
+    reference: Reference | None,
+    samples: int,
+    sigma: float,
+    subset: tuple[int, float] | None,
+    sigma_subset: float,
+    n: int | None,
+) -> dict[str, Any]:
+    """EMA VAA >= the reference's stable-phase EMA VAA at equal samples - 2 sigma, root set for root set.
+
+    `sigma` is the full valprobe's noise floor; a 2,000-root subset VAA is noisier, so a subset row is
+    only compared with `sigma_subset`, measured on the subset, and only when it is set (> 0). Otherwise
+    the reference's latest stable full-valprobe row is the comparison, even when it is from fewer samples."""
+    if reference is None:
+        return {"check": "5%", "check_skipped": "no reference run"}
+    if subset is not None and sigma_subset > 0:
+        roots, own = subset
+        row = reference.stable_row(samples, roots)
+        if row is not None:
+            return _at_least(own, row, vaa_on(row, roots), sigma_subset, f"subset of {roots}", reference.name)
+    row = reference.stable_row(samples)
+    if row is None:
+        return {"check": "5%", "check_skipped": f"{reference.name} has no stable-phase full-valprobe VAA"}
+    if n is not None and row.get("vaa_n") != n:
+        skipped = f"{reference.name} scored {row.get('vaa_n')} valprobe roots, this run {n}"
+        return {"check": "5%", "check_skipped": skipped}
+    return _at_least(ema_vaa, row, row["ema_vaa"], sigma, "full", reference.name)
 
 
 def apply_check(
@@ -279,12 +315,15 @@ def apply_check(
     samples: int,
     sigma: float,
     subset: tuple[int, float] | None = None,
+    sigma_subset: float = 0.0,
+    n: int | None = None,
 ) -> dict[str, Any]:
     """The fields a check adds to its eval row; a failure sets `vaa_check_failed` True.
 
-    `subset` is (roots, EMA VAA) of this check's first `vaa_subset` roots, for the 5% rule."""
+    `ema_vaa` is over `n` full-valprobe roots and `sigma` is its noise floor. For the 5% rule only,
+    `subset` is (roots, EMA VAA) of this check's first `vaa_subset` roots and `sigma_subset` its floor."""
     if label == "5%":
-        return _five_percent(ema_vaa, reference, samples, sigma, subset)
+        return _five_percent(ema_vaa, reference, samples, sigma, subset, sigma_subset, n)
     if label in ("25%", "50%"):
         previous = [row for row in history if "check" in row and "ema_vaa" in row]
         if not previous:
