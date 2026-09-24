@@ -1,0 +1,33 @@
+# t: the P1 walking-skeleton model (about 0.4M parameters, GAB off).
+# blink train --config configs/t.toml --run skeleton --source-raw <eval db .zst> --max-lines 300000
+
+[model]
+d_model = 128
+n_layers = 2
+n_heads = 4
+head_dim = 32
+ffn_mult = 2
+gab = false
+
+[train]
+batch_size = 256
+steps = 3000
+peak_lr = 1e-3
+warmup_steps = 200
+cooldown_frac = 0.2
+weight_decay = 0.1
+beta1 = 0.9
+beta2 = 0.95
+clip_norm = 1.0
+ema_max = 0.9999
+alpha = 0.5
+tau = 0.05
+lambda_v = 1.0
+seed = 0
+metrics_every = 50
+eval_every = 250
+val_size = 2000
+ckpt_every_steps = 1000
+ckpt_every_minutes = 30.0
+keep_last = 3
+heartbeat_s = 10.0
