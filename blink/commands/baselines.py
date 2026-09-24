@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from blink import paths
+from blink.train.status import valid_run_name
 
 EXIT_REFUSED = 2
 KINDS = ("linear", "mlp")
@@ -37,12 +38,15 @@ def cmd_train(args: argparse.Namespace) -> int:
             val_positions=args.val_positions,
             device=_device(args.device),
         )
-        out = paths.home() / "runs" / f"baseline-{args.kind}"
+        run = args.run or f"baseline-{args.kind}"
+        if not valid_run_name(run):
+            raise ValueError(f"bad run name {run!r} (letters, digits, _ - . only)")
+        out = paths.home() / "runs" / run
         metrics = train.train_baseline(cfg, Path(args.data), out, log=lambda line: print(line, flush=True))
     except (FileNotFoundError, ValueError) as exc:
         print(f"blink baselines train: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"baseline-{args.kind}: val win% MAE {metrics['val_mae']:.4f} after epoch {metrics['best_epoch']}")
+    print(f"{out.name}: val win% MAE {metrics['val_mae']:.4f} after epoch {metrics['best_epoch']}")
     return 0
 
 
@@ -59,4 +63,5 @@ def register(sub: argparse._SubParsersAction) -> None:
     train.add_argument("--seed", type=int, default=0)
     train.add_argument("--val-positions", type=int, default=500_000, help="val roots read (front of file)")
     train.add_argument("--device", choices=("cuda", "cpu"), help="default: cuda when available")
+    train.add_argument("--run", help="run name under BLINK_HOME/runs (default baseline-<kind>)")
     train.set_defaults(func=cmd_train)

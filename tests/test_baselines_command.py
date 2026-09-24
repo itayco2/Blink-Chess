@@ -63,3 +63,27 @@ def test_baselines_train_refuses_a_missing_data_dir_with_one_line(tmp_path, monk
     )
     assert code == 2
     assert "no train root shards" in capsys.readouterr().err
+
+
+def test_baselines_train_can_name_its_run_and_refuses_a_path_as_a_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_records(data / "train_000.bin", 100, seed=0)
+    _write_records(data / "val.bin", 20, seed=1)
+    common = [
+        "baselines",
+        "train",
+        "--kind",
+        "mlp",
+        "--positions",
+        "64",
+        "--data",
+        str(data),
+        "--device",
+        "cpu",
+    ]
+    assert cli.main([*common, "--epochs", "1", "--run", "baseline-mlp-64"]) == 0
+    assert (tmp_path / "home" / "runs" / "baseline-mlp-64" / "model.pt").is_file()
+    assert cli.main([*common, "--run", r"..\escape"]) == 2
+    assert "bad run name" in capsys.readouterr().err
