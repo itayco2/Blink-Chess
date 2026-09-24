@@ -155,8 +155,12 @@ def _bold(text: str, on: bool) -> str:
 def _gpu_cell(compute: dict) -> str:
     flag, total, kwh = compute["flagship_gpu_hours"], compute["total_gpu_hours"], compute["gpu_board_kwh"]
     energy = DASH if kwh is None else f"{kwh:.1f}"
+    coverage = compute.get("kwh_coverage") or 0.0
+    partial = (
+        f" (measured on {100 * coverage:.0f}% of the GPU-h)" if kwh is not None and coverage < 0.99 else ""
+    )
     return (
-        f"{_num(flag, '.1f')} flagship / {_num(total, '.1f')} total GPU-h, {energy} GPU-board kWh; "
+        f"{_num(flag, '.1f')} flagship / {_num(total, '.1f')} total GPU-h, {energy} GPU-board kWh{partial}; "
         "no cloud GPU and no paid data: one home RTX 3070"
     )
 

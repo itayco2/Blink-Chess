@@ -232,3 +232,11 @@ def test_a_results_file_off_its_schema_is_a_scoreboard_error(tmp_path):
     (folder / "results.json").write_text('{"schema_version": 7}', encoding="utf-8")
     with pytest.raises(sb.ScoreboardError, match="schema"):
         sb.load_bundle(folder)
+
+
+def test_a_kwh_that_covers_only_part_of_the_gpu_hours_says_how_much(tmp_path):
+    from test_report_fixtures import compute
+
+    block = _block(tmp_path, compute_obj={**compute(), "kwh_coverage": 0.62})
+    assert "39.8 GPU-board kWh (measured on 62% of the GPU-h)" in block
+    assert "measured on" not in _block(tmp_path / "full")
