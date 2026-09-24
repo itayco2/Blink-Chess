@@ -45,6 +45,10 @@ def test_unknown_keys_and_tables_are_refused(tmp_path, text):
         {"cooldown_frac": 0.0},
         {"alpha": 1.5},
         {"tau": 0.0},
+        {"ckpt_every_steps": 0},
+        {"ckpt_every_steps": -1000},
+        {"ckpt_every_minutes": -1.0},
+        {"heartbeat_s": -1.0},
     ],
 )
 def test_invalid_training_values_are_refused(overrides):
@@ -55,3 +59,14 @@ def test_invalid_training_values_are_refused(overrides):
 def test_a_non_positive_model_size_is_refused():
     with pytest.raises(ValueError):
         ModelConfig(n_layers=0)
+
+
+def test_a_zero_checkpoint_cadence_is_refused_when_the_config_loads(tmp_path):
+    path = _write(tmp_path, "[train]\nckpt_every_steps = 0\n")
+    with pytest.raises(ValueError, match="train.ckpt_every_steps must be positive, got 0"):
+        load_config(path)
+
+
+def test_zero_minutes_turns_the_wall_clock_checkpoint_off_and_zero_seconds_beats_every_step():
+    cfg = TrainConfig(ckpt_every_minutes=0.0, heartbeat_s=0.0)
+    assert (cfg.ckpt_every_minutes, cfg.heartbeat_s) == (0.0, 0.0)

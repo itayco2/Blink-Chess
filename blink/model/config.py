@@ -55,10 +55,21 @@ class TrainConfig:
     heartbeat_s: float = 10.0
 
     def __post_init__(self) -> None:
-        positive = ("batch_size", "steps", "metrics_every", "eval_every", "val_size", "keep_last")
+        positive = (
+            "batch_size",
+            "steps",
+            "metrics_every",
+            "eval_every",
+            "val_size",
+            "ckpt_every_steps",
+            "keep_last",
+        )
         for name in positive:
             if getattr(self, name) <= 0:
                 raise ValueError(f"train.{name} must be positive, got {getattr(self, name)}")
+        for name in ("ckpt_every_minutes", "heartbeat_s"):  # 0 is meaningful: off, and every step
+            if getattr(self, name) < 0:
+                raise ValueError(f"train.{name} must not be negative, got {getattr(self, name)}")
         if not 0 <= self.warmup_steps < self.steps:
             raise ValueError(f"warmup_steps must be in [0, steps), got {self.warmup_steps}")
         if not 0.0 < self.cooldown_frac <= 1.0:
