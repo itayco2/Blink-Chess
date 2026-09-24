@@ -159,6 +159,20 @@ def test_only_the_root_lichess_bot_process_under_the_bot_folder_is_found():
     assert [p.pid for p in found] == [100]
 
 
+def test_an_editor_with_the_bot_script_open_is_never_taken_for_the_bot():
+    editor = pause.ProcessRow(
+        pid=300,
+        ppid=10,
+        create_time=3.0,
+        cmdline=("C:\\Windows\\notepad.exe", "D:\\blink-bot\\lichess-bot\\lichess-bot.py"),
+        exe="C:\\Windows\\notepad.exe",
+        cwd="D:\\blink-bot\\lichess-bot",
+    )
+    assert pause.find_bot_processes(BOT_ROOT, rows=[editor, LAUNCHER]) == (
+        pause.BotProcess(LAUNCHER.pid, LAUNCHER.ppid, LAUNCHER.create_time, LAUNCHER.cmdline),
+    )
+
+
 def test_the_bot_folder_match_ignores_case_and_slash_direction():
     assert pause.is_under("d:/BLINK-BOT/venv/Scripts/python.exe", "D:\\blink-bot")
     assert not pause.is_under("D:\\blink-bot-old\\python.exe", "D:\\blink-bot")

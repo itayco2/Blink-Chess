@@ -105,10 +105,17 @@ def is_under(path: str | None, root: str | PurePath) -> bool:
     return bool(path) and _norm(path).startswith(_norm(root) + "/")
 
 
+def _name(path: str | None) -> str:
+    return PurePath((path or "").replace("\\", "/")).name.lower()
+
+
 def _is_bot(row: ProcessRow, root: str | PurePath) -> bool:
-    runs_script = any(PurePath(arg.replace("\\", "/")).name.lower() == BOT_SCRIPT for arg in row.cmdline)
+    """A Python interpreter running lichess-bot.py from under `root` (an editor with the file open is not)."""
+    program = _name(row.exe) or _name(row.cmdline[0] if row.cmdline else None)
+    is_python = program.startswith("python")
+    runs_script = any(_name(arg) == BOT_SCRIPT for arg in row.cmdline[1:])
     places = (row.exe, row.cwd, *row.cmdline)
-    return runs_script and any(is_under(place, root) for place in places)
+    return is_python and runs_script and any(is_under(place, root) for place in places)
 
 
 def _process_rows() -> list[ProcessRow]:
