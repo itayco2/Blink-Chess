@@ -119,7 +119,7 @@ def test_lr_scale_sets_the_scale_so_a_restart_that_repeats_it_never_compounds(tm
 
 
 def test_subset_evals_score_the_ema_and_the_checks_score_raw_and_ema_on_the_full_probe(tmp_path):
-    """The 2k-step evals score one model on the subset (<= 1% overhead); every rule reads the EMA."""
+    """The 2k-step evals score one model on the subset (half the cost of two); every rule reads the EMA."""
     probe = vaa.probe_from_roots(fixture_records()[:40])
     cfg = tiny_train_config(steps=40, eval_every=15, vaa_subset=10, keep_last=1, batch_size=16)
     run_dir = tmp_path / "run"

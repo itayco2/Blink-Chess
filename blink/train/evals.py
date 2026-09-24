@@ -3,7 +3,8 @@
 Every `eval_every` steps the row holds the fixed validation sample's policy and value metrics (raw
 and EMA) and the EMA's VAA on the fixed first `vaa_subset` roots of the valprobe (ema_vaa, vaa_set
 "subset"). Only the EMA is scored there: every rule reads the EMA, and one model's forward passes over
-2,000 roots' children are about 1% of 2,000 training steps where two were about 2%. At a check step
+2,000 roots' 57,275 children cost 1.6% of 2,000 training steps at S (4.48 s against 281 s) and about
+1.2% at M, where scoring raw and EMA cost about twice that (plan target: 1%). At a check step
 (5, 25, 30, 50 and 100% of the planned steps) VAA runs on the full valprobe for the raw weights (vaa)
 and the EMA (ema_vaa), and the same passes give the EMA's subset VAA (ema_vaa_subset), so the 5% rule
 can meet a reference's subset row on the same roots. With `vaa_checks` the check's rule is applied; a
