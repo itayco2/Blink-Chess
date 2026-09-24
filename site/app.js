@@ -198,15 +198,15 @@ async function startGame(fen) {
 }
 
 async function switchSide() {
+  app.generation += 1; // a look already in flight was made for the old sides: drop it
+  app.thinking = false;
   app.userColor = app.userColor === "w" ? "b" : "w";
   $("switch-side").textContent = app.userColor === "w" ? "Play Black" : "Play White";
   await app.board.setOrientation(app.userColor, false);
   if (app.lastLook) {
     drawArrows(app.lastLook.top);
   }
-  if (!app.thinking) {
-    await blinkMoves();
-  }
+  await blinkMoves();
 }
 
 // --- Drawing ---------------------------------------------------------------------------------------

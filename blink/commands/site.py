@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -11,8 +12,12 @@ SITE_DIR = REPO_ROOT / "site"
 def _cmd_serve(args: argparse.Namespace) -> int:
     from blink.site import serve
 
-    cfg = serve.SiteConfig(site_dir=SITE_DIR, model=serve.resolve_model(Path(args.model)))
-    serve.run(cfg, port=args.port)
+    try:
+        model = serve.resolve_model(Path(args.model))
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    serve.run(serve.SiteConfig(site_dir=SITE_DIR, model=model), port=args.port)
     return 0
 
 

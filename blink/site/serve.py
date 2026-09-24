@@ -55,8 +55,12 @@ def resolve_model(path: Path) -> Path:
 
 
 def _inside(root: Path, relative: str) -> Path | None:
-    candidate = (root / relative).resolve()
-    return candidate if candidate.is_file() and candidate.is_relative_to(root.resolve()) else None
+    try:
+        candidate = (root / relative).resolve()
+        inside = candidate.is_file() and candidate.is_relative_to(root.resolve())
+    except (OSError, ValueError):  # a NUL byte or a name the OS refuses is a 404, not a crash
+        return None
+    return candidate if inside else None
 
 
 def _model_card(model: Path) -> bytes | Path:

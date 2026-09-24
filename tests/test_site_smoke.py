@@ -30,6 +30,7 @@ def _report(**overrides):
         "timings_ms": (12.0, 10.0, 11.0),
         "games": 1,
         "load_seconds": 1.5,
+        "problems": (),
     }
     return smoke.SmokeReport(**{**fields, **overrides})
 
@@ -72,6 +73,13 @@ def test_failures_name_every_missed_criterion():
     text = " | ".join(smoke.failures(report, moves=10))
     for needle in ("never became ready", "7 legal replies", "e7e4", "2 arrows", "1 console error"):
         assert needle in text
+
+
+def test_smoke_side_problems_such_as_a_timeout_fail_the_run():
+    from blink.site import smoke
+
+    report = _report(problems=("timed out waiting for reply 4",))
+    assert smoke.failures(report, moves=10) == ["timed out waiting for reply 4"]
 
 
 def test_the_report_summarises_ms_per_move():

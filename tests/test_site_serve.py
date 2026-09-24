@@ -105,8 +105,15 @@ def test_paths_outside_the_mapped_roots_are_refused(served):
         "/models/../secret.txt",
         "/models/other.onnx",
         "/node_modules/onnxruntime-web/dist/ort.wasm.bundle.min.mjs",
+        "/index.html%00.txt",
+        "/C:/Windows/win.ini",
     ):
         assert _get(served + path)[0] == 404, path
+
+
+def test_serve_with_a_missing_model_exits_with_a_message_not_a_traceback(tmp_path, capsys):
+    assert cli.main(["site", "serve", "--model", str(tmp_path / "nowhere")]) == 2
+    assert "no ONNX model" in capsys.readouterr().err
 
 
 def test_resolve_model_accepts_a_file_or_a_directory_and_refuses_anything_else(tmp_path):

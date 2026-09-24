@@ -37,6 +37,7 @@ class SmokeReport:
     timings_ms: tuple[float, ...]
     games: int
     load_seconds: float
+    problems: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         timings = list(self.timings_ms)
@@ -63,7 +64,7 @@ def replay(start_fen: str, history: list[str], user_color: str) -> tuple[int, li
 
 
 def failures(report: SmokeReport, moves: int) -> list[str]:
-    out = []
+    out = list(report.problems)
     if not report.loaded:
         out.append("the page never became ready (model or vocab failed to load)")
     if report.legal_replies < moves:
@@ -87,31 +88,48 @@ def _record_game(page, games: list) -> None:
     games.append((state["startFen"], state["history"], state["userColor"]))
 
 
-def _play(page, moves: int, seed: int, timeout_ms: float) -> tuple[list, int, int]:
-    """Click random legal user moves until Blink has replied `moves` times; returns games and counters."""
+@dataclass
+class _Progress:
+    games: list
+    user_moves: int = 0
+    min_arrows: int = ARROWS_EXPECTED
+
+
+def _play_one(page, rng: random.Random, progress: _Progress, timeout_ms: float) -> None:
+    """One user move by clicking, then Blink's reply; a finished game is recorded and restarted."""
+    page.wait_for_function(WAIT_USER_TURN, timeout=timeout_ms)
+    if page.evaluate("window.__blink.state().gameOver"):
+        _record_game(page, progress.games)
+        page.click("#new-game")
+        page.wait_for_function(WAIT_NEW_GAME, timeout=timeout_ms)
+        return
+    replies = page.evaluate("window.__blink.state().replies")
+    move = rng.choice(page.evaluate("window.__blink.legalMoves()"))
+    _click_square(page, move["from"])
+    _click_square(page, move["to"])
+    progress.user_moves += 1
+    page.wait_for_function(WAIT_REPLY, arg=replies + 1, timeout=timeout_ms)
+    state = page.evaluate("window.__blink.state()")
+    if state["replies"] > replies:
+        progress.min_arrows = min(progress.min_arrows, state["arrows"])
+
+
+def _play(page, moves: int, seed: int, timeout_ms: float, timeout_error: type) -> tuple[_Progress, list]:
+    """Click random legal user moves until Blink has replied `moves` times (or a wait times out)."""
     rng = random.Random(seed)
-    games: list = []
-    user_moves = 0
-    min_arrows = ARROWS_EXPECTED
-    max_user_moves = moves * MAX_USER_MOVES_FACTOR
-    while page.evaluate("window.__blink.state().replies") < moves and user_moves < max_user_moves:
-        page.wait_for_function(WAIT_USER_TURN, timeout=timeout_ms)
-        if page.evaluate("window.__blink.state().gameOver"):
-            _record_game(page, games)
-            page.click("#new-game")
-            page.wait_for_function(WAIT_NEW_GAME, timeout=timeout_ms)
-            continue
-        replies = page.evaluate("window.__blink.state().replies")
-        move = rng.choice(page.evaluate("window.__blink.legalMoves()"))
-        _click_square(page, move["from"])
-        _click_square(page, move["to"])
-        user_moves += 1
-        page.wait_for_function(WAIT_REPLY, arg=replies + 1, timeout=timeout_ms)
-        state = page.evaluate("window.__blink.state()")
-        if state["replies"] > replies:
-            min_arrows = min(min_arrows, state["arrows"])
-    _record_game(page, games)
-    return games, user_moves, min_arrows
+    progress = _Progress(games=[])
+    problems = []
+    while page.evaluate("window.__blink.state().replies") < moves:
+        if progress.user_moves >= moves * MAX_USER_MOVES_FACTOR:
+            problems.append(f"gave up after {progress.user_moves} user moves")
+            break
+        try:
+            _play_one(page, rng, progress, timeout_ms)
+        except timeout_error:
+            problems.append(f"timed out after {progress.user_moves} user moves waiting for the page")
+            break
+    _record_game(page, progress.games)
+    return progress, problems
 
 
 def _listen(page, errors: list) -> None:
@@ -138,21 +156,22 @@ def run(url: str, moves: int = 10, seed: int = 0, timeout_s: float = 60.0) -> Sm
             except PlaywrightTimeout:
                 return SmokeReport(url, False, 0, 0, (), 0, 0, tuple(errors), (), 0, timeout_s)
             load_seconds = time.perf_counter() - started
-            games, user_moves, min_arrows = _play(page, moves, seed, timeout_ms)
+            progress, problems = _play(page, moves, seed, timeout_ms, PlaywrightTimeout)
             state = page.evaluate("window.__blink.state()")
         finally:
             browser.close()
-    counted = [replay(start, history, color) for start, history, color in games]
+    counted = [replay(start, history, color) for start, history, color in progress.games]
     return SmokeReport(
         url=url,
         loaded=True,
-        user_moves=user_moves,
+        user_moves=progress.user_moves,
         legal_replies=sum(replies for replies, _ in counted),
         illegal=tuple(text for _, bad in counted for text in bad),
         arrows=state["arrows"],
-        min_arrows=min_arrows,
+        min_arrows=progress.min_arrows,
         console_errors=tuple(errors),
         timings_ms=tuple(round(ms, 2) for ms in state["timings"]),
-        games=len(games),
+        games=len(progress.games),
         load_seconds=round(load_seconds, 2),
+        problems=tuple(problems),
     )
