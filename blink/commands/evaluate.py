@@ -369,6 +369,20 @@ def _add_block_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubParsersAction) -> None:
+    _register_sets(ev_sub)
+    _register_sprt(ev_sub)
+    _register_blocks(ev_sub)
+    rt = subparsers.add_parser("rate", help="Ordo with fixed SF19 anchors over PGNs (-W -D -s 1000)")
+    rt.add_argument(
+        "--pgn", type=Path, action="append", required=True, help="a PGN file or folder; repeatable"
+    )
+    rt.add_argument("--anchors", type=Path, default=Path("configs") / "anchors.csv")
+    rt.add_argument("--simulations", type=int, default=rating.ORDO_SIMULATIONS)
+    rt.add_argument("--out", type=Path, default=None, help="default BLINK_HOME/eval/ordo/<time>")
+    rt.set_defaults(func=_cmd_rate)
+
+
+def _register_sets(ev_sub: argparse._SubParsersAction) -> None:
     bk = ev_sub.add_parser("books", help="write dev.pgn and final.pgn (8moves_v3 slices) once, with sha256")
     bk.add_argument("--source", type=Path, default=None, help="default BLINK_HOME/books/8moves_v3.pgn")
     bk.add_argument("--out", type=Path, default=None, help="default BLINK_HOME/books")
@@ -384,6 +398,8 @@ def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubPa
     eg.add_argument("--sf-procs", type=int, default=1, help="Stockfish processes (one thread each)")
     eg.set_defaults(func=_cmd_endgames)
 
+
+def _register_sprt(ev_sub: argparse._SubParsersAction) -> None:
     sp = ev_sub.add_parser("sprt", help="an in-process SPRT between two agents (pentanomial, fishtest LLR)")
     sp.add_argument("--a", required=True, help="random | material | random-net | a model selector")
     sp.add_argument("--b", required=True, help="random | material | random-net | a model selector")
@@ -402,6 +418,8 @@ def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubPa
     sp.add_argument("--out", type=Path, default=None, help="PGN path (default BLINK_HOME/eval/sprt)")
     sp.set_defaults(func=factory.friendly(_cmd_sprt))
 
+
+def _register_blocks(ev_sub: argparse._SubParsersAction) -> None:
     st = ev_sub.add_parser("static", help="E2 alone: the static metrics of one model")
     _add_block_args(st)
     for flag, default in (
@@ -429,12 +447,3 @@ def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubPa
     al.add_argument("--only", default=None, help="comma-separated blocks, still run in the plan's order")
     al.add_argument("--dry-run", action="store_true", help="print the protocol check and the game table")
     al.set_defaults(func=factory.friendly(_cmd_all))
-
-    rt = subparsers.add_parser("rate", help="Ordo with fixed SF19 anchors over PGNs (-W -D -s 1000)")
-    rt.add_argument(
-        "--pgn", type=Path, action="append", required=True, help="a PGN file or folder; repeatable"
-    )
-    rt.add_argument("--anchors", type=Path, default=Path("configs") / "anchors.csv")
-    rt.add_argument("--simulations", type=int, default=rating.ORDO_SIMULATIONS)
-    rt.add_argument("--out", type=Path, default=None, help="default BLINK_HOME/eval/ordo/<time>")
-    rt.set_defaults(func=_cmd_rate)
