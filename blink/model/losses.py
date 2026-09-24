@@ -7,7 +7,9 @@ probability of each PV from blink.board.value.
 
 Value (roots and children): cross-entropy against the HL-Gauss target of the position's win
 probability (a torch port of blink.board.value.hl_gauss, sigma = 0.75 / 128). A child row has no
-policy target: it adds value loss only.
+policy target: it adds value loss only. The value target's win probability is the batch's w_value
+(roots) and w (children), which follow train.value_mapping (blink.model.value_mapping); the policy
+target always uses Lichess W.
 """
 
 import math
@@ -67,7 +69,7 @@ def compute_losses(
     policy_target = soft_policy_target(
         batch.move, batch.alt_move, batch.alt_valid, batch.w_best, batch.w_alt, alpha, tau
     )
-    value_target = hl_gauss_target(batch.w_best)
+    value_target = hl_gauss_target(batch.w_value)
     return soft_cross_entropy(policy_logits, policy_target), soft_cross_entropy(value_logits, value_target)
 
 
@@ -88,6 +90,6 @@ def mixed_losses(
     policy_target = soft_policy_target(
         roots.move, roots.alt_move, roots.alt_valid, roots.w_best, roots.w_alt, alpha, tau
     )
-    value_target = hl_gauss_target(torch.cat([roots.w_best, child_w]))
+    value_target = hl_gauss_target(torch.cat([roots.w_value, child_w]))
     policy_ce = soft_cross_entropy_rows(policy_logits[:n_roots], policy_target)
     return policy_ce, soft_cross_entropy_rows(value_logits, value_target)

@@ -149,7 +149,7 @@ def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -
         free = torch.cuda.mem_get_info(device)[0]
     model = BlinkNet(cfg.model).to(device)
     has_val = val is not None and len(val) > 0
-    val_set = telemetry.make_val_set(val[: cfg.val_size], device) if has_val else None
+    val_set = telemetry.make_val_set(val[: cfg.val_size], device, cfg.value_mapping) if has_val else None
     optimizer = build_optimizer(model, cfg, device.type)
     ema = Ema(model, cfg.ema_max)
     micro, vram_info = _choose_micro(cfg, model, device, free, log)
@@ -212,7 +212,9 @@ def _train_step(run: _Run, data: StepData, lr: float) -> tuple[torch.Tensor, ...
     for group in run.optimizer.param_groups:
         group["lr"] = lr
     run.optimizer.zero_grad(set_to_none=True)
-    out = step.accumulate(run.forward, data, run.device, run.micro, cfg.alpha, cfg.tau, cfg.lambda_v)
+    out = step.accumulate(
+        run.forward, data, run.device, run.micro, cfg.alpha, cfg.tau, cfg.lambda_v, cfg.value_mapping
+    )
     grad_norm = torch.nn.utils.clip_grad_norm_(run.model.parameters(), run.clip.limit())
     if run.clip.measuring:
         message = run.clip.observe(run.step, grad_norm.detach())  # read back once, at the warmup's end
