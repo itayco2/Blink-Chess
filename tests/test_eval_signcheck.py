@@ -4,7 +4,9 @@ import random
 
 import chess
 import numpy as np
+import pytest
 
+from blink import paths
 from blink.board import encode, moves
 from blink.data.record import ROOT_DTYPE
 from blink.eval import signcheck
@@ -87,3 +89,15 @@ def test_records_are_read_front_to_back_with_a_limit(tmp_path):
     records.tofile(path)
     assert np.array_equal(signcheck.read_records(path, limit=3), records[:3])
     assert len(signcheck.read_records(path)) == 4
+
+
+SKELETON_VAL = paths.home() / "data" / "skeleton" / "val.bin"
+
+
+@pytest.mark.local
+@pytest.mark.skipif(not SKELETON_VAL.is_file(), reason="the skeleton pack is not on this machine")
+def test_every_real_val_record_decodes_to_a_board_where_its_label_is_legal():
+    records = signcheck.read_records(SKELETON_VAL, limit=2000)
+    for record in records:
+        board = signcheck.decode_codes(encode.unpack(record["board"]))
+        assert moves.decode_move(board, int(record["move"])) in board.legal_moves

@@ -69,6 +69,8 @@ def _cmd_audit_no_search(args: argparse.Namespace) -> int:
     )
     for violation in report["violations"][:10]:
         print(f"  VIOLATION {violation}")
+    if report["decisions"] == 0:
+        print(f"no moves by players whose name contains {args.engine!r}: nothing was audited")
     print(f"report: {out}")
     return 0 if report["compliant"] else 1
 
