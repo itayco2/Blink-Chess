@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 blink = "blink.cli:main"
+blink-uci = "blink.uci:main"
 
 # Groups, not extras: uv syncs exactly, so an extra would be uninstalled by any plain `uv run`.
 # All three groups are on by default; the torch-free CI leg passes --no-group train --no-group compile.
