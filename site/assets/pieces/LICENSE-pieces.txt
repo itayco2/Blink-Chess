@@ -1,0 +1,37 @@
+Chess pieces: the cburnett set (site/assets/pieces/cburnett.svg)
+
+The 12 drawings in cburnett.svg are Chess_{k,q,r,b,n,p}{l,d}t45.svg from Wikimedia Commons
+(https://commons.wikimedia.org/wiki/Category:SVG_chess_pieces), each created on 2006-12-27 by the
+Commons user Cburnett (https://commons.wikimedia.org/wiki/User:Cburnett), who offers them under
+several licences, a BSD licence among them. Blink elects the BSD 3-Clause License option below and
+relies on no other licence for these files.
+
+Changes: the 12 files are packed into one SVG sprite, one <g id="wk"> .. <g id="bp"> group per piece,
+with inner element ids removed. The drawings themselves are unchanged. The sprite is rebuilt with
+`blink site pieces --src <directory holding the 12 Commons files>`.
+
+BSD 3-Clause License
+
+Copyright (c) 2006, Cburnett
+
+Redistribution and use in source and binary forms, with or without modification, are permitted
+provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this list of conditions
+   and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice, this list of
+   conditions and the following disclaimer in the documentation and/or other materials provided
+   with the distribution.
+
+3. Neither the name of Cburnett nor the names of its contributors may be used to endorse or
+   promote products derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY CBURNETT AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL CBURNETT AND CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

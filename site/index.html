@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blink: one look</title>
+    <meta name="description" content="Play Blink, a chess transformer that never searches: each move is one forward pass, run in your browser." />
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <h1>Blink</h1>
+      <p class="tagline">A chess network that never searches. Every move is one look: one forward pass, no lookahead.</p>
+    </header>
+
+    <main class="layout">
+      <section class="board-column" aria-label="Board">
+        <div class="board-wrap">
+          <div id="board" class="board"></div>
+          <svg id="arrows" class="arrows" viewBox="0 0 800 800" aria-hidden="true"></svg>
+        </div>
+        <div class="winbar" role="meter" aria-label="Blink's win chance for White" aria-valuemin="0" aria-valuemax="100" id="winbar">
+          <div class="winbar-white" id="win-white"></div>
+        </div>
+        <div class="winbar-labels"><span id="win-label-white">White</span><span id="win-label-black">Black</span></div>
+        <p id="status" class="status" role="status" aria-live="polite">Loading the model</p>
+      </section>
+
+      <aside class="panel" aria-label="Blink's look">
+        <section class="card">
+          <h2>Blink's last look</h2>
+          <p class="timing"><span id="ms-last">-</span> ms per move <span class="muted" id="ms-median"></span></p>
+          <ol id="top-moves" class="top-moves"></ol>
+          <p class="muted small" id="mode-label">One look (policy): the move with the highest probability among the legal ones. onnxruntime-web, WASM, 1 thread.</p>
+        </section>
+
+        <section class="card controls">
+          <h2>Play</h2>
+          <div class="row">
+            <button type="button" id="new-game">New game</button>
+            <button type="button" id="switch-side">Play Black</button>
+          </div>
+          <label class="row">Promote to
+            <select id="promotion">
+              <option value="q" selected>Queen</option>
+              <option value="r">Rook</option>
+              <option value="b">Bishop</option>
+              <option value="n">Knight</option>
+            </select>
+          </label>
+          <form id="fen-form" class="fen-form">
+            <label for="fen-input">Paste a FEN</label>
+            <div class="row">
+              <input id="fen-input" name="fen" type="text" spellcheck="false" autocomplete="off" placeholder="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" />
+              <button type="submit">Load</button>
+            </div>
+            <p id="fen-error" class="error small" role="alert"></p>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>Moves</h2>
+          <ol id="move-list" class="move-list"></ol>
+        </section>
+
+        <section class="card">
+          <h2>Model</h2>
+          <p id="model-card" class="small">Loading</p>
+          <p class="small">Lichess rating: <strong id="rating">rating accruing</strong></p>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="footer small muted">
+      Pieces by Cburnett (BSD 3-Clause, <a href="assets/pieces/LICENSE-pieces.txt">licence</a>).
+      Board: cm-chessboard (MIT). Rules: chess.js (BSD-2-Clause). Inference: onnxruntime-web (MIT).
+    </footer>
+  </body>
+</html>
