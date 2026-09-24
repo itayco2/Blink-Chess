@@ -261,6 +261,7 @@ def test_the_cli_snapshot_with_no_write_prints_and_writes_nothing(monkeypatch, t
     assert cli.main(["lichess", "snapshot", "--bot", "BlinkBot", "--no-write", "--out", str(out)]) == 0
     printed = capsys.readouterr().out
     assert "blitz 2012" in printed and "RD 62" in printed and "publishable" in printed
+    assert "noStart only" in printed  # the public export never holds aborted games
     assert not out.exists()
 
 

@@ -104,7 +104,7 @@ refuse a weights file with a different hash.
 1. **(agent)** generates and checks `config.casual.yml` (section 5).
 2. Itay: `D:\blink-bot\start-bot.ps1 -Config D:\blink-bot\config.casual.yml`
 3. Itay challenges the bot from `itayco2` to 5 casual games: 1+1, 3+2 and 10+0 (about 40 minutes).
-4. **(agent)** `uv run blink lichess check --bot <BotName> --window 5`
+4. **(agent)** `uv run blink lichess check --bot <BotName> --window 5 --pgn-dir D:\blink\lichess\pgn-casual`
 5. Pass: 5/5 games completed, 0 aborts, 0 time losses, 0 illegal moves. Then Itay stops the bot
    with Ctrl+C.
 
@@ -139,6 +139,10 @@ uv run blink lichess snapshot --bot <BotName> --no-write
 - The stop rule: **time losses > 2% or aborts > 1% over the last 50 games** (any kind; fewer games
   count as they are). With `--stop` a firing rule pauses the bot exactly as section 9 does and
   records the rule in `D:\blink\lichess\pause.json`; Itay decides when it restarts.
+- Lichess's public game export never contains aborted games (lila exports only finished games), so
+  `check` also counts the `Termination "Abandoned"` PGNs that lichess-bot saves in
+  `D:\blink\lichess\pgn`. The public snapshot's abort rate sees only games that never started
+  (`noStart`).
 - `snapshot --no-write` prints rating, RD, N, the human share, performance vs humans and vs bots,
   and the time-loss, abort and duplicate-game rates. It writes nothing and commits nothing.
 

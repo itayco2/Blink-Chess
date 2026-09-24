@@ -506,7 +506,8 @@ def cmd_lichess_check(args: argparse.Namespace) -> int:
     try:
         snapshot.check_name(args.bot)
         api = snapshot.default_api()
-        verdict = monitor.check(api, args.bot, window=args.window)
+        pgn_dir = Path(args.pgn_dir) if args.pgn_dir else paths.home() / "lichess" / "pgn"
+        verdict = monitor.check(api, args.bot, window=args.window, pgn_dir=pgn_dir)
     except (ValueError, snapshot.ApiError, OSError) as exc:
         return _refuse("check", exc)
     _say(monitor.format_verdict(args.bot, verdict))
@@ -582,6 +583,9 @@ def _register_lichess(sub: argparse._SubParsersAction) -> None:
     check.add_argument("--bot", required=True)
     check.add_argument("--window", type=int, default=50)
     check.add_argument("--stop", action="store_true", help="pause the bot when the rule fires")
+    check.add_argument(
+        "--pgn-dir", help="lichess-bot's PGNs, for aborted games (default BLINK_HOME/lichess/pgn)"
+    )
     _pause_options(check)
     stop = actions.add_parser("pause", help="flag, wait for no live game, then stop the bot by PID")
     stop.add_argument("--bot", required=True)

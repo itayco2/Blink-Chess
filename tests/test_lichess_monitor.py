@@ -106,25 +106,78 @@ def a_record(index: int, status: str = "mate", winner: str | None = "white") -> 
     return {**record, "winner": winner} if winner else record
 
 
-def test_check_reads_the_last_50_games_of_every_kind_from_the_public_api():
+def test_check_reads_the_last_50_games_of_every_kind_from_the_public_api(tmp_path):
     api = FakeApi([a_record(i) for i in range(60)])
-    verdict = monitor.check(api, "BlinkBot")
+    verdict = monitor.check(api, "BlinkBot", pgn_dir=tmp_path / "no-pgns-yet")
     assert api.calls == [("games", "BlinkBot", 50, None, None)]
     assert verdict.games == 50 and not verdict.stop
 
 
-def test_the_check_command_exits_1_and_names_the_rule_when_it_fires(monkeypatch, capsys):
-    records = [a_record(i) for i in range(48)] + [a_record(48, "outoftime", "black")] * 2
+def a_pgn(
+    game_id: str, termination: str, white: str = "BlinkBot", black: str = "OtherBot", second: int = 0
+) -> str:
+    return (
+        f'[Event "Rated Blitz game"]\n[Site "https://lichess.org/{game_id}"]\n'
+        f'[White "{white}"]\n[Black "{black}"]\n[Result "*"]\n[BlackTitle "BOT"]\n'
+        f'[UTCDate "2026.09.24"]\n[UTCTime "12:00:{second:02d}"]\n[Termination "{termination}"]\n\n*\n\n'
+    )
+
+
+def test_an_abandoned_game_in_the_bots_own_pgns_counts_as_an_abort(tmp_path):
+    """lila's game export keeps only status >= mate (Query.finished), so an aborted game (status 25)
+    never reaches the public API; lichess-bot still writes its PGN, with Termination "Abandoned"."""
+    (tmp_path / "BlinkBot vs OtherBot - ab0rt001.pgn").write_text(
+        a_pgn("ab0rt001", "Abandoned"), encoding="utf-8"
+    )
+    (tmp_path / "BlinkBot vs OtherBot - norm0001.pgn").write_text(
+        a_pgn("norm0001", "Normal"), encoding="utf-8"
+    )
+    games = monitor.aborted_from_pgns(tmp_path, "BlinkBot")
+    assert [(g.id, g.status, g.bot_color, g.opponent, g.opponent_is_bot) for g in games] == [
+        ("ab0rt001", "aborted", "white", "otherbot", True)
+    ]
+    assert games[0].created_at == 1790251200000  # 2026-09-24 12:00:00 UTC
+
+
+def test_pgns_of_other_players_or_no_folder_add_nothing(tmp_path):
+    (tmp_path / "x.pgn").write_text(a_pgn("other001", "Abandoned", "Alice", "Bob"), encoding="utf-8")
+    assert monitor.aborted_from_pgns(tmp_path, "BlinkBot") == ()
+    assert monitor.aborted_from_pgns(tmp_path / "missing", "BlinkBot") == ()
+
+
+def test_check_merges_the_export_with_local_aborts_and_counts_each_game_once(tmp_path):
+    records = [a_record(i) for i in range(48)] + [a_record(48, "noStart", "black")]
+    (tmp_path / "a.pgn").write_text(
+        a_pgn("r048", "Abandoned", second=1), encoding="utf-8"
+    )  # the noStart game
+    (tmp_path / "b.pgn").write_text(a_pgn("ab0rt002", "Abandoned", second=2), encoding="utf-8")
+    verdict = monitor.check(FakeApi(records), "BlinkBot", pgn_dir=tmp_path)
+    assert (verdict.games, verdict.aborts) == (50, 2) and verdict.stop
+
+
+def test_the_check_command_exits_1_and_names_the_rule_when_it_fires(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    records = [a_record(i) for i in range(48)] + [a_record(i, "outoftime", "black") for i in (48, 49)]
     monkeypatch.setattr(snapshot, "default_api", lambda: FakeApi(records))
     assert cli.main(["lichess", "check", "--bot", "BlinkBot"]) == 1
     printed = capsys.readouterr().out
     assert "STOP" in printed and "time losses 2/50" in printed
 
 
-def test_the_check_command_passes_quietly_on_clean_games(monkeypatch, capsys):
+def test_the_check_command_passes_quietly_on_clean_games(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
     monkeypatch.setattr(snapshot, "default_api", lambda: FakeApi([a_record(i) for i in range(50)]))
     assert cli.main(["lichess", "check", "--bot", "BlinkBot"]) == 0
     assert "ok" in capsys.readouterr().out
+
+
+def test_the_check_command_reads_aborts_from_the_pgn_folder_under_blink_home(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    (tmp_path / "lichess" / "pgn").mkdir(parents=True)
+    (tmp_path / "lichess" / "pgn" / "a.pgn").write_text(a_pgn("ab0rt003", "Abandoned"), encoding="utf-8")
+    monkeypatch.setattr(snapshot, "default_api", lambda: FakeApi([a_record(i) for i in range(49)]))
+    assert cli.main(["lichess", "check", "--bot", "BlinkBot"]) == 1
+    assert "aborts 1/50" in capsys.readouterr().out
 
 
 def test_the_check_command_with_stop_pauses_the_bot_when_the_rule_fires(monkeypatch, tmp_path, capsys):

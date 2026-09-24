@@ -11,7 +11,9 @@ blitz, ndjson). From the exported games it computes, from the bot's side:
   sum 1/(1 + 10^((r_i - R)/400)) equals the real score, capped 800 beyond the opponents' range
   at 0% or 100% (aborted games excluded);
 - time-loss rate: games the bot lost on the clock (`outoftime`) or by leaving (`timeout`), of all games;
-- abort rate: `aborted` or `noStart` games, of all games;
+- abort rate: `noStart` games, of all games. The export never holds `aborted` games (lila exports
+  only status >= mate), so this public number cannot see them; the stop rule adds them from the
+  bot's own PGNs (monitor.py);
 - duplicate rate: games whose first 20 plies repeat an earlier game's against the same opponent, of
   the games at least 20 plies long (deterministic play repeats itself; plan F18).
 
@@ -384,7 +386,8 @@ def format_report(report: SnapshotReport, max_games: int) -> list[str]:
         f"N {s.n} rated blitz games; {gate}",
         f"  over the last {report.exported} exported rated blitz games: human share {_pct(s.human_share)}, "
         f"performance vs humans {_perf(s.perf_vs_humans)}, vs bots {_perf(s.perf_vs_bots)}",
-        f"  time losses {_pct(s.time_loss_rate)}, aborts {_pct(s.abort_rate)}, "
+        f"  time losses {_pct(s.time_loss_rate)}, aborts {_pct(s.abort_rate)} (noStart only: the export "
+        "omits aborted games), "
         f"duplicate games {_pct(s.duplicate_rate)}",
     ]
     if history.get("points"):
