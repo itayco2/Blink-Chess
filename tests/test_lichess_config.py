@@ -317,3 +317,20 @@ def test_check_config_compares_against_the_shipped_model_in_results_json(tmp_pat
     argv = ["lichess", "check-config", "--config", str(out / "config.yml"), "--results", str(results_path)]
     assert cli.main(argv) == 1
     assert "shipped mode" in capsys.readouterr().out
+
+
+def test_a_config_file_that_is_not_a_mapping_is_refused_with_a_clear_error(tmp_path):
+    bad = tmp_path / "list.yml"
+    bad.write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(botconfig.ConfigError, match="mapping"):
+        botconfig.load_config(bad)
+    assert cli.main(["lichess", "check-config", "--config", str(bad), "--results", "none"]) == 2
+
+
+def test_engine_options_that_are_not_a_mapping_are_named(tmp_path):
+    config = copy.deepcopy(generate(tmp_path)["rated"])
+    config["engine"]["engine_options"] = ["--model=ship"]
+    assert any(
+        "engine.engine_options must be a mapping" in p
+        for p in botconfig.problems(config, "rated", frozenset())
+    )

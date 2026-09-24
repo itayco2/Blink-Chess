@@ -107,11 +107,14 @@ class BotSpec:
 def load_config(path: Path) -> dict:
     text = Path(path).read_text(encoding="utf-8")
     try:
-        return json.loads(text)
+        config = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ConfigError(
             f"{path} is not the JSON form of YAML this project writes ({exc}); regenerate it"
         ) from exc
+    if not isinstance(config, dict):
+        raise ConfigError(f"{path} must hold a mapping at the top level, not {type(config).__name__}")
+    return config
 
 
 def dump_config(config: Mapping) -> str:
@@ -125,6 +128,12 @@ def _lookup(config: Mapping, path: tuple[str, ...]) -> tuple[bool, object]:
             return False, None
         node = node[key]
     return True, node
+
+
+def _section(config: Mapping, *keys: str) -> Mapping:
+    """A nested mapping, or an empty one when a key is missing or holds something else."""
+    present, node = _lookup(config, keys)
+    return node if present and isinstance(node, Mapping) else {}
 
 
 def _same(actual: object, expected: object) -> bool:
@@ -195,7 +204,7 @@ def _placement_problems(config: Mapping) -> list[str]:
 
 
 def _uci_option_problems(config: Mapping, declared: frozenset[str]) -> list[str]:
-    options = (config.get("engine") or {}).get("uci_options") or {}
+    options = _section(config, "engine", "uci_options")
     return [
         f"engine.uci_options.{name} is not an option blink-uci declares"
         for name in options
@@ -206,7 +215,10 @@ def _uci_option_problems(config: Mapping, declared: frozenset[str]) -> list[str]
 def _engine_flag_problems(config: Mapping) -> list[str]:
     from blink import uci
 
-    options = (config.get("engine") or {}).get("engine_options") or {}
+    present, raw = _lookup(config, ("engine", "engine_options"))
+    if present and not isinstance(raw, Mapping):
+        return ["engine.engine_options must be a mapping of blink-uci flags"]
+    options = _section(config, "engine", "engine_options")
     found = [
         f"engine.engine_options.{key} must be set"
         for key in ("model", "mode", "device", "log")
@@ -232,8 +244,8 @@ def sha_match(one: str | None, other: str | None) -> bool:
 
 
 def _ship_problems(config: Mapping, shipped: Shipped | None, weights_sha: str | None) -> list[str]:
-    stamp = config.get(PROVENANCE) or {}
-    options = (config.get("engine") or {}).get("engine_options") or {}
+    stamp = _section(config, PROVENANCE)
+    options = _section(config, "engine", "engine_options")
     sha, mode = stamp.get("sha"), options.get("mode")
     found = (
         []
@@ -398,9 +410,9 @@ def check_file(
     shipped, note = _shipped_from(results) if kind == "rated" else (None, None)
     notes += [note] if note else []
     weights_sha = None
-    engine = config.get("engine") or {}
+    engine = _section(config, "engine")
     if kind == "rated":
-        weights = resolve(str((engine.get("engine_options") or {}).get("model", "")))
+        weights = resolve(str(_section(config, "engine", "engine_options").get("model", "")))
         weights_sha = file_sha256(weights) if weights is not None else None
         notes += (
             [f"weights {weights}: sha256 {weights_sha[:12]}"]
