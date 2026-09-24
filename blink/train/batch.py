@@ -1,9 +1,10 @@
-"""ROOT_DTYPE records -> tensors on the training device.
+"""ROOT_DTYPE and CHILD_DTYPE records -> tensors on the training device.
 
 Win probabilities come from blink.board.value.win_probability_array on the CPU (float64), then
 move to the device as float32. Board codes travel as uint8 and widen to int64 on the device.
 """
 
+import dataclasses
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,7 +12,7 @@ import torch
 
 from blink.board.encode import unpack
 from blink.board.value import win_probability_array
-from blink.data.record import NO_MOVE, ROOT_DTYPE
+from blink.data.record import CHILD_DTYPE, NO_MOVE, ROOT_DTYPE
 
 
 @dataclass(frozen=True)
@@ -44,3 +45,26 @@ def make_batch(records: np.ndarray, device: str | torch.device) -> Batch:
     }
     moved = {name: tensor.to(device, non_blocking=True) for name, tensor in arrays.items()}
     return Batch(**{**moved, "tokens": moved["tokens"].long()})
+
+
+@dataclass(frozen=True)
+class ChildBatch:
+    tokens: torch.Tensor  # int64 [C, 64]
+    w: torch.Tensor  # float32 [C]: the child's win probability for its own side to move
+
+    def __len__(self) -> int:
+        return self.w.shape[0]
+
+
+def make_child_batch(records: np.ndarray, device: str | torch.device) -> ChildBatch:
+    if records.dtype != CHILD_DTYPE:
+        raise TypeError(f"expected CHILD_DTYPE records, got {records.dtype}")
+    codes = torch.from_numpy(np.ascontiguousarray(unpack(records["board"])))
+    w = torch.from_numpy(win_probability_array(records["cp"], records["mate"]).astype(np.float32))
+    return ChildBatch(tokens=codes.to(device, non_blocking=True).long(), w=w.to(device, non_blocking=True))
+
+
+def take(batch: Batch | ChildBatch, rows: slice) -> Batch | ChildBatch:
+    """The same kind of batch holding only `rows`."""
+    fields = {f.name: getattr(batch, f.name)[rows] for f in dataclasses.fields(batch)}
+    return type(batch)(**fields)

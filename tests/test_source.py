@@ -5,8 +5,9 @@ import types
 import numpy as np
 import pytest
 
-from blink.data.record import ROOT_DTYPE
-from blink.train.source import InMemorySource, shard_source
+from blink.data.record import CHILD_DTYPE, ROOT_DTYPE
+from blink.model.config import TrainConfig
+from blink.train.source import InMemorySource, as_step_data, mixed_source, shard_source
 
 
 def _records(n: int) -> np.ndarray:
@@ -43,23 +44,81 @@ def test_a_batch_larger_than_the_data_is_refused():
         InMemorySource(_records(4), batch_size=8, seed=0)
 
 
-def test_the_shard_source_skips_to_the_resume_step(monkeypatch, tmp_path):
-    calls = {}
+class _FakeShardLoader:
+    """Records the arguments and yields batches whose fen_hash is the batch number in the stream."""
 
-    class FakeShardLoader:
-        def __init__(self, paths, batch_size, seed, loop=True):
-            calls.update(paths=paths, batch_size=batch_size, seed=seed, loop=loop)
+    calls: list[dict] = []
 
-        def __iter__(self):
-            for step in itertools.count():
-                batch = _records(calls["batch_size"])
-                batch["fen_hash"] = step
-                yield batch
+    def __init__(self, paths, batch_size, seed, loop=True, start_batch=0, **kwargs):
+        self.batch_size, self.start_batch = batch_size, start_batch
+        self.dtype = kwargs.get("dtype", ROOT_DTYPE)
+        _FakeShardLoader.calls.append(
+            {"paths": paths, "batch_size": batch_size, "seed": seed, "loop": loop, **kwargs}
+        )
 
+    def __iter__(self):
+        for step in itertools.count(self.start_batch):
+            batch = np.zeros(self.batch_size, dtype=self.dtype)
+            batch["fen_hash"] = step
+            yield batch
+
+
+@pytest.fixture
+def fake_loader(monkeypatch):
+    _FakeShardLoader.calls = []
     fake = types.ModuleType("blink.data.loader")
-    fake.ShardLoader = FakeShardLoader
+    fake.ShardLoader = _FakeShardLoader
     monkeypatch.setitem(sys.modules, "blink.data.loader", fake)
+    return _FakeShardLoader
+
+
+def test_the_shard_source_starts_the_loader_at_the_resume_step(fake_loader, tmp_path):
     paths = [tmp_path / "train_000.bin"]
     batches = list(itertools.islice(shard_source(paths, batch_size=4, seed=9)(3), 2))
     assert [int(b["fen_hash"][0]) for b in batches] == [3, 4]
-    assert calls == {"paths": paths, "batch_size": 4, "seed": 9, "loop": True}
+    assert fake_loader.calls == [{"paths": paths, "batch_size": 4, "seed": 9, "loop": True}]
+
+
+def test_a_child_shard_source_asks_the_loader_for_child_records(fake_loader, tmp_path):
+    paths = [tmp_path / "train_c000.bin"]
+    batch = next(shard_source(paths, batch_size=3, seed=1, dtype=CHILD_DTYPE)(7))
+    assert batch.dtype == CHILD_DTYPE and int(batch["fen_hash"][0]) == 7
+    assert fake_loader.calls[0]["dtype"] == CHILD_DTYPE
+
+
+def _children(n: int) -> np.ndarray:
+    children = np.zeros(n, dtype=CHILD_DTYPE)
+    children["fen_hash"] = np.arange(n) + 1000
+    return children
+
+
+def test_a_mixed_step_holds_717_roots_and_307_children_at_batch_1024():
+    cfg = TrainConfig(batch_size=1024, child_frac=0.3)
+    roots = InMemorySource(_records(4000), cfg.roots_per_step, seed=1).batches
+    children = InMemorySource(_children(4000), cfg.children_per_step, seed=2).batches
+    step = next(mixed_source(roots, children)(0))
+    assert (len(step.roots), len(step.children)) == (717, 307)
+    assert step.roots.dtype == ROOT_DTYPE and step.children.dtype == CHILD_DTYPE
+
+
+def test_the_mixed_source_resumes_at_the_same_roots_children_and_weights():
+    roots = InMemorySource(_records(70), 7, seed=1).batches
+    children = InMemorySource(_children(30), 3, seed=2).batches
+
+    def weigher(records):
+        return (records["fen_hash"] % 5).astype(np.float32) + 0.5
+
+    source = mixed_source(roots, children, weigher)
+    straight = list(itertools.islice(source(0), 12))
+    resumed = list(itertools.islice(source(9), 3))
+    for a, b in zip(straight[9:], resumed, strict=True):
+        assert np.array_equal(a.roots, b.roots) and np.array_equal(a.children, b.children)
+        assert np.array_equal(a.root_weight, b.root_weight) and np.array_equal(a.child_weight, b.child_weight)
+    assert np.array_equal(straight[0].root_weight, weigher(straight[0].roots))
+
+
+def test_a_root_only_source_has_no_children_and_unit_weights():
+    step = as_step_data(_records(5))
+    assert len(step.children) == 0 and step.children.dtype == CHILD_DTYPE
+    assert step.root_weight is None and step.child_weight is None
+    assert as_step_data(step) is step
