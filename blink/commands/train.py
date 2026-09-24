@@ -125,8 +125,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not status.valid_run_name(args.run):
         print(f"blink status: bad run name {args.run!r}", file=sys.stderr)
         return EXIT_REFUSED
-    report = status.run_status(paths.home() / "runs" / args.run)
+    run_dir = paths.home() / "runs" / args.run
+    report = status.run_status(run_dir)
     print(status.format_status(report))
+    warning = status.speed_warning(status.speed_check(status.read_rows(run_dir / "metrics.jsonl")))
+    if warning:
+        print(warning)  # a warning only: the exit code stays the stop rules' (stale, crashed, NaN)
     return status.exit_code(report)
 
 

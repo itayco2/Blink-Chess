@@ -1,16 +1,15 @@
 """`blink baselines train`: the linear and MLP rungs, soft BCE on win%, early stop on val, <= 5 epochs.
 
 The label is the Lichess win probability of the root's best line (cp or mate, side to move's view).
-The training set is the ladder's shared fixed set: the first N root records of the train shards read
-in file-name order, front to back (sequential reads only, PF14). Its shard list, size and a sha256 of
-its fen_hash sequence are written beside the model, so s10m (rung 4) can prove it saw the same set.
+The training set is the ladder's shared fixed set (blink.data.fixedset): the first N root records of
+the train shards read in file-name order, front to back (sequential reads only, PF14). Its shard list,
+size and a sha256 of its fen_hash sequence are written beside the model, so s10m (rung 4) can prove it
+saw the same set (`blink data ladder10m` writes the same description into s10m's pack).
 """
 
 import copy
 import dataclasses
-import hashlib
 import json
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,16 +22,20 @@ from torch.nn import functional as F
 
 from blink.baselines import models
 from blink.board.value import win_probability_array
+from blink.data.fixedset import (  # noqa: F401 - defined here first, and still imported from here
+    FIXED_SET_RULE,
+    SKELETON_TRAIN,
+    V1_TRAIN_ROOTS,
+    fixed_train_set,
+    root_shards,
+)
 from blink.data.record import ROOT_DTYPE
 from blink.train.atomic import write_text_atomic
 
 MAX_EPOCHS = 5
 DEFAULT_LR = {"linear": 3e-3, "mlp": 1e-3}
 EVAL_CHUNK = 65536
-V1_TRAIN_ROOTS = "train_r*.bin"
-SKELETON_TRAIN = re.compile(r"^train_\d+\.bin$")
 VAL_FILES = ("val_roots.bin", "val.bin")
-FIXED_SET_RULE = "the first N root records of the train root shards, in file-name order, front to back"
 
 Log = Callable[[str], None]
 
@@ -74,48 +77,11 @@ class FitResult:
     val_bce: float
 
 
-def root_shards(data_dir: Path) -> list[Path]:
-    """v1 root shards (train_r000.bin ...) or the skeleton's train_000.bin ..., in name order."""
-    data_dir = Path(data_dir)
-    shards = sorted(data_dir.glob(V1_TRAIN_ROOTS))
-    if not shards:
-        shards = sorted(p for p in data_dir.glob("train_*.bin") if SKELETON_TRAIN.fullmatch(p.name))
-    if not shards:
-        raise FileNotFoundError(f"{data_dir} has no train root shards (train_r*.bin or train_<n>.bin)")
-    return shards
-
-
 def val_file(data_dir: Path) -> Path:
     for name in VAL_FILES:
         if (Path(data_dir) / name).is_file():
             return Path(data_dir) / name
     raise FileNotFoundError(f"{data_dir} has no val roots ({' or '.join(VAL_FILES)})")
-
-
-def fixed_train_set(data_dir: Path, positions: int) -> tuple[np.ndarray, dict[str, Any]]:
-    """The ladder's shared training set and a description that identifies it exactly."""
-    parts, used, need = [], [], positions
-    for shard in root_shards(data_dir):
-        if need == 0:
-            break
-        part = np.fromfile(shard, dtype=ROOT_DTYPE, count=need)
-        parts.append(part)
-        used.append(shard.name)
-        need -= len(part)
-    if need:
-        found = positions - need
-        raise ValueError(
-            f"{data_dir} holds only {found:,} train roots, fewer than the {positions:,} asked for"
-        )
-    records = np.concatenate(parts)
-    description = {
-        "rule": FIXED_SET_RULE,
-        "dir": str(data_dir),
-        "shards": used,
-        "positions": positions,
-        "fen_hash_sha256": hashlib.sha256(records["fen_hash"].tobytes()).hexdigest(),
-    }
-    return records, description
 
 
 def labels(records: np.ndarray) -> np.ndarray:

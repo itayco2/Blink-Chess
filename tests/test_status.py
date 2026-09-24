@@ -1,11 +1,16 @@
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
-from blink import heartbeat
+from blink import cli, heartbeat
 from blink.train import status
+
+SPEED_CASES = json.loads(
+    (Path(__file__).parent / "fixtures" / "dashboard_speed_cases.json").read_text(encoding="utf-8")
+)["cases"]
 
 
 def _run(tmp_path, name="run"):
@@ -138,3 +143,42 @@ def test_the_status_text_shows_a_subset_eval_s_ema_vaa(tmp_path):
     (run_dir / "evals.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     text = status.format_status(status.run_status(run_dir, now=2.0))
     assert "VAA ema 0.41 (subset of 2000)" in text and "check" not in text
+
+
+@pytest.mark.parametrize("case", SPEED_CASES, ids=[case["name"] for case in SPEED_CASES])
+def test_the_speed_warning_gives_every_shared_dashboard_case(case):
+    check = status.speed_check(case["rows"])
+    expect = case["expect"]
+    assert check.warn is expect["warn"]
+    assert check.slow_s == pytest.approx(expect["slow_s"])
+    for field in ("reference", "rate"):
+        got, want = getattr(check, field), expect[field]
+        assert got is None if want is None else got == pytest.approx(want), field
+
+
+def test_the_shared_cases_cover_both_verdicts_and_every_skipped_phase():
+    assert {case["expect"]["warn"] for case in SPEED_CASES} == {True, False}
+    phases = {row.get("phase") for case in SPEED_CASES for row in case["rows"]}
+    assert {"train", "eval", "ckpt", None} <= phases
+
+
+def test_a_nan_or_boolean_rate_is_skipped_like_a_missing_one():
+    rows = [{"step": 50, "samples_per_s": 1000.0, "time": 0.0}]
+    rows += [{"step": 100, "samples_per_s": value, "time": 400.0} for value in (float("nan"), True, "900")]
+    check = status.speed_check(rows)
+    assert (check.rate, check.reference, check.slow_s) == (1000.0, 1000.0, 0.0)
+
+
+def test_blink_status_prints_the_speed_warning_but_keeps_its_exit_code(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    run_dir = _run(tmp_path / "runs", "spill")
+    heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 1050, "steps": 5000})
+    warn = next(case for case in SPEED_CASES if case["name"] == "slow for five minutes of wall time warns")
+    lines = "".join(json.dumps({**row, "loss_policy": 3.0, "loss_value": 4.0}) + "\n" for row in warn["rows"])
+    (run_dir / "metrics.jsonl").write_text(lines + '{"step": 99', encoding="utf-8")  # plus a torn line
+    assert cli.main(["status", "--run", "spill"]) == 0
+    out = capsys.readouterr().out
+    assert "WARN" in out and "600 samples/s" in out and "1,000" in out and "5.0 min" in out
+    (run_dir / "metrics.jsonl").write_text(lines.splitlines(keepends=True)[0], encoding="utf-8")
+    assert cli.main(["status", "--run", "spill"]) == 0
+    assert "WARN" not in capsys.readouterr().out

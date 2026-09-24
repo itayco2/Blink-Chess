@@ -2,12 +2,19 @@
 
 A run is LIVE when its heartbeat says "running" and is at most 30 s old. `exit_code` is 0 for a live
 healthy run or a finished one, and 1 for a stale, crashed or NaN run.
+
+`speed_check` is the P4 speed WARN (a sysmem spill): train-phase samples/s more than 30% below the
+median of the last 10 train rows that were not slow, for 5 minutes of wall time. It warns and never
+stops anything; the supervisor's throughput stop rule is separate (15% below the benchmark for 10
+minutes). live.html's speedCheck is the same rule line for line, and both are held to the cases in
+tests/fixtures/dashboard_speed_cases.json.
 """
 
 import json
 import math
 import re
 import time
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +24,10 @@ from blink import heartbeat
 LIVE_WITHIN_S = 30
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 TAIL_BYTES = 65536
+SPEED_DROP = 0.30  # a train row this far below the reference is slow
+SPEED_WINDOW_S = 300.0  # slow rows spanning this much wall time warn
+SPEED_REFERENCE_ROWS = 10  # the reference: the median of the last 10 train rows that were not slow
+QUIET_PHASES = frozenset({"eval", "ckpt"})  # windows whose samples/s is not a training rate
 
 
 def valid_run_name(name: str) -> bool:
@@ -121,3 +132,73 @@ def _format_eval(e: dict[str, Any]) -> str:
     if "check" in e:
         text += f", check {e['check']} {'FAILED' if 'vaa_check_failed' in e else 'passed'}"
     return text
+
+
+# ---------------------------------------------------------------- the speed WARN (P4)
+
+
+@dataclass(frozen=True)
+class SpeedCheck:
+    warn: bool
+    reference: float | None  # samples/s the drop is measured against
+    rate: float | None  # the latest train-phase samples/s
+    slow_s: float  # wall time from the first to the latest row of the current slow stretch
+
+
+def _number(x: Any) -> bool:
+    return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def _upper_median(xs: Sequence[float]) -> float:
+    """The element at len // 2 of the sorted values: the JS mirror's median, exactly."""
+    return sorted(xs)[len(xs) // 2]
+
+
+def _train_rates(rows: Sequence[dict[str, Any]]) -> Iterator[tuple[float, float]]:
+    """(time, samples/s) of every row that is not an eval or checkpoint window and has both numbers."""
+    for row in rows:
+        rate, at = row.get("samples_per_s"), row.get("time")
+        if row.get("phase") not in QUIET_PHASES and _number(rate) and _number(at):
+            yield float(at), float(rate)
+
+
+def speed_check(rows: Sequence[dict[str, Any]]) -> SpeedCheck:
+    """Slow rows never move the reference, so a long spill keeps warning; a fast row ends the stretch."""
+    fast: list[float] = []
+    reference = rate = since = last = None
+    for at, rate in _train_rates(rows):
+        if reference is not None and rate < (1.0 - SPEED_DROP) * reference:
+            since = at if since is None else since
+            last = at
+            continue
+        since = last = None
+        fast.append(rate)
+        reference = _upper_median(fast[-SPEED_REFERENCE_ROWS:])
+    slow_s = 0.0 if since is None else last - since
+    return SpeedCheck(slow_s >= SPEED_WINDOW_S, reference, rate, slow_s)
+
+
+def read_rows(path: Path) -> list[dict[str, Any]]:
+    """Every complete JSON row of a log (a torn last line from a live writer is skipped)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows = []
+    for line in text.split("\n")[:-1]:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def speed_warning(check: SpeedCheck) -> str | None:
+    if not check.warn:
+        return None
+    return (
+        f"  WARN: {check.rate:,.0f} samples/s, over {100 * SPEED_DROP:.0f}% below {check.reference:,.0f} "
+        f"for {check.slow_s / 60:.1f} min of training (a sysmem spill?)"
+    )

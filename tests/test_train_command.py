@@ -248,6 +248,20 @@ def test_games10k_can_be_pointed_elsewhere_and_a_raw_source_has_no_pack_mateset(
     assert train_data.plan(args, load_config(config)).games10k == elsewhere
 
 
+def test_a_pack_without_a_valprobe_says_vaa_will_not_be_recorded(tmp_path, capsys):
+    from argparse import Namespace
+
+    from blink.commands import train_data
+    from blink.model.config import TrainConfig
+
+    _v1_pack(tmp_path / "v1", weights=[1.0] * 48)
+    (tmp_path / "v1" / "valprobe.npz").unlink()
+    cfg = TrainConfig(batch_size=20, child_frac=0.25, val_size=8)
+    plan = train_data.plan(Namespace(source_raw=None, data=str(tmp_path / "v1"), valprobe=None), cfg)
+    assert plan.probe is None
+    assert "valprobe: none, so VAA will not be recorded" in capsys.readouterr().out
+
+
 def test_a_v1_world_names_the_packs_blocklist_sha_and_grouped_salt():
     """WORLD = sha1(contract, manifest sha, blocklist sha, split rule and salt): the v1 keys feed it."""
     import hashlib

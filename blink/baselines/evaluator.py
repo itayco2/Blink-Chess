@@ -17,25 +17,13 @@ import torch
 
 from blink import paths
 from blink.baselines import features, models
-from blink.board import moves, value
+from blink.board import moves
 from blink.play.agents import ValueAgent
 from blink.play.evaluator import Evaluation
-from blink.play.oracles import MaterialEvaluator
+from blink.play.factory import material_agent
+from blink.play.oracles import two_hot  # shared with the ladder's material rung
 
 AGENT_NAMES = {"material": "Material", "linear": "Linear", "mlp": "MLP"}
-
-
-def two_hot(win: np.ndarray) -> np.ndarray:
-    """float32 [N, 128]: mass split between the two bin centres around each win probability."""
-    position = np.clip(np.asarray(win, dtype=np.float64) * value.NUM_BINS - 0.5, 0.0, value.NUM_BINS - 1)
-    low = np.floor(position).astype(np.int64)
-    high = np.minimum(low + 1, value.NUM_BINS - 1)
-    upper = position - low
-    probs = np.zeros((len(position), value.NUM_BINS), dtype=np.float64)
-    rows = np.arange(len(position))
-    np.add.at(probs, (rows, low), 1.0 - upper)
-    np.add.at(probs, (rows, high), upper)
-    return probs.astype(np.float32)
 
 
 class BaselineEvaluator:
@@ -71,7 +59,7 @@ def load_baseline(path: Path, device: str = "cpu") -> tuple[BaselineEvaluator, s
 def baseline_agent(selector: str, device: str = "cpu") -> ValueAgent:
     """material | linear | mlp (BLINK_HOME/runs/baseline-<kind>/model.pt) | a path to a baseline .pt."""
     if selector == "material":
-        return ValueAgent(MaterialEvaluator(), name=AGENT_NAMES["material"])
+        return material_agent()
     path = default_path(selector) if selector in models.KINDS else Path(selector)
     evaluator, kind = load_baseline(path, device)
     return ValueAgent(evaluator, name=AGENT_NAMES[kind])

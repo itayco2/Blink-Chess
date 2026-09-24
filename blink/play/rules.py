@@ -129,6 +129,17 @@ def tie_break(values: np.ndarray, root_logits: np.ndarray, epsilon: float) -> tu
     return int(near[np.argmax(root_logits[near])]), True
 
 
+def tie_set(values: np.ndarray, root_logits: np.ndarray, epsilon: float) -> np.ndarray:
+    """R4's whole tie, in child order: within epsilon of the best value and at the highest root logit.
+
+    tie_break plays the first of it. A ladder baseline's policy is flat, so for it this is every move
+    within epsilon; it draws one with its tie seed (ValueAgent.tie_seed) instead. Blink never does.
+    """
+    near = np.flatnonzero(values >= values.max() - epsilon)
+    logits = root_logits[near]
+    return near[logits == logits.max()]
+
+
 def clock_guard(remaining_s: float | None, p99_s: float) -> bool:
     """R5: True when the clock is too low for one look per move. It only ever reduces evaluations."""
     if remaining_s is None:

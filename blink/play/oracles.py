@@ -5,7 +5,10 @@ deterministic (N4: no randomisation) and the same history always gives the same 
 engine's --random flag uses it to test the harness end to end without a model.
 
 MaterialEvaluator is a test oracle: its value head reads the material balance 1/3/3/5/9 from the
-side to move's view, so value mode with it behaves like a 1-ply material player.
+side to move's view, so value mode with it behaves like a 1-ply material player up to about +10,
+where value.win_probability's cp clamp and its one-bin value stop telling bigger leads apart. The
+ladder's rung 1 uses it at LADDER_CP_PER_POINT with an exact (two-hot) value, which ranks every
+balance a game can reach by material alone.
 """
 
 from dataclasses import dataclass
@@ -18,6 +21,8 @@ from blink.play.evaluator import Evaluation
 
 PIECE_VALUES = (1, 3, 3, 5, 9, 0)  # pawn, knight, bishop, rook, queen, king
 MATERIAL_CP = 100  # centipawns per material point
+MAX_BALANCE = 103  # nine queens, two rooks, two bishops and two knights against a bare king
+LADDER_CP_PER_POINT = value.CP_CLAMP // MAX_BALANCE  # 9: no balance reaches the clamp, so none share a value
 
 
 def _code_values() -> np.ndarray:
@@ -44,6 +49,23 @@ def one_hot_value(win: np.ndarray) -> np.ndarray:
     bins = np.minimum(value.NUM_BINS - 1, (np.asarray(win) * value.NUM_BINS).astype(np.int64))
     probs[np.arange(len(win)), bins] = 1.0
     return probs
+
+
+def two_hot(win: np.ndarray) -> np.ndarray:
+    """float32 [N, 128]: mass split between the two bin centres around each win probability.
+
+    Its mean is exactly the win probability (clipped to the outer bin centres), so unlike one_hot_value
+    it keeps two close win probabilities apart.
+    """
+    position = np.clip(np.asarray(win, dtype=np.float64) * value.NUM_BINS - 0.5, 0.0, value.NUM_BINS - 1)
+    low = np.floor(position).astype(np.int64)
+    high = np.minimum(low + 1, value.NUM_BINS - 1)
+    upper = position - low
+    probs = np.zeros((len(position), value.NUM_BINS), dtype=np.float64)
+    rows = np.arange(len(position))
+    np.add.at(probs, (rows, low), 1.0 - upper)
+    np.add.at(probs, (rows, high), upper)
+    return probs.astype(np.float32)
 
 
 TABLE_ROWS = 1024  # each output row sums one row of each of two tables: about a million distinct outputs
@@ -81,10 +103,18 @@ class RandomLogitEvaluator:
 
 @dataclass(frozen=True)
 class MaterialEvaluator:
-    """Value = the Lichess win probability of the material balance in pawns x 100 cp; flat policy."""
+    """Value = the Lichess win probability of the material balance at cp_per_point cp a point; flat policy.
+
+    The defaults are the test oracle. For the ladder's rung 1 (cp_per_point=LADDER_CP_PER_POINT,
+    exact=True) the win probability rises with every point of balance and the value holds it exactly,
+    so value mode keeps preferring more material however far ahead it is.
+    """
+
+    cp_per_point: int = MATERIAL_CP
+    exact: bool = False  # a two-hot value whose mean is the win probability, not one bin's centre
 
     def evaluate(self, codes: np.ndarray) -> Evaluation:
         balance = material_balance(codes)
-        win = np.array([value.win_probability(cp=int(MATERIAL_CP * b)) for b in balance])
+        win = np.array([value.win_probability(cp=int(self.cp_per_point * b)) for b in balance])
         policy = np.zeros((len(balance), moves.NUM_MOVES), dtype=np.float32)
-        return Evaluation(policy, one_hot_value(win))
+        return Evaluation(policy, two_hot(win) if self.exact else one_hot_value(win))

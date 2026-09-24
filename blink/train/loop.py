@@ -6,11 +6,11 @@ gradient (a fixed norm, or "auto" measured over the warmup) and updates the EMA.
 
 Everything a run writes lives in its run directory: config.json (world id, config, parameter counts,
 VRAM budget), metrics.jsonl every `metrics_every` steps (with the window's phase: train, eval or
-ckpt), evals.jsonl every `eval_every` steps plus the full-valprobe checks at 5/25/30/50/100% (which
-also score games10k and the pack's mateset when the run has them),
-heartbeat.json every `heartbeat_s` seconds, film/ frames when `film` is on, and atomic checkpoints
-ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the straight run, because the batch
-source is seeked to the checkpoint's step.
+ckpt, its wall time and its loader wait share), evals.jsonl every `eval_every` steps plus the
+full-valprobe checks at 5/25/30/50/100% (which also score games10k and the pack's mateset when the run
+has them), heartbeat.json every `heartbeat_s` seconds, film/ frames when `film` is on, and atomic
+checkpoints ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the straight run, because the
+batch source is seeked to the checkpoint's step.
 """
 
 import json
@@ -228,7 +228,8 @@ def _write_metrics(run: _Run, window: telemetry.MetricWindow, lr: float) -> None
     run.log(
         f"step {run.step}/{run.cfg.steps}: policy {record['loss_policy']:.4f} "
         f"value {record['loss_value']:.4f} lr {lr:.2e} grad {record['grad_norm']:.3f} "
-        f"clip {record['clip_frac']:.2f} {record['samples_per_s']:.0f} samples/s [{record['phase']}]"
+        f"clip {record['clip_frac']:.2f} {record['samples_per_s']:.0f} samples/s "
+        f"(loader wait {100 * record['data_wait_frac']:.1f}%) [{record['phase']}]"
     )
     if not (np.isfinite(record["loss_policy"]) and np.isfinite(record["loss_value"])):
         raise FloatingPointError(f"non-finite loss at step {run.step}: {record}")
@@ -295,7 +296,9 @@ def _run_steps(run: _Run, source: BatchSource, end: int) -> None:
     batches = source(run.step)
     while run.step < end:
         lr = wsd_lr(run.step, cfg.peak_lr, cfg.warmup_steps, cfg.steps, cfg.cooldown_frac) * run.lr_scale
+        asked = time.perf_counter()
         item = next(batches, None)
+        window.waited(time.perf_counter() - asked)
         if item is None:
             raise RuntimeError(f"the batch source ran out of batches at step {run.step}")
         data = as_step_data(item)

@@ -1,7 +1,10 @@
 # s10m, ladder rung 4: S with the frozen recipe on the P3 ladder's fixed 10M train positions only,
 # so child_frac = 0 (children would be positions the other rungs never saw). About 1 GPU-h:
 # 3600 * 7003 / 1024 = 24,620 steps, 25.2M samples, 2.5 passes over the 10M.
-# blink train --config configs/s10m.toml --run s10m --data <the fixed 10M set's pack directory>
+# Its pack holds exactly the fixed set (same roots, order and fen_hash sha256 as the baselines' metrics.json)
+# plus those roots' children, the rebalance table and the val files; build it once the v1 pack is complete:
+# blink data ladder10m --pack D:/blink/data/v1 --positions 10000000 --out D:/blink/data/ladder10m
+# blink train --config configs/s10m.toml --run s10m --data D:/blink/data/ladder10m
 base = "s.toml"
 
 [train]
