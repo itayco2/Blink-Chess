@@ -5,6 +5,7 @@ import io
 import json
 import math
 import os
+import ssl
 import urllib.error
 import urllib.parse
 from collections.abc import Mapping
@@ -174,6 +175,31 @@ def test_requests_go_one_at_a_time_with_a_gap_between_them():
     api.user("BlinkBot")
     api.rating_history("BlinkBot")
     assert sleeps == [pytest.approx(0.8)]
+
+
+def test_the_windows_trust_anchors_are_the_root_store_only():
+    """PF: Windows' intermediate store held an expired ISRG Root X2 cross-certificate (to 2025-09-15),
+    which Python's default context trusts, so lichess.org's Let's Encrypt chain failed as expired."""
+    asked: list[str] = []
+
+    def enum(store):
+        asked.append(store)
+        return []
+
+    context = snapshot.tls_context(platform="win32", enum=enum)
+    assert asked == ["ROOT"]
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
+
+
+def test_other_platforms_keep_the_default_verified_context():
+    context = snapshot.tls_context(platform="linux", enum=lambda store: pytest.fail("no store read"))
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+
+
+def test_the_real_api_client_verifies_certificates():
+    opener = snapshot.default_opener()
+    assert opener.keywords["context"].verify_mode == ssl.CERT_REQUIRED
 
 
 def test_a_bad_bot_name_never_reaches_the_network():

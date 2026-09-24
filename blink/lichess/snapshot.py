@@ -20,8 +20,12 @@ snapshot is written to results/lichess.json through blink.report.results_schema.
 which marks it publishable only at N >= 200 and RD < 75.
 """
 
+import contextlib
+import functools
 import json
 import re
+import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -64,6 +68,29 @@ def check_name(name: str) -> str:
 # ---------------------------------------------------------------- the public API client
 
 
+def tls_context(platform: str = sys.platform, enum: Callable | None = None) -> ssl.SSLContext:
+    """A verifying TLS context whose trust anchors on Windows are the ROOT store only.
+
+    Python's default context on Windows also trusts every certificate in the intermediate ("CA")
+    store. On this machine that store holds an expired ISRG Root X2 cross-certificate (valid to
+    2025-09-15), so the Let's Encrypt chain lichess.org presents failed as "certificate has expired".
+    Trusting only the root store is stricter, not looser; elsewhere the default context is kept.
+    """
+    if platform != "win32":
+        return ssl.create_default_context()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # CERT_REQUIRED and hostname checks by default
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    for der, encoding, trust in (enum or ssl.enum_certificates)("ROOT"):
+        if encoding == "x509_asn" and (trust is True or ssl.Purpose.SERVER_AUTH.oid in trust):
+            with contextlib.suppress(ssl.SSLError):
+                context.load_verify_locations(cadata=der)
+    return context
+
+
+def default_opener() -> functools.partial:
+    return functools.partial(urllib.request.urlopen, context=tls_context())
+
+
 class PublicApi:
     """GET requests to the public Lichess API, serialised, with no credentials of any kind."""
 
@@ -76,7 +103,7 @@ class PublicApi:
         min_gap_s: float = MIN_GAP_S,
         retries: int = RETRIES_429,
     ) -> None:
-        self._open = opener or urllib.request.urlopen
+        self._open = opener or default_opener()
         self._sleep = sleep
         self._clock = clock
         self._base = base.rstrip("/")
