@@ -1,7 +1,11 @@
 name: pages
 
 # The browser page on GitHub Pages. Nothing runs until the repository variable PAGES_ENABLED is "true"
-# (set at gate G8, together with the model-v1 release and enabling Pages with the Actions source).
+# (set at gate G8, together with the model-v1 release and enabling Pages with the Actions source), and
+# only main deploys: the github-pages environment admits only the default branch unless its rules are
+# widened, so there is no release trigger (a release runs on refs/tags/<tag> and would build the tag's
+# commit, not main's). G8's steps: gh release create model-v1, enable Pages, set PAGES_ENABLED, then
+# `gh workflow run pages.yml --ref main` (after model-v1 exists, since the build downloads it).
 # onnxruntime-web and chess.js come from npm (site/package-lock.json, exact versions and integrity);
 # `blink site stage` copies the page plus exactly the npm files blink/site/layout.py lists:
 # vendor/ort/{ort.wasm.bundle.min.mjs, ort-wasm-simd-threaded.wasm, ort-wasm-simd-threaded.mjs} and
@@ -11,8 +15,6 @@ name: pages
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
   push:
     branches: [main]
     paths:
@@ -30,7 +32,7 @@ concurrency:
 jobs:
   build:
     name: stage the page, the npm runtime files and the model-v1 release
-    if: ${{ vars.PAGES_ENABLED == 'true' }}
+    if: ${{ vars.PAGES_ENABLED == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

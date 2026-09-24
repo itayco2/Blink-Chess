@@ -59,12 +59,16 @@ def test_pages_workflow_fetches_ort_and_model_and_tracks_neither(text, repo_file
     assert {"*.onnx", "site/models/", "site/node_modules/"} <= ignored
 
 
-def test_pages_deploys_only_when_the_repository_variable_enables_it(text):
-    assert "    if: ${{ vars.PAGES_ENABLED == 'true' }}\n" in _job(text, "build")
+def test_pages_deploys_only_main_and_only_when_the_repository_variable_enables_it(text):
+    guard = "    if: ${{ vars.PAGES_ENABLED == 'true' && github.ref == 'refs/heads/main' }}\n"
+    assert guard in _job(text, "build")
     assert "    needs: build\n" in _job(text, "deploy")
     assert "    needs: deploy\n" in _job(text, "smoke")
     triggers = text[text.index("\non:\n") : text.index("\npermissions:\n")]
-    assert "workflow_dispatch:" in triggers and "types: [published]" in triggers
+    assert "workflow_dispatch:" in triggers and "    branches: [main]\n" in triggers
+    # a release runs on refs/tags/<tag>: github-pages admits only main, and it would build the tag's commit
+    assert "release:" not in triggers and "tags:" not in triggers
+    assert "gh workflow run pages.yml --ref main" in text[: text.index("\non:\n")], "G8's deploy step"
 
 
 def test_every_action_is_pinned_by_a_full_commit_sha_with_its_tag_named(text):
