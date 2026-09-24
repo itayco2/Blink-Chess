@@ -145,6 +145,12 @@ class GamesHistogram(NamedTuple):
     def as_dict(self) -> dict:
         return {**self._asdict(), "counts": self.counts.tolist(), "unique_positions": int(self.counts.sum())}
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "GamesHistogram":
+        """The inverse of as_dict (a saved games_hist.json)."""
+        fields = {name: data[name] for name in cls._fields}
+        return cls(**{**fields, "counts": np.asarray(data["counts"], dtype=np.int64)})
+
 
 class _Tally:
     def __init__(self) -> None:
