@@ -2,9 +2,11 @@
 
 E4: the shipped model in its shipped mode against full-strength Stockfish 19 at 2^k nodes per move,
 k = 4, 6, ..., 16 (7 rungs), 100 games per rung on the final slice, then 400 more (500 in all) at the
-two rungs that bracket a 50% score. The crossover is where the score crosses 50%, interpolated on the
-logit of the score against log2(nodes) between the bracketing rungs; it fills "about level with SF19 at
-N nodes". Without a bracket the ladder reports a bound (above the top rung or below the bottom one).
+two rungs that bracket a 50% score. When those games move the bracket (a rung's score crosses 50%), the
+new bracket's rungs are topped up to 500 as well, so the published crossover always rests on two rungs of
+500 games. The crossover is where the score crosses 50%, interpolated on the logit of the score against
+log2(nodes) between the bracketing rungs; it fills "about level with SF19 at N nodes". Without a bracket
+the ladder reports a bound (above the top rung or below the bottom one).
 E4b: 6 of the run's film checkpoints, evenly spaced from first to last, 200 games each against SF19 at
 the crossover node count (dev slice): how the learning curve looks in games.
 E6: random, material, linear, MLP, s10m and SF19 UCI_Elo 1320, every pair 200 games (final slice).
@@ -72,19 +74,36 @@ def run_node_ladder(
     rungs: Sequence[int] = NODE_RUNGS,
     merge: Callable[[Report, Report], Report] | None = None,
 ) -> dict:
-    """100 games per rung, then more at the two bracketing rungs; returns the rungs and the crossover."""
+    """100 games per rung, then more at the bracketing rungs until the bracket's two rungs both have
+    `bracket_games` (re-bracketing after each top-up); returns the rungs and the crossover.
+
+    Each top-up gives at least one more rung its full count, so the loop ends within len(rungs) rounds;
+    `short_bracket` lists any final bracketing rung still short (none, unless a match came back short)."""
     from blink.eval.match import merge_reports
 
     merge = merge or merge_reports
     results = {nodes: _with_nodes(play(nodes, rung_games, 0), nodes) for nodes in rungs}
-    pair = bracketing(list(results.values()))
-    extra = max(0, bracket_games - rung_games)
-    if pair is not None and extra:
-        for nodes in pair:
-            more = play(nodes, extra, rung_games // 2)
+    for _ in range(len(rungs)):
+        short = _short_rungs(results, bracket_games)
+        if not short:
+            break
+        for nodes in short:
+            played = results[nodes]["games"]
+            more = play(nodes, bracket_games - played, played // 2)
             results[nodes] = _with_nodes(merge(results[nodes], more), nodes)
     rows = [results[n] for n in sorted(results)]
-    return {"rungs": rows, "crossover": crossover(rows), "games": sum(r["games"] for r in rows)}
+    return {
+        "rungs": rows,
+        "crossover": crossover(rows),
+        "short_bracket": _short_rungs(results, bracket_games),
+        "games": sum(r["games"] for r in rows),
+    }
+
+
+def _short_rungs(results: dict[int, Report], bracket_games: int) -> list[int]:
+    """The bracketing rungs (by nodes) with fewer than `bracket_games` games."""
+    pair = bracketing(list(results.values())) or ()
+    return [nodes for nodes in pair if results[nodes]["games"] < bracket_games]
 
 
 def film_frames(run_dir: Path) -> list[Path]:

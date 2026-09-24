@@ -174,3 +174,29 @@ def test_locator_games_go_to_their_own_folder_so_a_folder_of_final_slice_games_h
     play(GRID[0], 2, "dev", 0)
     play(GRID[0], 2, "final", 0)
     assert [(s["book"], s["out_dir"].name) for s in seen] == [("dev", "E5-locator"), ("final", "E5")]
+
+
+def test_a_bracket_that_moves_after_the_extra_games_gets_its_own_500_games():
+    """The extra games took rung 256 from 52% to 47%: the crossover moved to [64, 256], so 64 needs 500."""
+    first = {16: 0.9, 64: 0.8, 256: 0.52, 1024: 0.45, 4096: 0.3, 16384: 0.1, 65536: 0.05}
+    extra = {64: 0.8, 256: 0.4575, 1024: 0.3875}
+    calls = []
+
+    def play(nodes, games, skip):
+        calls.append((nodes, games, skip))
+        return report("Blink", f"SF19-n{nodes}", games, extra[nodes] if skip else first[nodes])
+
+    result = ladder.run_node_ladder(play)
+    assert calls[7:] == [(256, 400, 50), (1024, 400, 50), (64, 400, 50)]
+    games = {r["nodes"]: r["games"] for r in result["rungs"]}
+    assert (games[64], games[256], games[1024], games[16]) == (500, 500, 500, 100)
+    assert result["crossover"]["bracket"] == [64, 256] and result["short_bracket"] == []
+    assert result["games"] == 4 * 100 + 3 * 500
+
+
+def test_a_smoke_ladder_with_no_extra_games_flags_nothing_it_did_not_promise():
+    scores = {16: 0.9, 64: 0.8, 256: 0.7, 1024: 0.4, 4096: 0.3, 16384: 0.1, 65536: 0.05}
+    result = ladder.run_node_ladder(
+        lambda nodes, games, skip: report("B", "SF", games, scores[nodes]), rung_games=2, bracket_games=2
+    )
+    assert result["games"] == 14 and result["short_bracket"] == []
