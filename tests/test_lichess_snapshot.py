@@ -14,11 +14,25 @@ from pathlib import Path
 import pytest
 
 from blink import cli
-from blink.lichess import snapshot
+from blink.lichess import pause, snapshot
 from blink.report import results_schema
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "lichess"
 SNAPSHOT_SOURCE = Path(snapshot.__file__)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_home_api_or_processes(monkeypatch, tmp_path):
+    """No test here may touch the real BLINK_HOME, the live Lichess API or the machine's processes.
+
+    A RED-phase run once sent `pause --poll 0` through the real CLI and wrote a PAUSED flag into
+    the real BLINK_HOME/lichess; tests that need these pieces install their own fakes over this guard.
+    """
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "guarded-blink-home"))
+    monkeypatch.setattr(snapshot, "default_api", lambda: pytest.fail("a test reached the live Lichess API"))
+    monkeypatch.setattr(
+        pause, "default_deps", lambda *args: pytest.fail("a test built the real pause dependencies")
+    )
 
 
 def fixture_bytes(name: str) -> bytes:

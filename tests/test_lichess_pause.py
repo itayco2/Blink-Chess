@@ -15,6 +15,22 @@ from blink import cli
 from blink.lichess import pause, snapshot
 
 BOT_ROOT = "D:/blink-bot"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_home_api_or_processes(monkeypatch, tmp_path):
+    """No test here may touch the real BLINK_HOME, the live Lichess API or the machine's processes.
+
+    A RED-phase run once sent `pause --poll 0` through the real CLI and wrote a PAUSED flag into
+    the real BLINK_HOME/lichess; tests that need these pieces install their own fakes over this guard.
+    """
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "guarded-blink-home"))
+    monkeypatch.setattr(snapshot, "default_api", lambda: pytest.fail("a test reached the live Lichess API"))
+    monkeypatch.setattr(
+        pause, "default_deps", lambda *args: pytest.fail("a test built the real pause dependencies")
+    )
+
+
 LAUNCHER = pause.ProcessRow(
     pid=100,
     ppid=10,
