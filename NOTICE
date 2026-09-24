@@ -1,0 +1,57 @@
+Blink
+Copyright 2026 Itay Cohen
+
+Blink's code is released under the MIT License (LICENSE), except for the files listed under
+"Apache License 2.0 files" below. This file records the third-party code and licences Blink uses.
+
+
+Apache License 2.0 files
+------------------------
+
+These files are ported from google-deepmind/searchless_chess
+(https://github.com/google-deepmind/searchless_chess), Copyright 2025 DeepMind Technologies Limited,
+licensed under the Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0).
+Modifications copyright 2026 Itay Cohen. Each file keeps the Apache-2.0 header and its docstring says
+what was ported and what was changed.
+
+  blink/eval/puzzles.py         the puzzle scorer, from src/puzzles.py
+  blink/reference/deepmind.py   the action-value transformer, FEN tokenizer and 1968-move action
+                                vocabulary, from src/transformer.py, src/tokenizer.py, src/utils.py,
+                                src/engines/neural_engines.py and src/engines/constants.py (commit 90ae0e6b)
+
+searchless_chess ships no NOTICE file of its own. DeepMind's model weights (CC BY 4.0) are not in this
+repository: tools/dm_convert.py converts a checkpoint the user downloads, on the user's own machine.
+
+
+Runtime dependency under the GPL
+--------------------------------
+
+python-chess (the "chess" package, https://github.com/niklasf/python-chess) is licensed under
+GPL-3.0-or-later. Blink declares it in pyproject.toml and imports it at run time. It is not vendored:
+no python-chess source is copied into or modified in this repository.
+
+
+Vendored third-party files
+--------------------------
+
+  site/vendor/cm-chessboard/        cm-chessboard by Stefan Haack, MIT License
+                                    (site/vendor/cm-chessboard/LICENSE)
+  site/assets/pieces/cburnett.svg   the cburnett chess pieces by Cburnett, from Wikimedia Commons; Blink
+                                    elects their BSD 3-Clause License option
+                                    (site/assets/pieces/LICENSE-pieces.txt)
+
+
+Fetched from npm at build time, never committed
+-----------------------------------------------
+
+  onnxruntime-web 1.30.0   MIT License (Microsoft)
+  chess.js 1.4.0           BSD 2-Clause License, published beside the page as vendor/chess.js/LICENSE
+
+Both are pinned in site/package.json and site/package-lock.json.
+
+
+External programs, run as separate processes and never committed
+-----------------------------------------------------------------
+
+  Stockfish 19   GPL-3.0 (evaluation anchors and labels)
+  fastchess      MIT License (gauntlets)

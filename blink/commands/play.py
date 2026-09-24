@@ -10,6 +10,8 @@ from pathlib import Path
 from blink import paths
 from blink.eval import books, fastchess, match
 from blink.play import agents, factory, rules
+from blink.reference import gauntlet as dm_gauntlet
+from blink.reference import registry
 
 
 def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> agents.Agent:
@@ -18,6 +20,8 @@ def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> 
         return agents.RandomAgent(seed=seed)
     if side == "material":
         return agents.MaterialAgent(seed=seed)
+    if registry.is_dm(side):
+        return registry.load_agent(side, device=device)
     evaluator = factory.load_evaluator(side, device=device, seed=seed)
     return replace(
         factory.make_agent(mode, evaluator, epsilon=epsilon), name=fastchess.engine_name(side, mode)
@@ -56,11 +60,14 @@ def _gauntlet_ok(report: dict) -> bool:
 
 def _cmd_gauntlet(args: argparse.Namespace) -> int:
     out_dir = args.out or paths.home() / "games" / "gauntlet"
+    is_deepmind = registry.is_dm(args.model)
     if not args.dry_run:
-        factory.check_available(args.model)
+        (registry.check_available if is_deepmind else factory.check_available)(args.model)
+    # DeepMind's engine plays under its own name and has its own moves audited (plan E7).
+    runner = dm_gauntlet if is_deepmind else fastchess
     ok = True
     for anchor in args.anchor or [1320]:
-        gauntlet = fastchess.prepare_gauntlet(
+        gauntlet = runner.prepare_gauntlet(
             model=args.model,
             mode=args.mode,
             device=args.device,
@@ -75,12 +82,13 @@ def _cmd_gauntlet(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(subprocess.list2cmdline(gauntlet.command()))
             continue
-        report = fastchess.execute(gauntlet)
+        report = runner.execute(gauntlet)
         Path(report["pgn"]).with_suffix(".json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        audit, summary = report["audit"], report["summary"] or {}
+        audit, summary, engine = report["audit"], report["summary"] or {}, report["blink"]
         print(
-            f"{report['blink']} vs {report['anchor']}: games {summary.get('games')}, W {summary.get('wins')} "
-            f"D {summary.get('draws')} L {summary.get('losses')}; Blink forfeits {report['blink_forfeits']}; "
+            f"{engine} vs {report['anchor']}: games {summary.get('games')}, W {summary.get('wins')} "
+            f"D {summary.get('draws')} L {summary.get('losses')}; "
+            f"{engine} forfeits {report['blink_forfeits']}; "
             f"no-search decisions {audit['decisions']}, violations {len(audit['violations'])}; "
             f"{report['seconds']} s"
         )

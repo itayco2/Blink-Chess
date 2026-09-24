@@ -26,6 +26,7 @@ import chess
 from blink.board import value
 from blink.play import factory, rules
 from blink.play.agents import Agent, Decision, ValueAgent
+from blink.reference import registry
 
 ENGINE_NAME = "Blink"
 AUTHOR = "Itay Cohen"
@@ -150,7 +151,9 @@ class UciEngine:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="blink-uci", description="Blink as a UCI engine (no search).")
-    parser.add_argument("--model", default="ship", help="run:<name>[:ema] | ship | release:<tag> | <path>")
+    parser.add_argument(
+        "--model", default="ship", help="run:<name>[:ema] | ship | release:<tag> | <path> | dm:9M[:ema]"
+    )
     parser.add_argument("--mode", choices=factory.MODES, default="policy")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--random", action="store_true", help="a random-logit network, for harness tests")
@@ -166,18 +169,21 @@ def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout:
     stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
     selector = "random" if args.random else args.model
+    is_deepmind = registry.is_dm(selector)
     try:
-        factory.check_available(selector)
+        (registry.check_available if is_deepmind else factory.check_available)(selector)
     except factory.ModelUnavailable as exc:
         print(f"blink-uci: {exc}", file=sys.stderr)
         return 2
     sink = factory.JsonlSink(args.log) if args.log else None
 
     def make() -> Agent:
+        if is_deepmind:  # DeepMind's released play logic: L rows per move, no Blink mode
+            return registry.load_agent(selector, device=args.device, sink=sink)
         evaluator = factory.load_evaluator(selector, device=args.device, seed=args.seed)
         return factory.make_agent(args.mode, evaluator, epsilon=args.epsilon, sink=sink)
 
-    name = args.name or f"{ENGINE_NAME}-{args.mode}"
+    name = args.name or (registry.parse(selector).name if is_deepmind else f"{ENGINE_NAME}-{args.mode}")
     engine = UciEngine(make, stdout, name=name)
     for line in iter(stdin.readline, ""):
         if not engine.handle(line.strip()):

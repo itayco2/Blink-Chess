@@ -2,11 +2,14 @@
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 from blink import paths
 from blink.eval import fastchess, nosearch, puzzles, signcheck
 from blink.play import factory, rules
+from blink.play.agents import Agent
+from blink.reference import registry
 
 MODES_OR_BOTH = (*factory.MODES, "both")
 
@@ -33,18 +36,29 @@ def _missing(path: Path, what: str) -> bool:
     return True
 
 
+def _puzzle_agents(args: argparse.Namespace) -> list[tuple[str, Agent]]:
+    """(mode, agent) pairs to score; a DeepMind selector has its one mode, action-value."""
+    if registry.is_dm(args.model):
+        return [(registry.MODE, registry.load_agent(args.model, device=args.device))]
+    evaluator = factory.load_evaluator(args.model, device=args.device)
+    modes = factory.MODES if args.mode == "both" else (args.mode,)
+    return [(mode, factory.make_agent(mode, evaluator, epsilon=args.epsilon)) for mode in modes]
+
+
 def _cmd_puzzles(args: argparse.Namespace) -> int:
     source = puzzles.resolve_set(args.set)
     if _missing(source, "puzzle set"):
         return 2
-    evaluator = factory.load_evaluator(args.model, device=args.device)
     label = f"{_set_label(args.set)}_{fastchess.NAME_UNSAFE.sub('_', args.model).strip('_')}"
     out_dir = args.out or paths.home() / "eval" / "puzzles"
     illegal = 0
-    for mode in factory.MODES if args.mode == "both" else (args.mode,):
-        agent = factory.make_agent(mode, evaluator, epsilon=args.epsilon)
+    for mode, agent in _puzzle_agents(args):
+        started = time.perf_counter()
         summary = puzzles.run_puzzle_set(source, agent, mode, out_dir, limit=args.limit, label=label)
+        seconds = time.perf_counter() - started
         _print_puzzles(summary, f"{agent.name} ({args.model})")
+        per_puzzle_ms = 1000 * seconds / max(summary["n"], 1)
+        print(f"  {summary['n']} puzzles in {seconds:.1f} s ({per_puzzle_ms:.0f} ms each)")
         illegal += summary["illegal_moves"]
     print(f"per-puzzle CSVs in {out_dir}")
     return 0 if illegal == 0 else 1
@@ -94,9 +108,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     pz.add_argument("--set", default="dm10k", help="dm10k or a CSV with PuzzleId, Rating, PGN, Moves")
     pz.add_argument("--limit", type=int, default=None)
     pz.add_argument(
-        "--model", required=True, help="run:<name>[:ema] | ship | release:<tag> | <path> | random"
+        "--model",
+        required=True,
+        help="run:<name>[:ema] | ship | release:<tag> | <path> | random | dm:9M[:ema] (DeepMind)",
     )
-    pz.add_argument("--mode", choices=MODES_OR_BOTH, default="both")
+    pz.add_argument("--mode", choices=MODES_OR_BOTH, default="both", help="ignored for dm: selectors")
     pz.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     pz.add_argument("--epsilon", type=float, default=rules.DEFAULT_EPSILON)
     pz.add_argument("--out", type=Path, default=None, help="folder (default BLINK_HOME/eval/puzzles)")
