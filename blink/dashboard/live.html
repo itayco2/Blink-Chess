@@ -243,7 +243,7 @@ const verdicts = {
     if (m.length < 3 || check.reference === null) return ["idle", "measuring"];
     const drop = fmt(check.rate, 0) + " samples/s, over 30% below " + fmt(check.reference, 0);
     if (check.warn) return ["sick", "WARN: " + drop + " for " + fmt(check.slow_s / 60, 1) + " min (sysmem spill?)"];
-    if (check.rate < (1 - SPEED_DROP) * check.reference) return ["watch", "watch: " + drop + " for " + fmt(check.slow_s, 0) + " s"];
+    if (check.rate < (1 - SPEED_DROP) * check.reference) return ["watch", "watch: " + drop + " for " + fmt(check.slow_s, 0) + " s (WARN at " + SPEED_WINDOW_S + " s)"];
     const last = m.at(-1), wait = Number.isFinite(last.data_wait_frac) ? ", loader wait " + fmt(last.data_wait_frac * 100, 1) + "%" : "";
     return ["healthy", "healthy: steady at " + fmt(check.rate, 0) + " samples/s" + wait + ", " + fmt(last.gpu_mem_gb, 2) + " GB reserved"];
   },

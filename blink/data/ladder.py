@@ -205,6 +205,7 @@ def build(cfg: LadderConfig, log: Log = print) -> dict[str, Any]:
     """Write the ladder pack into cfg.out and return its manifest."""
     source_dir, out = Path(cfg.pack), Path(cfg.out)
     source = check_source(source_dir)
+    source_sha = hashlib.sha256((source_dir / bigpack.MANIFEST).read_bytes()).hexdigest()
     roots, description = fixedset.fixed_train_set(source_dir, cfg.positions)
     prepare_out(cfg)
     used = description["shards"]
@@ -221,7 +222,7 @@ def build(cfg: LadderConfig, log: Log = print) -> dict[str, Any]:
         "source": {
             "dir": str(source_dir),
             "format": source["format"],
-            "manifest_sha256": hashlib.sha256((source_dir / bigpack.MANIFEST).read_bytes()).hexdigest(),
+            "manifest_sha256": source_sha,  # the manifest whose rebalance table this pack copies
         },
         "fixed_set": description,
         "shard_rule": SHARD_RULE,
