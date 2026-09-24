@@ -80,11 +80,6 @@ def test_rows_do_not_leak_into_each_other_across_the_batch():
     torch.testing.assert_close(value[2:3], single_value, rtol=1e-5, atol=1e-5)
 
 
-def test_gab_is_off_in_p1_and_asking_for_it_raises():
-    with pytest.raises(NotImplementedError):
-        BlinkNet(tiny_model_config(gab=True))
-
-
 def test_the_head_count_must_tile_the_model_width():
     with pytest.raises(ValueError):
         ModelConfig(d_model=100, n_heads=4, head_dim=32)

@@ -1,0 +1,24 @@
+# The flagship run (P7) template. Before launch:
+#   - point base at the N* size config chosen by `blink sweep choose` (M is the plan's default);
+#   - set steps = T_long * N*'s measured samples/s / 1024 (T_long = 120 h: 661,078 at M's 1,567);
+#   - set vaa_reference to N*'s 6 h sweep run name and vaa_sigma to the a01-a03 noise floor: the
+#     3-seed sigma of ema_vaa in their 100% check rows (full valprobe). The same rows hold
+#     ema_vaa_subset; its 3-seed sigma is vaa_sigma_subset. With it set, the 5% rule meets N*'s last
+#     stable 2k-step subset row; left at 0 it meets N*'s last stable full-valprobe check (its 50%).
+# blink supervise -- train --config configs/long.toml --run long --data D:\blink\data\v1
+# The 30% pause for the preview cooldown (P7). The 30% check step is round(0.3 * steps), 198,323 at
+# 661,078 steps (blink.train.vaa.check_steps); the check writes a kept checkpoint there. So:
+#   1. train the main run with --max-steps 198323: it stops at the 30% check, checkpoint written;
+#   2. blink train --run long --data D:\blink\data\v1 --preview-cooldown 3h --from-step 198323
+#      (writes runs/long-preview only; its end is checked against the reference's final VAA);
+#   3. resume the main run: the same command with --resume and without --max-steps.
+base = "m.toml"
+
+[train]
+steps = 661078
+film = true             # 21 frames under runs/long/film/
+vaa_checks = true       # 5%: >= the reference at equal samples - 2 sigma; 25%, 50%: >= previous - 2 sigma
+vaa_sigma = 0.01        # replace with the measured 3-seed sigma (a fraction: 0.01 is 1 point)
+vaa_sigma_subset = 0.0  # the subset's measured 3-seed sigma; 0 = not measured, full rows only
+vaa_reference = ""      # the N* 6 h sweep run; empty skips the 5% rule (the row says so)
+keep_every_hours = 12.0 # keep the last 3 checkpoints plus one every 12 h (check steps are always kept)

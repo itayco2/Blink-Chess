@@ -1,94 +1,27 @@
 """`blink train` and `blink status`.
 
-blink train --config configs/t.toml --run NAME (--data DIR | --source-raw PATH [--max-lines N]) [--resume]
-writes BLINK_HOME/runs/NAME/. `blink status --run NAME` prints the run's state and exits 1 when the
-run is stale, crashed or has a NaN loss. Torch is imported only when a command runs, so `blink --help`
-stays fast and works on the torch-free CI leg.
+blink train --config configs/s.toml --run NAME (--data DIR | --source-raw PATH [--max-lines N])
+            [--valprobe FILE] [--resume [--lr-scale F]] [--max-steps N] [--device cuda|cpu]
+blink train --run NAME --data DIR --preview-cooldown 3h --from-step N    (writes runs/NAME-preview)
+
+A v1 pack directory holds train_r*.bin roots, train_c*.bin children, val_roots.bin, valprobe.npz
+and manifest.json (with the rebalancing weights); the P1 skeleton layout (train_000.bin, val.bin)
+still works for roots-only configs. `blink status --run NAME` prints the run's state and exits 1
+when the run is stale, crashed or has a NaN loss. Torch is imported only when a command runs, so
+`blink --help` stays fast and works on the torch-free CI leg.
 """
 
 import argparse
-import hashlib
-import json
-import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-import numpy as np
 
 from blink import paths
-from blink.data.record import ROOT_DTYPE
-from blink.model.config import TrainConfig, load_config
+from blink.commands import train_data
+from blink.model.config import TrainConfig, config_from_dict, load_config
 from blink.train import status
-from blink.train.world import NO_BLOCKLIST, SPLIT_RULE, world_id
 
-DEFAULT_MAX_LINES = 1_000_000
-DEFAULT_WORKERS = max(1, min(6, (os.cpu_count() or 2) - 2))
 EXIT_REFUSED = 2
-
-
-class CommandError(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True)
-class DataPlan:
-    source: Any  # blink.train.source.BatchSource
-    val: np.ndarray | None
-    world: str
-    description: dict[str, Any]
-
-
-def _raw_plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
-    from blink.train import rawsource
-    from blink.train.source import InMemorySource
-
-    raw = rawsource.load_or_build(
-        Path(args.source_raw), args.max_lines, paths.home() / "data" / "raw-cache", args.workers
-    )
-    train, val, _ = rawsource.split(raw.records)
-    if len(train) < cfg.batch_size:
-        raise CommandError(f"only {len(train)} train records for batch size {cfg.batch_size}")
-    description = {
-        "source": "raw",
-        "raw": str(args.source_raw),
-        "max_lines": args.max_lines,
-        "records": len(raw.records),
-        "train": len(train),
-        "val": len(val),
-        "cache": str(raw.cache),
-        "sha1": raw.sha1,
-    }
-    print(f"source-raw: {len(train):,} train, {len(val):,} val records (hash split {SPLIT_RULE})", flush=True)
-    batches = InMemorySource(train, cfg.batch_size, cfg.seed).batches
-    return DataPlan(batches, val if len(val) else None, world_id(f"raw:{raw.sha1}"), description)
-
-
-def _shard_plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
-    from blink.train.source import shard_source
-
-    root = Path(args.data)
-    manifest_path = root / "manifest.json"
-    train_paths = sorted(root.glob("train_*.bin"))
-    if not manifest_path.is_file() or not train_paths:
-        raise CommandError(f"{root} needs manifest.json and train_*.bin shards")
-    manifest_bytes = manifest_path.read_bytes()
-    manifest = json.loads(manifest_bytes.decode("utf-8"))
-    world = manifest.get("world") or world_id(
-        hashlib.sha1(manifest_bytes).hexdigest(),
-        manifest.get("blocklist_sha", NO_BLOCKLIST),
-        manifest.get("split_rule", SPLIT_RULE),
-    )
-    val_path = root / "val.bin"
-    val = np.fromfile(val_path, dtype=ROOT_DTYPE, count=cfg.val_size) if val_path.is_file() else None
-    description = {
-        "source": "shards",
-        "dir": str(root),
-        "train_shards": len(train_paths),
-        "val_records": 0 if val is None else len(val),
-    }
-    return DataPlan(shard_source(train_paths, cfg.batch_size, cfg.seed), val, world, description)
+CommandError = train_data.CommandError
 
 
 def _device(requested: str | None) -> str:
@@ -99,30 +32,88 @@ def _device(requested: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _check_flags(args: argparse.Namespace) -> None:
+    if not status.valid_run_name(args.run):
+        raise CommandError(f"bad run name {args.run!r} (letters, digits, _ - . only)")
+    if args.lr_scale is not None and (not args.resume or args.lr_scale <= 0):
+        raise CommandError("--lr-scale needs --resume and a positive factor")
+    if (args.preview_cooldown is None) != (args.from_step is None):
+        raise CommandError("--preview-cooldown and --from-step go together")
+    if args.preview_cooldown is None and args.config is None:
+        raise CommandError("--config is required (a preview takes its config from the checkpoint)")
+
+
+def _preview_config(args: argparse.Namespace, main_dir: Path, preview_dir: Path) -> tuple[TrainConfig, Path]:
+    """(the preview's config, the main run's checkpoint it branches from)."""
+    import json
+
+    from blink.train import preview
+    from blink.train.checkpoint import checkpoint_name, list_checkpoints, load_checkpoint, step_of
+
+    source = main_dir / checkpoint_name(args.from_step)
+    if not source.is_file():
+        steps = [step_of(p) for p in list_checkpoints(main_dir)]
+        raise CommandError(f"{main_dir.name} has no checkpoint at step {args.from_step} (it has {steps})")
+    saved = preview_dir / "config.json"
+    if args.resume and saved.is_file():
+        return config_from_dict(json.loads(saved.read_text(encoding="utf-8"))["config"]), source
+    main_cfg = config_from_dict(load_checkpoint(source)["config"])
+    if args.config is not None and load_config(args.config) != main_cfg:
+        raise CommandError(f"--config differs from the config {main_dir.name} was trained with")
+    seconds = preview.parse_duration(args.preview_cooldown)
+    rate = preview.training_rate(preview.read_metrics(main_dir))
+    steps = preview.preview_steps(seconds, rate, main_cfg.batch_size)
+    print(
+        f"preview: {steps:,} cooldown steps ({args.preview_cooldown} at {rate:,.0f} samples/s) "
+        f"from {main_dir.name} step {args.from_step:,}",
+        flush=True,
+    )
+    return preview.preview_config(main_cfg, args.from_step, steps), source
+
+
+def _config(args: argparse.Namespace) -> tuple[TrainConfig, Path | None]:
+    """(the run's config, the checkpoint a preview branches from, or None)."""
+    if args.preview_cooldown is None:
+        return load_config(args.config), None
+    from blink.train import preview
+
+    runs = paths.home() / "runs"
+    return _preview_config(args, runs / args.run, runs / preview.preview_name(args.run))
+
+
+def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path | None):
+    from blink.train import loop, preview
+
+    is_preview = args.preview_cooldown is not None
+    name = preview.preview_name(args.run) if is_preview else args.run
+    return loop.RunSpec(
+        run_dir=paths.home() / "runs" / name,
+        world=plan.world,
+        device=_device(args.device),
+        resume=args.resume,
+        max_steps=args.max_steps,
+        data=plan.description,
+        lr_scale=args.lr_scale,
+        init_from=None if args.resume else branch_from,
+        preview=is_preview,
+    )
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     from blink.train import loop
     from blink.train.world import WorldMismatch
 
-    if not status.valid_run_name(args.run):
-        print(f"blink train: bad run name {args.run!r} (letters, digits, _ - . only)", file=sys.stderr)
-        return EXIT_REFUSED
     try:
-        cfg = load_config(args.config)
-        plan = _raw_plan(args, cfg) if args.source_raw else _shard_plan(args, cfg)
-        spec = loop.RunSpec(
-            run_dir=paths.home() / "runs" / args.run,
-            world=plan.world,
-            device=_device(args.device),
-            resume=args.resume,
-            max_steps=args.max_steps,
-            data=plan.description,
-        )
-        result = loop.train(cfg, spec, plan.source, plan.val)
+        _check_flags(args)
+        cfg, branch_from = _config(args)
+        plan = train_data.plan(args, cfg)
+        spec = _spec(args, plan, branch_from)
+        result = loop.train(cfg, spec, plan.source, plan.val, probe=plan.probe)
     except (CommandError, WorldMismatch, loop.RunExists, FileNotFoundError, ValueError) as exc:
         print(f"blink train: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     state = "finished" if result.step >= cfg.steps else "stopped"
-    print(f"{args.run}: {state} at step {result.step} in {result.wall_s:.1f} s")
+    print(f"{spec.run_dir.name}: {state} at step {result.step} in {result.wall_s:.1f} s")
     return 0
 
 
@@ -137,14 +128,24 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def register(sub: argparse._SubParsersAction) -> None:
     train = sub.add_parser("train", help="train a model into BLINK_HOME/runs/<run>/")
-    train.add_argument("--config", required=True, help="a TOML config, e.g. configs/t.toml")
+    train.add_argument(
+        "--config", help="a TOML config, e.g. configs/s.toml (a preview reads its checkpoint's)"
+    )
     train.add_argument("--run", required=True, help="run name (letters, digits, _ - .)")
     data = train.add_mutually_exclusive_group(required=True)
-    data.add_argument("--data", help="a packed shard directory: train_*.bin, val.bin, manifest.json")
+    data.add_argument("--data", help="a pack directory: train_r*/train_c* (or train_*) shards, manifest.json")
     data.add_argument("--source-raw", help="parse the first --max-lines of a raw eval-DB .zst (cached)")
-    train.add_argument("--max-lines", type=int, default=DEFAULT_MAX_LINES)
-    train.add_argument("--workers", type=int, default=DEFAULT_WORKERS, help="parser processes")
+    train.add_argument("--max-lines", type=int, default=train_data.DEFAULT_MAX_LINES)
+    train.add_argument("--workers", type=int, default=train_data.DEFAULT_WORKERS, help="parser processes")
+    train.add_argument("--valprobe", help="a valprobe .npz for VAA (default: DATA/valprobe.npz when present)")
     train.add_argument("--resume", action="store_true", help="continue from the run's latest checkpoint")
+    train.add_argument(
+        "--lr-scale", type=float, help="with --resume: the LR scale from here on (replaces the checkpoint's)"
+    )
+    train.add_argument(
+        "--preview-cooldown", help="branch a cooldown of this long (3h, 90m) into NAME-preview"
+    )
+    train.add_argument("--from-step", type=int, help="with --preview-cooldown: the checkpoint step to branch")
     train.add_argument("--device", choices=("cuda", "cpu"), help="default: cuda when available")
     train.add_argument("--max-steps", type=int, help="stop early at this step (the schedule is unchanged)")
     train.set_defaults(func=cmd_train)

@@ -9,7 +9,7 @@ torch = pytest.importorskip("torch")
 from train_helpers import FIXTURE, fixture_records  # noqa: E402
 
 from blink import cli  # noqa: E402
-from blink.data.record import ROOT_DTYPE  # noqa: E402
+from blink.data.record import CHILD_DTYPE, ROOT_DTYPE  # noqa: E402
 
 pytestmark = pytest.mark.torch
 
@@ -87,33 +87,176 @@ def test_resume_with_different_data_is_refused_as_a_different_world(home, config
     assert cli.main([*base, "--max-lines", "90", "--workers", "1", "--resume"]) == 2
 
 
-def test_train_from_a_shard_directory_uses_the_shard_loader(home, config, tmp_path, monkeypatch):
+class FakeShardLoader:
+    """The data area's ShardLoader interface: batch b of the stream starts at start_batch."""
+
+    calls: list[dict] = []
+
+    def __init__(self, paths, batch_size, seed, loop=True, start_batch=0, dtype=ROOT_DTYPE):
+        self.records = np.concatenate([np.fromfile(p, dtype=dtype) for p in paths])
+        self.batch_size, self.start_batch = batch_size, start_batch
+        names = [p.name for p in paths]
+        FakeShardLoader.calls.append({"names": names, "batch_size": batch_size, "dtype": dtype})
+
+    def __iter__(self):
+        per_epoch = len(self.records) // self.batch_size
+        batch = self.start_batch
+        while True:
+            i = batch % per_epoch
+            yield self.records[i * self.batch_size : (i + 1) * self.batch_size]
+            batch += 1
+
+
+@pytest.fixture
+def fake_loader(monkeypatch):
     import sys
     import types
 
+    FakeShardLoader.calls = []
+    fake = types.ModuleType("blink.data.loader")
+    fake.ShardLoader = FakeShardLoader
+    monkeypatch.setitem(sys.modules, "blink.data.loader", fake)
+    return FakeShardLoader
+
+
+def test_train_from_a_skeleton_shard_directory_uses_the_shard_loader(home, config, tmp_path, fake_loader):
     shards = tmp_path / "shards"
     shards.mkdir()
     fixture_records().tofile(shards / "train_000.bin")
     fixture_records()[:40].tofile(shards / "val.bin")
     (shards / "manifest.json").write_text(json.dumps({"train": 100}), encoding="utf-8")
-
-    class FakeShardLoader:
-        def __init__(self, paths, batch_size, seed, loop=True):
-            self.records = np.concatenate([np.fromfile(p, dtype=ROOT_DTYPE) for p in paths])
-            self.batch_size = batch_size
-
-        def __iter__(self):
-            while True:
-                for i in range(0, len(self.records) - self.batch_size + 1, self.batch_size):
-                    yield self.records[i : i + self.batch_size]
-
-    fake = types.ModuleType("blink.data.loader")
-    fake.ShardLoader = FakeShardLoader
-    monkeypatch.setitem(sys.modules, "blink.data.loader", fake)
     argv = ["train", "--config", str(config), "--run", "shards", "--data", str(shards), "--device", "cpu"]
     assert cli.main(argv) == 0
     saved = json.loads((home / "runs" / "shards" / "config.json").read_text(encoding="utf-8"))
-    assert saved["data"] == {"source": "shards", "dir": str(shards), "train_shards": 1, "val_records": 40}
+    assert saved["data"]["train_shards"] == 1 and saved["data"]["val_records"] == 40
+    assert saved["data"]["child_shards"] == 0 and fake_loader.calls[0]["names"] == ["train_000.bin"]
+
+
+def _v1_pack(root, weights: list[float] | None = None) -> None:
+    from test_mixed_training import children_from
+
+    from blink.train import vaa
+
+    root.mkdir()
+    records = fixture_records()
+    records[:60].tofile(root / "train_r000.bin")
+    records[60:].tofile(root / "train_r001.bin")
+    children_from(records).tofile(root / "train_c000.bin")
+    records[:40].tofile(root / "val_roots.bin")
+    vaa.save_probe(root / "valprobe.npz", vaa.probe_from_roots(records[:12]))
+    manifest = {"world": "v1v1v1v1v1v1"}
+    if weights is not None:
+        manifest["rebalance"] = {"buckets": 48, "weights": weights, "definition": "test"}
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+MIXED_CONFIG = CONFIG.replace("warmup_steps = 5", "warmup_steps = 5\nchild_frac = 0.25")
+
+
+def _jsonl(path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_v1_pack_mixes_root_and_child_shards_with_the_manifest_weights(
+    home, tmp_path, fake_loader, monkeypatch
+):
+    import sys
+    import types
+
+    calls = []
+
+    def weights_for(records, weights):
+        calls.append((records.dtype, len(weights)))
+        return np.full(len(records), 2.0, dtype=np.float32)
+
+    rebalance = types.ModuleType("blink.data.rebalance")
+    rebalance.weights_for = weights_for
+    monkeypatch.setitem(sys.modules, "blink.data.rebalance", rebalance)
+    _v1_pack(tmp_path / "v1", weights=[1.0] * 48)
+    config = tmp_path / "mixed.toml"
+    config.write_text(MIXED_CONFIG, encoding="utf-8")
+    argv = [
+        "train",
+        "--config",
+        str(config),
+        "--run",
+        "v1",
+        "--data",
+        str(tmp_path / "v1"),
+        "--device",
+        "cpu",
+    ]
+    assert cli.main(argv) == 0
+    saved = json.loads((home / "runs" / "v1" / "config.json").read_text(encoding="utf-8"))
+    assert saved["world"] == "v1v1v1v1v1v1"
+    assert (saved["data"]["roots_per_step"], saved["data"]["children_per_step"]) == (12, 4)
+    assert saved["data"]["rebalance"] and saved["data"]["child_shards"] == 1
+    assert {c["dtype"] for c in fake_loader.calls} == {ROOT_DTYPE, CHILD_DTYPE}
+    assert (ROOT_DTYPE, 48) in calls and (CHILD_DTYPE, 48) in calls
+    evals = _jsonl(home / "runs" / "v1" / "evals.jsonl")
+    assert all("ema_vaa" in row for row in evals) and "vaa" in evals[-1] and evals[-1]["vaa_n"] == 12
+
+
+def test_a_v1_world_names_the_packs_blocklist_sha_and_grouped_salt():
+    """WORLD = sha1(contract, manifest sha, blocklist sha, split rule and salt): the v1 keys feed it."""
+    import hashlib
+
+    from blink.commands.train_data import pack_world
+    from blink.train.world import NO_BLOCKLIST, world_id
+
+    v1 = {"blocklist": {"sha256": "ab" * 32}, "grouped": {"salt": 7}, "split_rule": "rule"}
+    raw = json.dumps(v1).encode("utf-8")
+    sha = hashlib.sha1(raw).hexdigest()
+    assert pack_world(raw, v1) == world_id(sha, "ab" * 32, "rule; grouped salt 7")
+    skeleton = {"blocklist": None, "split_rule": "rule"}  # the P1 layout keeps its world
+    assert pack_world(raw, skeleton) == world_id(sha, NO_BLOCKLIST, "rule")
+    assert pack_world(raw, {**v1, "world": "fixedworld12"}) == "fixedworld12"
+
+
+def test_a_config_with_children_is_refused_on_a_pack_without_child_shards(
+    home, tmp_path, fake_loader, capsys
+):
+    shards = tmp_path / "shards"
+    shards.mkdir()
+    fixture_records().tofile(shards / "train_000.bin")
+    (shards / "manifest.json").write_text("{}", encoding="utf-8")
+    config = tmp_path / "mixed.toml"
+    config.write_text(MIXED_CONFIG, encoding="utf-8")
+    argv = ["train", "--config", str(config), "--run", "x", "--data", str(shards), "--device", "cpu"]
+    assert cli.main(argv) == 2
+    assert "child_frac = 0" in capsys.readouterr().err
+
+
+def test_lr_scale_needs_resume_and_a_positive_factor(home, config, raw):
+    base = ["train", "--config", str(config), "--run", "s", "--source-raw", str(raw), "--device", "cpu"]
+    assert cli.main([*base, "--lr-scale", "0.5"]) == 2
+    assert cli.main([*base, "--resume", "--lr-scale", "0"]) == 2
+
+
+def test_resume_with_lr_scale_through_the_cli_halves_the_learning_rate(home, config, raw):
+    base = ["train", "--config", str(config), "--run", "h", "--source-raw", str(raw), "--max-lines", "100"]
+    base += ["--device", "cpu", "--workers", "1"]
+    assert cli.main([*base, "--max-steps", "15"]) == 0
+    assert cli.main([*base, "--resume", "--lr-scale", "0.5", "--max-steps", "20"]) == 0
+    lr = {row["step"]: row["lr"] for row in _jsonl(home / "runs" / "h" / "metrics.jsonl")}
+    assert lr[20] == pytest.approx(0.5 * 1e-3)
+
+
+def test_preview_cooldown_branches_into_name_preview_and_leaves_the_main_run_alone(home, config, raw):
+    base = ["train", "--run", "long", "--source-raw", str(raw), "--max-lines", "100", "--device", "cpu"]
+    base += ["--workers", "1"]
+    assert cli.main([*base, "--config", str(config), "--max-steps", "15"]) == 0
+    main = home / "runs" / "long"
+    rows = [{"step": s, "samples_per_s": 160.0, "phase": "train"} for s in (5, 10, 15)]
+    (main / "metrics.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in main.iterdir() if p.is_file()}
+    assert cli.main([*base, "--preview-cooldown", "2s", "--from-step", "30"]) == 2  # no such checkpoint
+    assert cli.main([*base, "--preview-cooldown", "2s", "--from-step", "15"]) == 0
+    assert {p.name: p.read_bytes() for p in main.iterdir() if p.is_file()} == before
+    preview = json.loads((home / "runs" / "long-preview" / "config.json").read_text(encoding="utf-8"))
+    assert preview["config"]["steps"] == 15 + 20 and preview["branched_from"].endswith("ckpt_000000015.pt")
+    beat = json.loads((home / "runs" / "long-preview" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert beat["state"] == "finished" and beat["step"] == 35
 
 
 def test_a_shard_directory_without_a_manifest_is_refused(home, config, tmp_path):

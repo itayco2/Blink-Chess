@@ -103,12 +103,21 @@ def format_status(report: RunStatus) -> str:
         m = report.last_metrics
         lines.append(
             f"  metrics @ {m.get('step')}: policy CE {m.get('loss_policy')}, value CE {m.get('loss_value')}, "
-            f"lr {m.get('lr')}, {m.get('samples_per_s')} samples/s"
+            f"lr {m.get('lr')}, {m.get('samples_per_s')} samples/s, clip {m.get('clip')} "
+            f"(clipped {m.get('clip_frac')}) [{m.get('phase', 'train')}]"
         )
     if report.last_eval:
-        e = report.last_eval
-        lines.append(
-            f"  eval @ {e.get('step')}: top-1 {e.get('top1')}, value CE {e.get('value_ce')}, "
-            f"win% MAE {e.get('win_mae')}"
-        )
+        lines.append(_format_eval(report.last_eval))
     return "\n".join(lines)
+
+
+def _format_eval(e: dict[str, Any]) -> str:
+    text = f"  eval @ {e.get('step')}: top-1 {e.get('top1')}, value CE {e.get('value_ce')}"
+    text += f", win% MAE {e.get('win_mae')}"
+    if "vaa" in e:
+        text += f", VAA {e.get('vaa')} (ema {e.get('ema_vaa')}, {e.get('vaa_set', 'full')})"
+    elif "ema_vaa" in e:
+        text += f", VAA ema {e.get('ema_vaa')} ({e.get('vaa_set', 'subset')} of {e.get('vaa_n')})"
+    if "check" in e:
+        text += f", check {e['check']} {'FAILED' if 'vaa_check_failed' in e else 'passed'}"
+    return text

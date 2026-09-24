@@ -1,12 +1,15 @@
 """Atomic, numerically ordered checkpoints: ckpt_<step:09d>.pt, written as .tmp then os.replace.
 
 A crash between the write and the replace leaves the .tmp behind and the previous checkpoint intact;
-readers never list .tmp files, and the next save sweeps them. Loading uses weights_only=True, so a
-checkpoint can hold tensors and plain Python values but never arbitrary pickled objects.
+readers never list .tmp files, and the next save sweeps them. Pruning keeps the last `keep_last` plus
+any protected steps (the P7 check steps, and one checkpoint per `keep_every_hours`). Loading uses
+weights_only=True, so a checkpoint can hold tensors and plain Python values but never arbitrary
+pickled objects.
 """
 
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +44,10 @@ def latest_checkpoint(run_dir: Path) -> Path | None:
     return found[-1] if found else None
 
 
-def save_checkpoint(run_dir: Path, step: int, state: dict[str, Any], keep_last: int = 3) -> Path:
+def save_checkpoint(
+    run_dir: Path, step: int, state: dict[str, Any], keep_last: int = 3, protect: Iterable[int] = ()
+) -> Path:
+    """Write ckpt_<step>.pt atomically, then prune all but the last `keep_last` and the protected steps."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     for stale in run_dir.glob("ckpt_*.pt.tmp"):
@@ -53,8 +59,10 @@ def save_checkpoint(run_dir: Path, step: int, state: dict[str, Any], keep_last: 
         handle.flush()
         os.fsync(handle.fileno())
     replace_with_retry(tmp, path)  # a scanner or reader may briefly hold either file
+    keep = set(protect)
     for old in list_checkpoints(run_dir)[:-keep_last]:
-        old.unlink(missing_ok=True)
+        if step_of(old) not in keep:
+            old.unlink(missing_ok=True)
     return path
 
 

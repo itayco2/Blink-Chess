@@ -1,12 +1,13 @@
-"""Training targets and losses (Recipe D, roots only in P1).
+"""Training targets and losses (Recipe D).
 
-Policy: cross-entropy over all 1880 moves (unmasked) against
+Policy (roots only): cross-entropy over all 1880 moves (unmasked) against
     (1 - alpha) * onehot(best) + alpha * softmax((W_i - W_1) / tau)
 where the softmax runs over the best move and the available alternatives, and W is the win
 probability of each PV from blink.board.value.
 
-Value: cross-entropy against the HL-Gauss target of the best line's win probability (a torch port of
-blink.board.value.hl_gauss, sigma = 0.75 / 128).
+Value (roots and children): cross-entropy against the HL-Gauss target of the position's win
+probability (a torch port of blink.board.value.hl_gauss, sigma = 0.75 / 128). A child row has no
+policy target: it adds value loss only.
 """
 
 import math
@@ -17,9 +18,14 @@ from torch.nn import functional as F
 from blink.board import moves, value
 
 
+def soft_cross_entropy_rows(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Per row -sum(target * log_softmax(logits)), computed in fp32."""
+    return -(target * F.log_softmax(logits.float(), dim=-1)).sum(-1)
+
+
 def soft_cross_entropy(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Mean over rows of -sum(target * log_softmax(logits)), computed in fp32."""
-    return -(target * F.log_softmax(logits.float(), dim=-1)).sum(-1).mean()
+    return soft_cross_entropy_rows(logits, target).mean()
 
 
 def soft_policy_target(
@@ -63,3 +69,25 @@ def compute_losses(
     )
     value_target = hl_gauss_target(batch.w_best)
     return soft_cross_entropy(policy_logits, policy_target), soft_cross_entropy(value_logits, value_target)
+
+
+def mixed_losses(
+    policy_logits: torch.Tensor,
+    value_logits: torch.Tensor,
+    roots,
+    child_w: torch.Tensor,
+    alpha: float,
+    tau: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-row losses for rows = the roots, then the children.
+
+    Returns (policy CE [n_roots], value CE [n_roots + n_children]). Child rows of policy_logits are
+    ignored: a child has a value target only.
+    """
+    n_roots = len(roots)
+    policy_target = soft_policy_target(
+        roots.move, roots.alt_move, roots.alt_valid, roots.w_best, roots.w_alt, alpha, tau
+    )
+    value_target = hl_gauss_target(torch.cat([roots.w_best, child_w]))
+    policy_ce = soft_cross_entropy_rows(policy_logits[:n_roots], policy_target)
+    return policy_ce, soft_cross_entropy_rows(value_logits, value_target)
