@@ -8,6 +8,10 @@ and s10m, in each mode, gets the cheaper side row: the locator, then 200 games a
 anchor. E7: DM-9M gets the same locator and 5 centred anchors at 200 games each (1,000), and plays 1,000
 games against Blink. The published Elo comes from Ordo over all final-slice PGNs (blink.eval.rating);
 the numbers here only choose the anchors.
+
+E0's SF self-check decides how the anchors play: st=0.1 when it passed, else the plan's fallback, 60+0.6,
+with E5 shrunk to the final model in the shipped mode only (no second mode, no side rows). The verdict comes
+from E0 in this run, or from <out>/E0.json when a block runs alone into the same --out folder.
 """
 
 from collections.abc import Callable, Sequence
@@ -23,6 +27,7 @@ DM_ANCHOR_GAMES = 200
 BLINK_VS_DM_GAMES = 1000
 DEFAULT_PRIOR = 1800
 IN_BAND = (0.25, 0.75)
+FALLBACK_TC = "60+0.6"  # E0 (3): the anchors' control when SF's st=0.1 self-check fails (plan P8)
 
 Report = dict
 AnchorPlay = Callable[[Anchor, int, str, int], Report]  # (anchor, games, book slice, openings to skip)
@@ -113,8 +118,17 @@ def run_dm_block(
 # ------------------------------------------------------------------------------ the blocks (fastchess)
 
 
-def fastchess_player(ctx, selector: str, mode: str, subdir: str) -> AnchorPlay:
-    """The engine under test (Blink, or DM-9M for a dm selector) against one clocked UCI_Elo anchor.
+def anchor_tc(ctx, state: dict) -> str | None:
+    """None when the anchors play st=0.1; FALLBACK_TC when E0's SF self-check failed."""
+    from blink.eval.orchestrate import earlier_report
+
+    check = earlier_report(ctx, state, "E0").get("sf_selfcheck") or {}
+    return FALLBACK_TC if check.get("passed") is False else None
+
+
+def fastchess_player(ctx, selector: str, mode: str, subdir: str, anchor_tc: str | None = None) -> AnchorPlay:
+    """The engine under test (Blink, or DM-9M for a dm selector) against one clocked UCI_Elo anchor,
+    at st=0.1 or at `anchor_tc` (the self-check fallback); Blink keeps st=1 either way.
 
     Blink gets E2b's epsilon (results/epsilon.json) on its command line: the same value the in-process
     blocks read, so every game filed under one Blink name is played by one configuration."""
@@ -125,6 +139,8 @@ def fastchess_player(ctx, selector: str, mode: str, subdir: str) -> AnchorPlay:
     def play(anchor: Anchor, games: int, book: str, skip: int) -> Report:
         first = fastchess.blink_engine(selector, mode, ctx.device, epsilon=epsilon)
         second = fastchess.stockfish_anchor(anchor.rating, fastchess.stockfish_exe())
+        if anchor_tc:
+            second = fastchess.with_tc(second, anchor_tc)
         gauntlet = fastchess.prepare_pair(
             first, second, games, book, ctx.out_dir / subdir, ctx.concurrency, skip=skip
         )
@@ -142,35 +158,39 @@ def _prior(state: dict) -> float:
 
 def e5_block(ctx, state: dict) -> dict:
     from blink.eval import fastchess
+    from blink.eval.orchestrate import shipped_mode
     from blink.play.factory import MODES
 
     for mode in MODES:
         fastchess.check_distinct_names([ctx.model, *ctx.side_models], mode)
+    tc = anchor_tc(ctx, state)
+    modes, side_models = ((shipped_mode(ctx, state),), ()) if tc else (MODES, ctx.side_models)
     grid = rating.read_anchors()
     final = {
         mode: run_anchor_block(
-            fastchess_player(ctx, ctx.model, mode, "E5"),
+            fastchess_player(ctx, ctx.model, mode, "E5", tc),
             grid,
             DEFAULT_PRIOR,
             ctx.n(LOCATOR_GAMES),
             ctx.n(ANCHOR_GAMES),
         )
-        for mode in MODES
+        for mode in modes
     }
     prior = _prior({"E5": {"final": final}})
     side = {
         f"{selector}|{mode}": run_side_row(
-            fastchess_player(ctx, selector, mode, "E5-side"),
+            fastchess_player(ctx, selector, mode, "E5-side", tc),
             grid,
             prior,
             ctx.n(LOCATOR_GAMES),
             ctx.n(SIDE_GAMES),
         )
-        for selector in ctx.side_models
-        for mode in MODES
+        for selector in side_models
+        for mode in modes
     }
     blocks = [*final.values(), *side.values()]
     return {
+        "anchor_tc": tc,
         "final": final,
         "side": side,
         "games": sum(b["games"] for b in blocks),
@@ -191,8 +211,9 @@ def e7_block(ctx, state: dict) -> dict:
     def play_blink(games: int) -> Report:
         return match.play_inprocess(blink, deepmind, games, "final", ctx.out_dir / "E7")
 
+    tc = anchor_tc(ctx, state)
     result = run_dm_block(
-        fastchess_player(ctx, dm, "policy", "E7"),
+        fastchess_player(ctx, dm, "policy", "E7", tc),
         play_blink,
         rating.read_anchors(),
         _prior(state),
@@ -201,4 +222,8 @@ def e7_block(ctx, state: dict) -> dict:
         ctx.n(BLINK_VS_DM_GAMES),
     )
     anchors_rows = result["gauntlet"]["anchors"]
-    return {**result, "final_slice_pgns": [*(r["pgn"] for r in anchors_rows), result["blink_vs_dm"]["pgn"]]}
+    return {
+        **result,
+        "anchor_tc": tc,
+        "final_slice_pgns": [*(r["pgn"] for r in anchors_rows), result["blink_vs_dm"]["pgn"]],
+    }

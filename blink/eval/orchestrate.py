@@ -273,18 +273,44 @@ def _audit_summary(audit: dict) -> dict:
     return {**{key: audit[key] for key in AUDIT_KEYS}, "violations": len(audit["violations"])}
 
 
+SF_FORFEIT_BLOCKS = ("E0", "E8")  # the plan's done-when: E0 and E8 also fail on any Stockfish forfeit
+
+
+def _selfcheck_failure(report: dict) -> list[str]:
+    check = report.get("sf_selfcheck") or {}
+    if check.get("passed") is not False:
+        return []
+    return [
+        f"E0: the SF self-check failed (score {check.get('score')}, band 50% +- {SELFCHECK_BAND:.0%}, "
+        f"SF forfeits {check.get('sf_forfeits') or 'none'}): the anchors fall back to 60+0.6 and E5 to the "
+        "shipped mode only; record the slip in STATUS"
+    ]
+
+
+def _forfeit_failures(block_id: str, forfeits: dict) -> list[str]:
+    failures = []
+    for engine, counts in forfeits.items():
+        on_time, other = counts.get("time_forfeits", 0), counts.get("forfeits", 0)
+        if not on_time + other:
+            continue
+        if engine.startswith("Blink"):
+            failures.append(
+                f"{block_id}: {engine} lost {on_time} games on time and {other} to an illegal move or "
+                "a crash (Blink forfeits must be 0)"
+            )
+        elif engine.startswith("SF") and block_id in SF_FORFEIT_BLOCKS:
+            failures.append(f"{block_id}: {engine} forfeited {on_time} games on time and {other} otherwise")
+    return failures
+
+
 def gate_failures(state: dict) -> list[str]:
     """The plan's done-when gates this run failed (P8), one line each; empty when every gate holds."""
     failures = []
     for block_id in BLOCK_ORDER:
         report = state.get(block_id) or {}
-        for engine, counts in (report.get("forfeits") or {}).items():
-            on_time, other = counts.get("time_forfeits", 0), counts.get("forfeits", 0)
-            if engine.startswith("Blink") and on_time + other:
-                failures.append(
-                    f"{block_id}: {engine} lost {on_time} games on time and {other} to an illegal move or "
-                    "a crash (Blink forfeits must be 0)"
-                )
+        if block_id == "E0":
+            failures += _selfcheck_failure(report)
+        failures += _forfeit_failures(block_id, report.get("forfeits") or {})
         for player, audit in (report.get("nosearch") or {}).items():
             if not audit["compliant"]:
                 failures.append(
@@ -354,6 +380,15 @@ def run_blocks(
 
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+
+
+def earlier_report(ctx: EvalContext, state: dict, block_id: str) -> dict:
+    """A block's report from this run, or from <out>/<block>.json when an earlier run wrote it into the
+    same --out folder (a block run alone); {} when neither exists."""
+    if state.get(block_id):
+        return state[block_id]
+    path = Path(ctx.out_dir) / f"{block_id}.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
 def shipped_mode(ctx: EvalContext, state: dict) -> str:

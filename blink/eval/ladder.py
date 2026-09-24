@@ -188,6 +188,7 @@ def e4b_block(ctx, state: dict) -> dict:
 def _ladder_agent(name: str, ctx, state: dict):
     from blink.baselines.evaluator import baseline_agent
     from blink.eval import fastchess, match
+    from blink.eval.anchors import anchor_tc
     from blink.eval.orchestrate import shipped_mode
     from blink.play import agents
 
@@ -195,8 +196,8 @@ def _ladder_agent(name: str, ctx, state: dict):
         return agents.RandomAgent()
     if name in ("material", "linear", "mlp"):
         return baseline_agent(name, device=ctx.device)  # the P3 rungs, one agent wrapper and its rules
-    if name.startswith("SF"):
-        return match.stockfish_agent(fastchess.stockfish_exe(), elo=int(name[2:]))
+    if name.startswith("SF"):  # an anchor: st=0.1, or the self-check fallback's control like E5's anchors
+        return match.stockfish_agent(fastchess.stockfish_exe(), elo=int(name[2:]), tc=anchor_tc(ctx, state))
     return match.blink_agents(name, ctx.device, results_dir=ctx.results_dir)[shipped_mode(ctx, state)]
 
 
