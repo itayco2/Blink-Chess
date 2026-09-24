@@ -30,8 +30,10 @@ warmup_steps = 10
 def test_every_ablation_arm_file_only_overrides_the_recipe():
     plan = tomllib.loads((ABLATIONS / "plan.toml").read_text(encoding="utf-8"))["plan"]
     expected = ["a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a10", "a11", "a12", "a15"]
-    assert sorted(plan["arms"] + plan["held"]) == expected  # PF66: arms without code yet are held
-    assert plan["arms"][:3] == ["a01", "a02", "a03"] and plan["held"][-1] == "a15"
+    assert sorted(plan["arms"] + plan["held"]) == expected
+    tonight = ["a01", "a02", "a03", "a04", "a05", "a11", "a12"]  # the seven arms PF66 started
+    assert plan["arms"] == [*tonight, "a06", "a10"]  # their code exists now; they run after tonight's
+    assert plan["held"] == ["a07", "a08", "a15"]  # a07 waits on a rescore, a08 on mate labels, a15 last
     assert sorted(p.stem for p in ABLATIONS.glob("a*.toml")) == expected  # a09, a13, a14 are cut
     for name in expected:
         arm = sweep.load_arm(ABLATIONS / f"{name}.toml")
@@ -496,6 +498,40 @@ def test_a15_is_held_while_an_arm_holds_a_metric_the_seed_arms_lack(tmp_path, mo
     report = sweep.run_ablations(plan, out, 1000.0, again, log=lambda _: None)
     assert [r.run for r in again.requests] == ["abl-a15"]
     assert report["recipe"]["recipe"] == "D + a05 + a07"
+
+
+def test_a15_held_for_the_floor_later_runs_at_the_own_bench_rate_of_the_winners_it_combines(
+    tmp_path, monkeypatch
+):
+    """The CLI passes run_ablations both a10's own bench rate and the post-hoc scorer a07 needs: a15,
+    held while a01-a03 lack games10k_top1, combines a07 and a10 once scored and runs at a10's rate."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, A07_A08, ["a01", "a02", "a03", "a07", "a10", "a15"]))
+    monkeypatch.setitem(FAKE_VAA, "abl-a07", 0.49)
+    monkeypatch.setitem(FAKE_VAA, "abl-a10", 0.52)
+    home, out, rates = tmp_path / "home", tmp_path / "abl.json", {"a10": 500.0}
+
+    def out_of_memory(run: str) -> None:
+        raise RuntimeError("CUDA out of memory")
+
+    first = FakeRunner(home, extra={"abl-a07": _check_row(0.43, 0.90)})
+    report = sweep.run_ablations(
+        plan, out, 1000.0, first, lambda _: None, arm_rates=rates, scorer=out_of_memory
+    )
+    planned = _steps_and_rates(first)
+    assert planned["abl-a07"] == (36, 1000.0) and planned["abl-a10"] == (18, 500.0)
+    assert "abl-a15" not in planned and report["arms"]["a15"]["status"] == "held"
+    again, scored = FakeRunner(home), []
+    report = sweep.run_ablations(
+        plan, out, 1000.0, again, lambda _: None, arm_rates=rates, scorer=_seed_scorer(home, scored)
+    )
+    assert scored == ["abl-a01", "abl-a02", "abl-a03"]
+    assert _steps_and_rates(again) == {"abl-a15": (18, 500.0)}  # the slowest winner's rate: a10's
+    a15 = tomllib.loads(again.requests[0].config.read_text(encoding="utf-8"))["train"]
+    assert (a15["rebalance"], a15["seed"]) == (False, 9)
+    entry = report["arms"]["a15"]
+    assert entry["combined_from"] == ["a07", "a10"] and entry["samples_per_s"] == 500.0
+    assert report["recipe"]["recipe"] == "D + a07 + a10"
 
 
 def test_a_guard_metric_the_arm_itself_lacks_does_not_hold_a15(tmp_path, monkeypatch):
