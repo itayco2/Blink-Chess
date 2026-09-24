@@ -268,9 +268,10 @@ def test_metrics_record_how_long_the_loop_waited_for_its_batches(tmp_path):
     assert all(0.0 <= row["data_wait_frac"] <= 1.0 for row in fast + slow)
     assert all(row["time"] > 1_600_000_000 for row in fast + slow)
     # A window starts when the row before it is written, so share x window = seconds waited. The sleeps
-    # bound that from below whatever the machine's load; a share alone would not be.
+    # bound that from below whatever the machine's load; a share alone would not be. The margin is the
+    # row's wall clock, which ticks every 15.6 ms on Windows: up to 5% of a 0.3 s window.
     slow_waits = _waits(slow)
-    assert all(waited >= 0.95 * 0.1 * steps for waited, steps in slow_waits)
+    assert all(waited >= 0.8 * 0.1 * steps for waited, steps in slow_waits)
     assert sum(w for w, _ in _waits(fast)) < sum(w for w, _ in slow_waits)
 
 
