@@ -10,15 +10,17 @@ data = "v1"                   # BLINK_HOME/data/v1 (a relative path is under BLI
 hours = 1.5
 size = "s"                    # the bench.json throughput row that turns hours into steps
 sigma_arms = ["a01", "a02", "a03"]
-arms = ["a01", "a02", "a03", "a04", "a05", "a11", "a12", "a06", "a10"]
-# The first seven run tonight (PF66); a06 (static bias) and a10 (Muon) follow them now that their code
-# exists. a06's cuda tests in tests/test_static_bias.py check it the way P5 trains (inductor, bf16,
-# micro-batched). a10 has [arm] bench_size = "s-muon": it runs at that bench row's rate in its own
-# compile mode, so bench s-muon first or the sweep refuses. Arms never recorded in ablations.json are
-# pending, so moving a held arm into arms resumes the same sweep. Held, and why:
+arms = ["a01", "a02", "a03", "a04", "a05", "a11", "a12", "a10"]
+# The first seven run tonight (PF66); a10 (Muon) follows them now that its code exists. a10 has
+# [arm] bench_size = "s-muon": it runs at that bench row's rate in its own compile mode, so bench
+# s-muon first (configs/s-muon.toml) or the sweep refuses; that bench trains Muon compiled as P5 does.
+# Run `pytest -m cuda tests/test_muon.py` too before relaunching. Arms never recorded in ablations.json
+# are pending, so moving a held arm into arms resumes the same sweep. Held, and why:
+#   a06: may leave only once the cuda tests in tests/test_static_bias.py pass (inductor, bf16,
+#        micro-batched: the way P5 trains); they have not run yet, and a failed arm is final
 #   a07: judged on games10k_top1, which a01-a03 lack until `blink sweep rescore` scores them
 #   a08: its guard mate_preserving needs child mate labels today's mateset does not have
 #   a15: the combined winners, last, once every arm it could combine has been judged
-held = ["a07", "a08", "a15"]
+held = ["a06", "a07", "a08", "a15"]
 slip_cut = ["a10", "a11", "a12"]    # dropped by the P5 slip rule (blink sweep ablations --slip)
 disable = []                  # supervise stop rules turned off for every arm (recorded)
