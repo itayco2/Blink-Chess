@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from blink import cli, heartbeat
-from blink.train import sweep
+from blink.train import nstar, sweep
 from blink.train.supervise import Outcome
 
 REPO = Path(__file__).resolve().parent.parent
@@ -629,7 +629,7 @@ def _bench(rates: dict[str, float], p99: dict[str, float], budget: float = 5.5) 
 def _choose(rates, vaa, p99=None, sigma=0.005):
     p99 = p99 or dict.fromkeys(rates, 40.0)
     sizes = {s: {"vaa": v} for s, v in vaa.items()}
-    return sweep.choose(_bench(rates, p99), sizes, sigma, sweep.ChooseRules())
+    return nstar.choose(_bench(rates, p99), sizes, sigma, nstar.ChooseRules())
 
 
 def test_choose_prefers_the_best_6h_vaa_among_sizes_that_pass_every_constraint():
@@ -659,7 +659,7 @@ def test_choose_drops_a_size_whose_value_mode_p99_is_over_100_ms():
 
 
 def test_the_epoch_floor_is_one_epoch_of_training_roots_in_96_hours():
-    rules = sweep.ChooseRules()
+    rules = nstar.ChooseRules()
     assert rules.epoch_floor == 1658.0
     assert rules.samples_per_epoch / (rules.t_long_hours * 3600) == pytest.approx(1658.0, abs=1.0)
 

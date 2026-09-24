@@ -433,8 +433,10 @@ def cmd_sweep_sizes(args: argparse.Namespace) -> int:
     if args.dry_run:
         _say(f"sizes {setup.sizes} ({setup.conditional} only above the epoch floor), {setup.hours} h each")
         return 0
+    from blink.train import nstar
+
     out = _home_eval("sweep.json", args.out)
-    rules = sweep.load_rules(_repo_config(args.config, "sweep.toml"))
+    rules = nstar.load_rules(_repo_config(args.config, "sweep.toml"))
     report = sweep.run_sizes(setup, bench, out, sweep.supervised_runner(_say), log=_say, rules=rules)
     for size, entry in report["sizes"].items():
         _say(f"  {size}: {entry['status']}, VAA {entry.get('vaa')}, {entry.get('samples_per_s')} samples/s")
@@ -452,17 +454,17 @@ def _sigma(args: argparse.Namespace) -> float:
 
 def cmd_sweep_choose(args: argparse.Namespace) -> int:
     from blink.model.config import compile_mode, read_tables
-    from blink.train import sweep
+    from blink.train import nstar, sweep
 
     sweep_path = _home_eval("sweep.json", args.sweep)
     try:
         bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
         state = _read_json(sweep_path, "sweep.json")
         config = _repo_config(args.config, "sweep.toml")
-        rules = sweep.load_rules(config) if config.is_file() else sweep.ChooseRules()
+        rules = nstar.load_rules(config) if config.is_file() else nstar.ChooseRules()
         recipe = sweep.CONFIG_DIR / "recipe.toml"  # the long run trains in the recipe's compile mode
         mode = compile_mode(read_tables(recipe)) if recipe.is_file() else None
-        choice = sweep.choose(bench, state.get("sizes", {}), _sigma(args), rules, compile=mode)
+        choice = nstar.choose(bench, state.get("sizes", {}), _sigma(args), rules, compile=mode)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep choose: {exc}", file=sys.stderr)
         return EXIT_REFUSED
