@@ -3,9 +3,11 @@
 Checked on every train record (roots and children): sha256 against the manifest, the right bucket,
 no hit in the blocklist or in val, test_iid, test_grouped (roots and children), no child equal to a train
 root, no duplicate child. Checked on a random sample (1% by default): the fen_hash is the board's hash,
-the best and alternative moves are legal, the position is valid for python-chess, and no record belongs
-to a held-out group. Composed positions with more pawns or pieces than a game can reach (the analysis
-board allows them) are playable, so they count as impossible_material, not as invalid.
+the best and alternative moves are legal, the position is valid for python-chess, the board is exactly
+what encode_board writes for that python-chess position (castling rights and en passant as python-chess
+cleans them: the pack's stand-in for canonical_epd parity), and no record belongs to a held-out group.
+Composed positions with more pawns or pieces than a game can reach (the analysis board allows them) are
+playable, so they count as impossible_material, not as invalid.
 Measured: PV monotonicity (side-to-move win% never rises from PV 1 down; a sign flip drives it to about
 50%), split fractions, shard sizes and each root shard's mean win%.
 When valprobe.npz exists, the share of its children that are also train positions is reported.
@@ -113,6 +115,7 @@ COUNTS = (
     "legal_alts",
     "valid",
     "impossible_material",
+    "round_trip_mismatches",
     "multi_pv",
     "monotone",
 )
@@ -142,26 +145,29 @@ def classify(board: chess.Board) -> tuple[bool, bool]:
     return status & ~MATERIAL_ONLY == chess.STATUS_VALID, bool(status & MATERIAL_ONLY)
 
 
-def _tally_position(board: chess.Board, tally: "_Tally") -> None:
+def _tally_position(codes: np.ndarray, tally: "_Tally") -> chess.Board:
+    """Status and round trip of one sampled board; returns it as a python-chess board."""
+    board = children.codes_to_board(codes)
     valid, impossible = classify(board)
     tally.add("valid", valid)
     tally.add("impossible_material", impossible)
+    tally.add("round_trip_mismatches", not np.array_equal(encode.encode_board(board), codes))
+    return board
 
 
 def _sample_roots(recs: np.ndarray, tally: _Tally) -> None:
     for rec in recs:
-        board = children.codes_to_board(encode.unpack(rec["board"]))
+        board = _tally_position(encode.unpack(rec["board"]), tally)
         legal = moves.legal_mask(board)
         tally.add("legal_best", legal[int(rec["move"])])
         alts = [int(m) for m in rec["alt_move"] if int(m) != NO_MOVE]
         tally.add("alts", len(alts))
         tally.add("legal_alts", sum(bool(legal[m]) for m in alts))
-        _tally_position(board, tally)
 
 
 def _sample_children(recs: np.ndarray, tally: _Tally) -> None:
     for rec in recs:
-        _tally_position(children.codes_to_board(encode.unpack(rec["board"])), tally)
+        _tally_position(encode.unpack(rec["board"]), tally)
 
 
 def _sample(recs: np.ndarray, kind: str, bucket: int, cfg: VerifyConfig, salt: int, tally: _Tally) -> None:
@@ -251,6 +257,7 @@ def _checks(tally: _Tally, roots_by_split: dict[str, int]) -> dict:
         ("best_move_legal_pct", n["legal_best"], n["sampled_roots"]),
         ("alt_move_legal_pct", n["legal_alts"], n["alts"]),
         ("position_valid_pct", n["valid"], sampled),
+        ("board_round_trip_pct", sampled - n["round_trip_mismatches"], sampled),
     ):
         pct = _pct(part, whole)
         checks[name] = _check(pct, "== 100", pct is None or pct == 100.0)

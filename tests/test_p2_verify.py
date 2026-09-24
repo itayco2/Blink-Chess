@@ -12,7 +12,7 @@ from test_p2_fakes import GROUPED_SALT, write_source
 from blink.board import encode, moves
 from blink.board.value import CP_NONE
 from blink.data import bigpack, children, valprobe, verify
-from blink.data.record import NO_MOVE, ROOT_DTYPE
+from blink.data.record import CHILD_DTYPE, NO_MOVE, ROOT_DTYPE
 
 BUCKETS = 4
 
@@ -94,6 +94,33 @@ def test_an_illegal_best_move_and_a_bad_hash_are_found(pack_dir, tmp_path):
     checks = run(pack)["checks"]
     assert checks["best_move_legal_pct"]["value"] < 100.0
     assert checks["fen_hash_mismatches"]["value"] == 1
+
+
+def _plant_dead_ep_square(records: np.ndarray) -> int:
+    """Mark an en-passant square no pawn can use on the first record that has room. Returns its index."""
+    codes = encode.unpack(records["board"])
+    for index, row in enumerate(codes):
+        for square in range(40, 48):  # rank 6 from the side to move: where an ep target sits
+            if row[square] == encode.EMPTY and row[square - 8] != encode.OPP + chess.PAWN - 1:
+                row[square] = encode.EP_SQUARE
+                records["board"][index] = encode.pack(row)
+                return index
+    raise AssertionError("no record with room for a planted ep square")
+
+
+def test_a_board_python_chess_would_write_differently_fails_the_round_trip(pack_dir, tmp_path):
+    clean = run(pack_dir)
+    assert clean["checks"]["board_round_trip_pct"]["value"] == 100.0
+    assert clean["counts"]["round_trip_mismatches"] == 0
+    pack = copy_pack(pack_dir, tmp_path / "bad")
+    kids = np.fromfile(pack / "train_c003.bin", dtype=CHILD_DTYPE)
+    _plant_dead_ep_square(kids)
+    kids.tofile(pack / "train_c003.bin")
+    _retag(pack, "train_c003.bin")
+    report = run(pack)
+    assert report["counts"]["round_trip_mismatches"] == 1
+    assert report["checks"]["board_round_trip_pct"]["value"] < 100.0
+    assert not report["checks"]["board_round_trip_pct"]["ok"]
 
 
 def test_a_changed_shard_fails_its_sha256(pack_dir, tmp_path):
