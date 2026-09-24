@@ -148,3 +148,36 @@ def test_the_epoch_floor_is_1658_samples_per_s_at_the_worst_case_96_hours():
     from blink.model.config import epoch_floor_samples_per_s
 
     assert round(epoch_floor_samples_per_s(train_roots=401_000_000, child_frac=0.3, hours=96)) == 1658
+
+
+def test_the_optimizer_is_adamw_by_default_or_muon():
+    """a10 (P5): Muon on the trunk's hidden matrices; every other run keeps today's single AdamW."""
+    assert TrainConfig().optimizer == "adamw"
+    assert TrainConfig(optimizer="muon").optimizer == "muon"
+    for bad in ("sgd", "Muon", "", None):
+        with pytest.raises(ValueError, match="train.optimizer"):
+            TrainConfig(optimizer=bad)
+
+
+def test_muon_adjust_lr_fn_defaults_to_match_rms_adamw_and_refuses_names_torch_does_not_know():
+    """torch's own default is "original"; match_rms_adamw is the one that reuses AdamW's LR and decay."""
+    assert TrainConfig().muon_adjust_lr_fn == "match_rms_adamw"
+    for name in ("original", "match_rms_adamw", "spectral_unclamped"):
+        assert TrainConfig(optimizer="muon", muon_adjust_lr_fn=name).muon_adjust_lr_fn == name
+    for bad in ("match_rms", "", None, "MATCH_RMS_ADAMW"):
+        with pytest.raises(ValueError, match="train.muon_adjust_lr_fn"):
+            TrainConfig(optimizer="muon", muon_adjust_lr_fn=bad)
+
+
+def test_a_muon_config_loads_from_toml_and_round_trips(tmp_path):
+    path = _write(tmp_path, '[train]\noptimizer = "muon"\nmuon_adjust_lr_fn = "spectral_unclamped"\n')
+    cfg = load_config(path)
+    assert (cfg.optimizer, cfg.muon_adjust_lr_fn) == ("muon", "spectral_unclamped")
+    assert config_from_dict(config_to_dict(cfg)) == cfg
+
+
+def test_a_config_saved_before_the_optimizer_keys_existed_loads_as_adamw():
+    """Old config.json files and checkpoints have neither key; they must still load, as AdamW."""
+    old = config_to_dict(TrainConfig(steps=10, warmup_steps=2))
+    del old["optimizer"], old["muon_adjust_lr_fn"]
+    assert config_from_dict(old).optimizer == "adamw"

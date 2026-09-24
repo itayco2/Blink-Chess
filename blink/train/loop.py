@@ -1,4 +1,4 @@
-"""The resumable trainer: bf16 autocast on CUDA (fp32 on CPU), AdamW, WSD, EMA, Recipe D batches.
+"""The resumable trainer: bf16 autocast on CUDA (fp32 on CPU), AdamW or Muon, WSD, EMA, Recipe D batches.
 
 Each optimizer step takes batch_size rows (roots plus a child_frac share of children) in micro-batches
 sized from the VRAM budget, multiplies both losses by the per-sample rebalancing weights, clips the
@@ -32,6 +32,7 @@ from blink.train.atomic import write_text_atomic
 from blink.train.checkpoint import list_checkpoints, save_checkpoint
 from blink.train.clipping import GradClip
 from blink.train.ema import Ema
+from blink.train.optimizers import MuonAdamW, build_optimizer
 from blink.train.schedule import wsd_lr
 from blink.train.source import BatchSource, StepData, as_step_data
 
@@ -75,7 +76,7 @@ class _Run:
     spec: RunSpec
     model: BlinkNet
     ema: Ema
-    optimizer: torch.optim.Optimizer
+    optimizer: torch.optim.Optimizer | MuonAdamW
     device: torch.device
     val: telemetry.ValSet | None
     log: Callable[[str], None]
@@ -98,19 +99,6 @@ class _Run:
     last_checkpoint: Path | None = None
     last_checkpoint_time: float = field(default_factory=time.monotonic)
     last_beat: float = 0.0
-
-
-def build_optimizer(model: torch.nn.Module, cfg: TrainConfig, device_type: str) -> torch.optim.AdamW:
-    """AdamW with weight decay on matrices only (ndim >= 2); fused kernels on CUDA."""
-    decay = [p for p in model.parameters() if p.ndim >= 2]
-    no_decay = [p for p in model.parameters() if p.ndim < 2]
-    groups = [
-        {"params": decay, "weight_decay": cfg.weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
-    ]
-    return torch.optim.AdamW(
-        groups, lr=cfg.peak_lr, betas=(cfg.beta1, cfg.beta2), fused=device_type == "cuda"
-    )
 
 
 def _choose_micro(cfg: TrainConfig, model: BlinkNet, device: torch.device, free: int | None, log) -> tuple:
@@ -151,6 +139,8 @@ def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -
     has_val = val is not None and len(val) > 0
     val_set = telemetry.make_val_set(val[: cfg.val_size], device) if has_val else None
     optimizer = build_optimizer(model, cfg, device.type)
+    if isinstance(optimizer, MuonAdamW):
+        log(optimizer.summary())
     ema = Ema(model, cfg.ema_max)
     micro, vram_info = _choose_micro(cfg, model, device, free, log)
     clip = GradClip(cfg.clip_norm, cfg.warmup_steps)

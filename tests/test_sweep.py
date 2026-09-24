@@ -46,6 +46,18 @@ def test_every_ablation_arm_file_only_overrides_the_recipe():
     assert sweep.load_arm(ABLATIONS / "a15.toml").combine is True
 
 
+def test_the_a10_arm_turns_the_s_recipe_into_a_valid_muon_config():
+    """a10 was held until its code existed (PF66); its overrides now pass the trainer's own check."""
+    from blink.model.config import config_from_dict, read_tables
+
+    arm = sweep.load_arm(ABLATIONS / "a10.toml")
+    assert arm.overrides == {"train": {"optimizer": "muon", "muon_adjust_lr_fn": "match_rms_adamw"}}
+    merged = sweep.merged_config(read_tables(REPO / "configs" / "s.toml"), arm, steps=10_000)
+    sweep.validate(merged)
+    cfg = config_from_dict({**merged["train"], "model": merged["model"]})
+    assert (cfg.optimizer, cfg.muon_adjust_lr_fn, cfg.weight_decay) == ("muon", "match_rms_adamw", 0.1)
+
+
 def _noise(vaa=(0.500, 0.502, 0.498), top1=(0.300, 0.301, 0.299), **extra):
     results = {f"a0{i + 1}": {"vaa": v, "top1": t} for i, (v, t) in enumerate(zip(vaa, top1, strict=True))}
     for key, values in extra.items():
