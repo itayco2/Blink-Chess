@@ -1,7 +1,9 @@
 # start-bot.ps1 (copy this template to D:\blink-bot\start-bot.ps1).
 # Itay runs it himself. The build agent never runs it and never reads token.dpapi.
-# The token is decrypted into this process only and handed to the lichess-bot child process,
-# which holds it in its environment for as long as the bot runs (see RUNBOOK, "What protects the token").
+# The token is decrypted into this process and handed to the lichess-bot child process, which holds it
+# in its environment for as long as the bot runs, as does every process lichess-bot starts (its game
+# workers, and each game's blink-uci until it deletes the variable at startup). See RUNBOOK,
+# "What protects the token".
 #
 # The PAUSED flag only blocks new starts (including a Task Scheduler start). It does not stop a bot
 # that is already running; to pause a live bot, its process is stopped by PID and the flag keeps it down.
