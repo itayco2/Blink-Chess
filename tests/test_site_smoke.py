@@ -1,9 +1,11 @@
 """`blink site smoke`: Playwright on the installed Edge plays the page and checks what it shows (P1, P10)."""
 
+import functools
 import os
 import sys
 import threading
 from contextlib import contextmanager
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import chess
@@ -185,3 +187,33 @@ def test_the_page_plays_a_pasted_mate_in_one_without_a_network_call(page_url):
     assert state["timings"] == [], "the mate was played without a network call"
     assert "R2" in note
     assert errors == []
+
+
+class _StaticHandler(SimpleHTTPRequestHandler):
+    """Plain static files, as GitHub Pages serves them: no routes, no node_modules, JS and wasm types."""
+
+    extensions_map = {
+        **SimpleHTTPRequestHandler.extensions_map,
+        ".js": "text/javascript",
+        ".mjs": "text/javascript",
+        ".json": "application/json",
+        ".wasm": "application/wasm",
+    }
+
+    def log_message(self, format, *args):  # noqa: A002 - the base class names it format
+        pass
+
+
+@pytest.mark.local
+@pytest.mark.torch
+def test_the_staged_tree_plays_in_edge_as_plain_static_files_under_a_subpath(
+    repo_root, stand_in_onnx, tmp_path
+):
+    from blink.site import smoke, stage
+
+    stage.stage(repo_root / "site", tmp_path / "pages" / "blink-chess", model=stand_in_onnx)
+    handler = functools.partial(_StaticHandler, directory=str(tmp_path / "pages"))
+    with _serving(ThreadingHTTPServer(("127.0.0.1", 0), handler)) as url:
+        report = smoke.run(url + "blink-chess/", moves=4, seed=2)
+    assert smoke.failures(report, moves=4) == []
+    assert report.console_errors == ()

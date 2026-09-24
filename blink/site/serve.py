@@ -1,11 +1,13 @@
 """`blink site serve`: the page on http://127.0.0.1:<port>, never on another interface.
 
 The host is hard-coded (no CLI override): no firewall prompt, no LAN exposure. Routes:
-  /                     site/ (index.html, app.js, worker.js, tokenizer.js, vocab.json, assets, vendor)
-  /vendor/ort/          site/node_modules/onnxruntime-web/dist   (never tracked; pages.yml copies it)
-  /vendor/chess.js/     site/node_modules/chess.js/dist/esm      (3,368 lines, so it is not vendored)
+  /                     site/ (index.html, app.js, rules.js, worker.js, tokenizer.js, vocab.json, assets,
+                        vendor/cm-chessboard), minus what layout.NOT_DEPLOYED keeps out of the page
+  /vendor/ort/...       the three onnxruntime-web files layout.NPM_FILES lists, from site/node_modules
+  /vendor/chess.js/...  chess.js's ESM build and its LICENSE, from site/node_modules
   /models/model.onnx    the --model file; /models/model.json its export card (or a minimal one)
-Everything else, including site/node_modules itself, is a 404. Paths with '..' never resolve.
+Everything else, including site/node_modules itself, is a 404, so the local page loads exactly what
+`blink site stage` deploys. Paths with '..' never resolve.
 """
 
 import json
@@ -14,6 +16,8 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+from blink.site import layout
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -38,12 +42,8 @@ class SiteConfig:
     site_dir: Path
     model: Path
 
-    def routes(self) -> tuple[tuple[str, Path], ...]:
-        modules = self.site_dir / "node_modules"
-        return (
-            ("vendor/ort/", modules / "onnxruntime-web" / "dist"),
-            ("vendor/chess.js/", modules / "chess.js" / "dist" / "esm"),
-        )
+    def npm_files(self) -> dict[str, Path]:
+        return layout.npm_sources(self.site_dir)
 
 
 def resolve_model(path: Path) -> Path:
@@ -63,7 +63,8 @@ def _inside(root: Path, relative: str) -> Path | None:
     return candidate if inside else None
 
 
-def _model_card(model: Path) -> bytes | Path:
+def model_card(model: Path) -> bytes | Path:
+    """The export card beside the model, or a minimal one: the page fetches it and must not see a 404."""
     card = model.with_name(CARD_FILE)
     if card.is_file():
         return card
@@ -79,12 +80,12 @@ def resolve_request(cfg: SiteConfig, raw_path: str) -> Path | bytes | None:
     if relative == f"models/{MODEL_FILE}":
         return cfg.model
     if relative == f"models/{CARD_FILE}":
-        return _model_card(cfg.model)
-    if relative.startswith(("models/", "node_modules/")) or relative == "node_modules":
+        return model_card(cfg.model)
+    if not layout.is_deployed(relative):
         return None
-    for prefix, root in cfg.routes():
-        if relative.startswith(prefix):
-            return _inside(root, relative[len(prefix) :])
+    if layout.is_npm_route(relative):
+        source = cfg.npm_files().get(relative)
+        return source if source is not None and source.is_file() else None
     return _inside(cfg.site_dir, relative)
 
 

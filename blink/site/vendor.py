@@ -4,7 +4,7 @@ Only the nine files Chessboard.js imports are vendored: no extensions, and nothi
 (its pieces/standard.svg and pieces/staunty.svg are share-alike licensed and banned here). The only
 change is ASCII punctuation in comments (an ellipsis and em dashes), for the house text rule;
 test_vendored_cm_chessboard_matches_npm_except_ascii_punctuation proves nothing else differs.
-chess.js is not vendored: its ESM build is 3,368 lines, so `blink site serve` maps it from node_modules.
+chess.js is not vendored (its ESM build is 3,368 lines): layout.NPM_FILES maps it in from node_modules.
 """
 
 import shutil

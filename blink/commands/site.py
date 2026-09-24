@@ -1,4 +1,4 @@
-"""`blink site serve | smoke | pieces | vendor`: the local browser page and its checks."""
+"""`blink site serve | stage | smoke | pieces | vendor`: the browser page, its deploy tree and its checks."""
 
 import argparse
 import json
@@ -18,6 +18,20 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     serve.run(serve.SiteConfig(site_dir=SITE_DIR, model=model), port=args.port)
+    return 0
+
+
+def _cmd_stage(args: argparse.Namespace) -> int:
+    from blink.site import stage
+
+    out = Path(args.out)
+    try:
+        written = stage.stage(SITE_DIR, out, model=Path(args.model) if args.model else None)
+    except (stage.StageError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    total = sum(path.stat().st_size for path in written)
+    print(f"ok: {len(written)} files, {total:,} B in {out}")
     return 0
 
 
@@ -61,6 +75,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     serve_cmd.add_argument("--model", required=True, help="model.onnx, or the directory holding it")
     serve_cmd.add_argument("--port", type=int, default=serve.DEFAULT_PORT)
     serve_cmd.set_defaults(func=_cmd_serve)
+
+    stage_cmd = tasks.add_parser("stage", help="copy the deployable page (and its npm files) into a new dir")
+    stage_cmd.add_argument("--out", required=True, help="a new or empty directory outside site/")
+    stage_cmd.add_argument("--model", help="model.onnx, or the directory holding it (with its model.json)")
+    stage_cmd.set_defaults(func=_cmd_stage)
 
     smoke_cmd = tasks.add_parser("smoke", help="Playwright on Edge: legal replies, 3 arrows, no errors")
     smoke_cmd.add_argument("--url", default=f"http://{serve.HOST}:{serve.DEFAULT_PORT}/")

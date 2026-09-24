@@ -1,4 +1,4 @@
-"""`blink site serve`: loopback only, the page plus vendor/ort and the model mapped in (P1, P10)."""
+"""`blink site serve`: loopback only, the page plus its npm files and the model mapped in (P1, P10)."""
 
 import argparse
 import inspect
@@ -22,9 +22,15 @@ def _fake_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
     ort.mkdir(parents=True)
     (ort / "ort.wasm.bundle.min.mjs").write_text("export const ort = 1", encoding="utf-8")
     (ort / "ort-wasm-simd-threaded.wasm").write_bytes(b"\0asm")
+    (ort / "ort-wasm-simd-threaded.mjs").write_text("export default 1", encoding="utf-8")
+    (ort / "ort.all.min.mjs").write_text("export const everything = 1", encoding="utf-8")
     esm = site / "node_modules" / "chess.js" / "dist" / "esm"
     esm.mkdir(parents=True)
     (esm / "chess.js").write_text("export class Chess {}", encoding="utf-8")
+    (esm / "chess.js.map").write_text("{}", encoding="utf-8")
+    (site / "node_modules" / "chess.js" / "LICENSE").write_text("BSD 2-Clause", encoding="utf-8")
+    (site / "package.json").write_text("{}", encoding="utf-8")
+    (site / "tests" / "golden.json").write_text("{}", encoding="utf-8")
     model_dir = tmp_path / "export" / "stand-in"
     model_dir.mkdir(parents=True)
     (model_dir / "model.onnx").write_bytes(b"onnx-bytes")
@@ -88,6 +94,18 @@ def test_the_page_vendor_ort_and_the_model_are_served_with_their_types(served):
     status, kind, body = _get(f"{served}/models/model.onnx")
     assert (status, kind, body) == (200, "application/octet-stream", b"onnx-bytes")
     assert _get(f"{served}/vocab.json")[1].startswith("application/json")
+
+
+def test_only_the_npm_files_the_page_deploys_are_served(served):
+    assert _get(f"{served}/vendor/chess.js/LICENSE")[2] == b"BSD 2-Clause"
+    assert _get(f"{served}/vendor/ort/ort-wasm-simd-threaded.mjs")[0] == 200
+    for path in ("/vendor/ort/ort.all.min.mjs", "/vendor/chess.js/chess.js.map", "/vendor/ort/"):
+        assert _get(served + path)[0] == 404, path
+
+
+def test_files_that_are_never_deployed_are_never_served(served):
+    for path in ("/package.json", "/tests/golden.json", "/node_modules", "/models/"):
+        assert _get(served + path)[0] == 404, path
 
 
 def test_a_missing_model_card_is_served_as_a_minimal_one_so_the_page_logs_no_404(served):
