@@ -87,6 +87,12 @@ def test_launch_parses_the_pid_and_names_wmi_failures(tmp_path):
     with pytest.raises(launch.LaunchError, match="access denied"):
         launch.launch(plan, runner=denied, find_children=lambda pid: [])
 
+    def no_powershell(argv, **_):
+        raise FileNotFoundError(2, "The system cannot find the file specified", "powershell.exe")
+
+    with pytest.raises(launch.LaunchError, match="powershell.exe"):
+        launch.launch(plan, runner=no_powershell, find_children=lambda pid: [])
+
 
 def test_ps_rows_show_each_blink_process_with_its_heartbeat(tmp_path):
     beat = tmp_path / "runs" / "long" / "heartbeat.json"

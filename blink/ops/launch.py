@@ -195,13 +195,16 @@ def launch(
     """Create the detached process and record it in BLINK_HOME/logs/NAME.launch.json."""
     plan.out.parent.mkdir(parents=True, exist_ok=True)
     _refuse_if_alive(plan)
-    done = runner(
-        powershell_argv(plan.script),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=POWERSHELL_TIMEOUT_S,
-    )
+    try:
+        done = runner(
+            powershell_argv(plan.script),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=POWERSHELL_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LaunchError(f"could not run {POWERSHELL}: {exc}") from exc
     fields = (done.stdout or "").split()
     if done.returncode != 0 or len(fields) < 2 or not all(f.isdigit() for f in fields[-2:]):
         raise LaunchError(

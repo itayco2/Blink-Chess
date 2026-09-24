@@ -8,6 +8,8 @@ second, and each test checks the verdict, the files it leaves and that the child
 
 import json
 import math
+import os
+import subprocess
 import sys
 import time
 import types
@@ -334,3 +336,45 @@ def test_a_momentarily_unreadable_heartbeat_is_not_a_stale_one(tmp_path):
     (run_dir / "heartbeat.json").write_text("{half a jso", encoding="utf-8")  # mid-replace
     assert sup._check(time.time()) is None
     assert supervise.heartbeat_verdict(None, started, time.time(), True, cfg).rule == "heartbeat"
+
+
+ORPHAN_PARENT = r"""
+import os, subprocess, sys, time
+from blink.train import supervise
+print(supervise.bind_children_to_this_process() if sys.argv[1] == "bind" else "free", flush=True)
+code = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(120)"
+subprocess.Popen([sys.executable, "-c", code, sys.argv[2]])
+print(os.getpid(), flush=True)
+time.sleep(120)
+"""
+
+
+def _grandchild_after_parent_dies(tmp_path: Path, mode: str) -> tuple[str, int, bool]:
+    script, pid_file = tmp_path / f"parent_{mode}.py", tmp_path / f"grandchild_{mode}.txt"
+    script.write_text(ORPHAN_PARENT, encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(Path(supervise.__file__).resolve().parents[2])}
+    parent = subprocess.Popen(
+        [sys.executable, str(script), mode, str(pid_file)], stdout=subprocess.PIPE, text=True, env=env
+    )
+    note, parent_pid = parent.stdout.readline().strip(), int(parent.stdout.readline())
+    deadline = time.time() + 30
+    while time.time() < deadline and not pid_file.exists():
+        time.sleep(0.1)
+    time.sleep(0.3)
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+    psutil.Process(parent_pid).kill()  # TerminateProcess: the supervisor gets no chance to clean up
+    time.sleep(3)
+    alive = psutil.pid_exists(grandchild) and not _gone(grandchild)
+    if alive:
+        psutil.Process(grandchild).kill()
+    parent.kill()
+    parent.wait()
+    return note, grandchild, alive
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="kill-on-close job objects are a Windows feature")
+def test_the_trainer_dies_with_its_supervisor_even_when_the_supervisor_is_killed(tmp_path):
+    note, _, alive = _grandchild_after_parent_dies(tmp_path, "free")
+    assert note == "free" and alive  # without the job, a killed supervisor leaves an orphan trainer
+    note, _, alive = _grandchild_after_parent_dies(tmp_path, "bind")
+    assert note.startswith("bound") and not alive
