@@ -136,13 +136,27 @@ def test_all_win_and_all_loss_players_are_reported_not_fitted(tmp_path):
     assert rating.unfittable(tally) == {"Blink-policy": "all losses", "SF1320": "all wins"}
 
 
-def test_a_player_left_with_only_losses_after_an_exclusion_is_excluded_too(tmp_path):
+def test_a_player_left_with_no_linking_games_after_an_exclusion_is_excluded_too(tmp_path):
     pgn = tmp_path / "g.pgn"
     games = [("Blink-policy", "Random", "1-0")] * 4 + [("Blink-policy", "SF1320", "0-1")] * 4
     write_games(pgn, games)
-    anchors = (rating.Anchor("SF1320", 1320),)
+    anchors = (rating.Anchor("SF1320", 1320), rating.Anchor("SF1400", 1400))
     assert rating.unfittable(rating.tally_players([pgn]), anchors) == {"Random": "all losses"}
-    assert rating.exclusions([pgn], anchors) == {"Random": "all losses", "Blink-policy": "all losses"}
+    assert rating.exclusions([pgn], anchors) == {
+        "Random": "all losses",
+        "SF1320": "all wins (anchor)",
+        "Blink-policy": "no games left",  # it beat Random and lost to SF1320: nothing links it
+    }
+    write_games(pgn, [*games, ("Blink-policy", "SF1400", "1/2-1/2"), ("SF1400", "SF1320", "0-1")])
+    assert rating.exclusions([pgn], anchors) == {"Random": "all losses", "SF1320": "all wins (anchor)"}
+
+
+def test_an_anchor_with_all_wins_is_left_out_so_ordo_can_link_the_rest(tmp_path):
+    """The smoke's SF1400 won all 4 of its games: Ordo refused the pool (group connectivity FAILED)."""
+    pgn = tmp_path / "g.pgn"
+    games = [("SF1400", "Blink-value", "1-0")] * 2 + [("Blink-value", "SF1500", "1/2-1/2")] * 2
+    write_games(pgn, games)
+    assert rating.exclusions([pgn], (rating.Anchor("SF1400", 1400),)) == {"SF1400": "all wins (anchor)"}
 
 
 def test_only_anchors_that_played_are_passed_to_ordo(tmp_path):

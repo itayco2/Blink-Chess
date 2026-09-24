@@ -261,12 +261,19 @@ def unfittable(tally: dict[str, dict[str, float]], anchors: Sequence[Anchor] = (
     return out
 
 
-def exclusions(pgns: Sequence[Path], anchors: Sequence[Anchor]) -> dict[str, str]:
-    """Unfittable players, found again after each round of removals until none is left: a player whose
-    only draws or wins came against an excluded player is itself unfittable once those games go."""
+def exclusions(pgns: Sequence[Path], anchors: Sequence[Anchor] = ()) -> dict[str, str]:
+    """Players Ordo cannot link, found again after each round of removals until none is left.
+
+    A player (anchors included: Ordo checks links before it fixes anyone) with all wins or all losses is
+    removed with its games; a player whose only draws or wins came against a removed one is then removed
+    too, and so is one left with no games. `anchors` only names which removed players were anchors."""
+    fixed = {a.name for a in anchors}
     excluded: dict[str, str] = {}
+    everyone = set(tally_players(pgns))
     while True:
-        found = unfittable(tally_players(pgns, excluded), anchors)
+        tally = tally_players(pgns, excluded)
+        found = {p: why + (" (anchor)" if p in fixed else "") for p, why in unfittable(tally).items()}
+        found |= {p: "no games left" for p in everyone - set(tally) - set(excluded)}
         if not found:
             return excluded
         excluded |= found

@@ -283,7 +283,7 @@ def _run_guarded(prefix: str, action) -> int:
     from blink.eval import orchestrate
 
     try:
-        action()
+        outcome = action()
     except (
         orchestrate.ProtocolMismatch,
         orchestrate.TrainingLive,
@@ -292,6 +292,8 @@ def _run_guarded(prefix: str, action) -> int:
         ValueError,
     ) as exc:
         return _fail(prefix, exc)
+    if isinstance(outcome, dict) and outcome.get("ordo_error"):
+        return _fail(prefix, RuntimeError(f"results.json written without Elo: {outcome['ordo_error']}"))
     return 0
 
 

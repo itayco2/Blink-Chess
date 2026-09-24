@@ -579,6 +579,20 @@ def build_results(state: dict, ctx: EvalContext, fit) -> object:
     )
 
 
+def _fit(pgns: Sequence[Path], ctx: EvalContext, ordo: Callable) -> tuple[object, str | None]:
+    """Ordo over the final-slice PGNs; when Ordo refuses the pool, the tally alone (no Elo) and why."""
+    from blink.eval import rating
+
+    if not pgns:
+        return None, None
+    anchors = rating.read_anchors()
+    try:
+        return ordo(pgns, anchors, ctx.out_dir / "ordo"), None
+    except RuntimeError as exc:
+        tally, left_out = rating.tally_players(pgns), rating.exclusions(pgns, anchors)
+        return rating.OrdoFit((), (), left_out, tally, (), {}), str(exc)
+
+
 def run_all(
     ctx: EvalContext,
     only: Sequence[str] | None = None,
@@ -594,7 +608,7 @@ def run_all(
 
     state = run_blocks(ctx, runners or default_runners(), only, runs_root, log, load)
     pgns = [Path(p) for p in final_slice_pgns(state) if Path(p).is_file()]
-    fit = (ordo or rating.run_ordo)(pgns, rating.read_anchors(), ctx.out_dir / "ordo") if pgns else None
+    fit, ordo_error = _fit(pgns, ctx, ordo or rating.run_ordo)
     results = build_results(state, ctx, fit)
     ctx.results_dir.mkdir(parents=True, exist_ok=True)
     path = ctx.results_dir / "results.json"
@@ -603,6 +617,7 @@ def run_all(
     summary = {
         "results": str(path),
         "ordo": fit.as_dict() if fit is not None else None,
+        "ordo_error": ordo_error,
         "forfeits": {block: state[block]["forfeits"] for block in BLOCK_ORDER if block in state},
         "games": {block: state[block].get("games", 0) for block in BLOCK_ORDER if block in state},
     }

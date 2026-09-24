@@ -295,3 +295,23 @@ def test_a_blink_row_takes_its_puzzle_score_from_blink_eval_puzzles(tmp_path, mo
     assert fields["dm_puzzles_pct"] == pytest.approx(80.0)
     assert fields["dm_puzzles_ci"] == pytest.approx((79.0, 81.0))
     assert orchestrate._puzzle_fields("Blink-policy-ship", {}) == {}
+
+
+def test_a_refused_ordo_pool_still_writes_results_json_without_elo(tmp_path):
+    def refuse(pgns, anchors, workdir):
+        raise RuntimeError("ordo refused the pool")
+
+    pgn = tmp_path / "final.pgn"
+    pgn.write_text(PGN, encoding="utf-8")
+    out = orchestrate.run_all(
+        ctx(tmp_path),
+        runners=recorder([], {"E5": {"final_slice_pgns": [str(pgn)]}}),
+        runs_root=tmp_path,
+        log=lambda s: None,
+        ordo=refuse,
+        load=IDLE,
+    )
+    assert out["ordo_error"] == "ordo refused the pool"
+    results = results_schema.from_json((tmp_path / "results" / "results.json").read_text(encoding="utf-8"))
+    assert {r.agent for r in results.strength} == {"Blink-value-ship", "SF1800", "SF1900"}
+    assert all(r.elo is None for r in results.strength)
