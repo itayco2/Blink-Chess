@@ -30,18 +30,33 @@ The token never goes into `config.yml`, a repo file, a user environment variable
 - **DPAPI protects the file from other Windows users and from a copied disk. It does not protect it
   from programs running as you.** The build agent runs as your Windows user, so "the agent never reads
   the token" is a rule the agent follows, not a wall it cannot cross.
-- While the bot runs, the token sits in plain text in the bot process's environment. Any program
-  running as you could read it; `Remove-Item Env:` only cleans up after the bot exits.
-- A crash dump of the bot or of PowerShell would contain the token. Treat any
-  `%LOCALAPPDATA%\CrashDumps\python.exe*.dmp` from a bot run as holding it, and delete it.
+- While the bot runs, the token sits in plain text in the environment of `start-bot.ps1`'s
+  PowerShell, of the lichess-bot process and of every process lichess-bot starts: its game workers
+  and each game's `blink-uci` engine all inherit it (lichess-bot starts the engine with no
+  environment of its own). Any program running as you could read it there; `Remove-Item Env:` only
+  cleans up after the bot exits. `blink-uci` deletes the variable from its own environment at
+  startup, without reading it, so the engine and anything it starts no longer carry it; the
+  lichess-bot processes still do.
+- A crash dump of the bot, of PowerShell or of an engine would contain the token. Treat any
+  `%LOCALAPPDATA%\CrashDumps\python.exe*.dmp` or `blink-uci.exe*.dmp` from a bot run as holding it,
+  and delete it.
+- **The code that runs with the token is writable by you, and so by the agent.** The engine
+  (`D:\blink-bot\engine`, built by the agent), lichess-bot (`D:\blink-bot\lichess-bot` and its venv)
+  and `D:\blink-bot\config.yml` (written by `blink lichess config`) all belong to your account.
+  Whatever changes them runs next time with the token in its environment. `check-config` catches a
+  config that sends the token elsewhere or starts another program (section 5), but not changed code.
 - **Why this is acceptable:** the token has only the `bot:play` scope, on an account that is only a bot.
   The worst a leak can do is play games as the bot. You can revoke it in one click on
   lichess.org, and a new one takes a minute.
-- **Optional hardening:** run the bot under a separate, standard (non-admin) Windows account. DPAPI
-  then becomes a real boundary, because a program running as you cannot decrypt that account's file or
-  read its processes' memory without admin rights.
+- **Optional hardening, and what it takes:** a separate, standard (non-admin) Windows account makes
+  DPAPI a real boundary only if that account also owns everything that runs with the token and your
+  account cannot write to any of it: the frozen engine install, lichess-bot and its venv, the
+  scripts and `config.yml`. The agent then writes configs to a staging folder, and the bot account
+  copies one in after `check-config` passes. A separate account that still runs code or a config
+  your account can change protects nothing, because that code would read the token for it.
 - **Also optional:** restrict the folder to your account (PowerShell):
-  `icacls D:\blink-bot /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F"`.
+  `icacls D:\blink-bot /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F"`. This keeps other
+  Windows users out; it does not keep out programs running as you.
 
 ## 3. Start-bot script
 

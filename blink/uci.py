@@ -22,6 +22,11 @@ playing an unevaluated model.
 
 `--threads N` and `--priority below_normal` keep the engine to the plan's P7 side-process budget
 (1 thread at BELOW_NORMAL while the long run trains), which the G5 casual smoke needs.
+
+lichess-bot starts every engine with its own environment, token included. The engine never needs the
+token, so it removes that variable from its own environment first thing, without reading the value.
+That narrows where the token lives (it is not in this process's environment block, or any child's);
+the lichess-bot processes still hold it (RUNBOOK, "What protects the token").
 """
 
 import argparse
@@ -51,6 +56,7 @@ PROCESS_FIELD = "{process}"  # in --log: this process's UTC start time and PID
 FULL_SHA = re.compile(r"^[0-9a-f]{64}$")
 PRIORITIES = ("normal", "below_normal")
 POSIX_BELOW_NORMAL = 10  # the nice value that stands in for Windows' BELOW_NORMAL_PRIORITY_CLASS
+BOT_TOKEN_VARIABLE = "LICHESS_BOT_TOKEN"  # lichess-bot's; removed unread at startup
 
 
 def log_path(raw: Path, pid: int, now: float) -> Path:
@@ -177,6 +183,12 @@ class UciEngine:
         self.send(f"bestmove {decision.move.uci()}")
 
 
+def drop_inherited_token() -> None:
+    """Remove lichess-bot's token variable from this process's environment; the value is never read."""
+    if BOT_TOKEN_VARIABLE in os.environ:
+        del os.environ[BOT_TOKEN_VARIABLE]
+
+
 def limit_cpu(threads: int | None, priority: str = "normal") -> None:
     """The P7 side-process budget: torch on `threads` threads, at below-normal CPU priority if asked."""
     if priority == "below_normal":
@@ -259,6 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
+    drop_inherited_token()
     args = build_parser().parse_args(argv)
     limit_cpu(args.threads, args.priority)
     stdin = stdin if stdin is not None else sys.stdin

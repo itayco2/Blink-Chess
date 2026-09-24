@@ -107,3 +107,23 @@ def test_the_cpu_limits_leave_torch_one_thread_at_below_normal_priority():
     )
     below_normal = psutil.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 10
     assert done.stdout.split() == ["1", "1", str(below_normal)]
+
+
+# ---------------------------------------------------------------- the inherited token
+# lichess-bot starts every engine with its own environment, which holds LICHESS_BOT_TOKEN. The engine
+# never needs it, so blink-uci removes it from its own environment first thing, value unread.
+
+
+def test_blink_uci_discards_the_bot_token_it_inherits(monkeypatch):
+    variable = "LICHESS_BOT_TOKEN"
+    monkeypatch.setenv(variable, "lip_" + "Q" * 20)
+    assert run(["--random"])[0] == 0
+    assert variable not in os.environ
+
+
+def test_the_token_is_gone_before_any_other_startup_work(monkeypatch):
+    seen = []
+    monkeypatch.setenv("LICHESS_BOT_TOKEN", "lip_" + "Q" * 20)
+    monkeypatch.setattr(uci, "limit_cpu", lambda *args: seen.append("LICHESS_BOT_TOKEN" in os.environ))
+    run(["--random"])
+    assert seen == [False]
