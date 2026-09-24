@@ -57,6 +57,23 @@ def test_the_a08_arm_loads_over_the_recipe_at_s():
     assert cfg.value_mapping == "deepmind" and cfg.model.gab is True
 
 
+def test_a08_is_not_judged_until_the_a01_a03_noise_floor_carries_mate_preserving_too():
+    """a08's guard is mate_preserving, which no evals.jsonl row carries yet, so a08 stays held in
+    configs/ablations/plan.toml: run now, it would spend its 1.5 GPU-h and end "not judged". Scoring
+    a08 alone would not help, because the floor arms a01-a03 must carry the metric as well."""
+    from blink.train import sweep
+
+    arm = sweep.load_arm(REPO / "configs" / "ablations" / "a08.toml")
+    rows = {f"a0{i}": {"vaa": 0.500 + i / 1000, "top1": 0.300} for i in (1, 2, 3)}
+    floor = sweep.noise_floor(rows, ("a01", "a02", "a03"))
+    scored = {"vaa": 0.60, "top1": 0.31, "mate_preserving": 0.95}
+    unscored = {"vaa": 0.60, "top1": 0.31}
+    assert arm.guard == "mate_preserving" and "mate_preserving" not in floor
+    for metrics in (scored, unscored):
+        verdict = sweep.decide(arm, metrics, floor)
+        assert verdict == {"adopt": False, "reason": "not judged: mate_preserving missing"}
+
+
 # ---------------------------------------------------------------- the mapping
 
 
