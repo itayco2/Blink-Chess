@@ -161,7 +161,12 @@ def test_the_page_shows_the_card_histogram_and_backend_and_reloads_the_model_fro
         page.reload()
         page.wait_for_function(smoke.WAIT_READY, timeout=120_000)
         second = page.evaluate("window.__blink.state()")
-    assert first["backend"] == {"backend": "wasm", "threads": 1, "source": "network"}
+    assert {k: first["backend"][k] for k in ("backend", "threads", "source")} == {
+        "backend": "wasm",
+        "threads": 1,
+        "source": "network",
+    }
+    assert first["backend"]["loadMs"] > 0
     assert second["backend"]["source"] == "cache", "the reload reads the model from the Cache API"
     assert after["histogramBins"] == 128
     assert "one look, fp32 WASM" in card_text and "sha256" in card_text

@@ -345,3 +345,16 @@ button:hover {
   margin: 0 auto;
   padding: 0 16px 24px;
 }
+
+.bench-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.bench-table th,
+.bench-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+}

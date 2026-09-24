@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blink: latency bench</title>
+    <meta name="description" content="How long one look takes on this device, per backend: cold load and milliseconds per move." />
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="bench/bench.js"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <h1>Blink bench</h1>
+      <p class="tagline">One look per move, timed on this device: a cold load, then timed looks at batch 1 for each model and backend in the address (?pairs=int8:wasm-1t by default).</p>
+    </header>
+    <main class="layout">
+      <section class="card">
+        <h2>Milliseconds per look</h2>
+        <table id="bench" class="bench-table">
+          <thead>
+            <tr><th>model</th><th>backend</th><th>threads</th><th>cold load ms</th><th>look ms p50</th><th>run ms p50</th><th>status</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p id="bench-status" class="small muted" role="status" aria-live="polite">Starting</p>
+        <p class="small muted">look ms is what the page pays per move (message, run, reply); run ms is the network alone. <a href="index.html">Play Blink</a>.</p>
+      </section>
+    </main>
+  </body>
+</html>

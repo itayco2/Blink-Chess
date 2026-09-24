@@ -413,7 +413,7 @@ function exposeHooks() {
       timings: [...app.timings],
       gameOver: app.game.isGameOver(),
       histogramBins: Number($("value-hist").dataset.bins || 0),
-      backend: app.backend ? { backend: app.backend.backend, threads: app.backend.threads, source: app.backend.source } : null,
+      backend: app.backend ? { backend: app.backend.backend, threads: app.backend.threads, source: app.backend.source, loadMs: app.backend.loadMs } : null,
       card: app.card.label || null,
       rating: app.rating ? app.rating.text : null,
     }),
