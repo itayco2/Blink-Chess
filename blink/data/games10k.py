@@ -26,7 +26,15 @@ from blink.board import encode, moves, value
 from blink.data import blocklist
 from blink.data.record import NO_MOVE, ROOT_DTYPE
 
-DEFAULT_PROCS = 5
+MAX_PROCS = 5
+
+
+def default_procs(cpu_count: int | None = os.cpu_count()) -> int:
+    """Stockfish processes: one per core minus one kept free, at most 5 (5 on the 12-thread build box)."""
+    return max(1, min(MAX_PROCS, (cpu_count or 2) - 1))
+
+
+DEFAULT_PROCS = default_procs()
 STOCKFISH = Path(r"D:\tools\stockfish\stockfish-windows-x86-64-universal.exe")
 Label = tuple[str, int | None, int | None, int]  # best uci, cp, mate (side-to-move view), depth
 

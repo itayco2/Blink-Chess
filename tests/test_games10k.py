@@ -55,4 +55,7 @@ def test_workers_are_spawn_safe_and_skip_nothing_when_resumed(tmp_path):
     done = {"a": ("e2e4", 10, None, 12)}
     todo = games10k.remaining(["a", "b"], done)
     assert todo == ["b"]
-    assert os.cpu_count() and os.cpu_count() >= games10k.DEFAULT_PROCS
+    assert 1 <= games10k.default_procs(cpu_count=4) == 3  # leaves one core free on a 4-core CI runner
+    assert games10k.default_procs(cpu_count=12) == 5  # capped at 5 on the 12-thread build machine
+    assert games10k.default_procs(cpu_count=None) == 1
+    assert os.cpu_count() is None or games10k.default_procs() <= os.cpu_count()

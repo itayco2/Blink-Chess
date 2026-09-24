@@ -3,8 +3,6 @@
 import types
 import xml.etree.ElementTree as ET
 
-import pytest
-
 from blink import cli
 
 SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="45" height="45"><path id="x" d="M0 0h45"/></svg>'
@@ -86,25 +84,19 @@ class _Net:
         return self
 
 
-def test_load_module_prefers_the_train_areas_load_module(monkeypatch):
+def test_load_module_asks_the_train_areas_load_model_for_a_cpu_module(monkeypatch):
+    """The real interface, known once the areas met: blink.model.loading.load_model(selector, device)."""
     net = _Net()
-    models = _fake_loading(monkeypatch, types.SimpleNamespace(load_module=lambda selector, device: net))
+    calls = []
+
+    def load_model(selector, device):
+        calls.append((selector, device))
+        return net
+
+    models = _fake_loading(monkeypatch, types.SimpleNamespace(load_model=load_model))
     assert models.load_module("run:skeleton") is net
+    assert calls == [("run:skeleton", "cpu")]
     assert net.evaluated
-
-
-def test_load_module_falls_back_to_the_evaluators_module(monkeypatch):
-    net = _Net()
-    loading = types.SimpleNamespace(load_evaluator=lambda selector, device: types.SimpleNamespace(module=net))
-    models = _fake_loading(monkeypatch, loading)
-    assert models.load_module("ship") is net
-
-
-def test_load_module_names_what_it_needs_when_the_evaluator_hides_its_module(monkeypatch):
-    loading = types.SimpleNamespace(load_evaluator=lambda selector, device: types.SimpleNamespace())
-    models = _fake_loading(monkeypatch, loading)
-    with pytest.raises(models.ModelUnavailable, match=r"load_module\(selector, device\)"):
-        models.load_module("ship")
 
 
 def test_golden_uses_the_train_areas_evaluator_for_a_train_selector(monkeypatch):
