@@ -235,14 +235,22 @@ def _stockfish():
 
 
 def _endgame_set(ctx, name: str, count: int) -> list:
-    """The screened set; a smoke run (--positions) may use an incomplete screen, a real run may not."""
+    """The screened set; a smoke run (--positions) may use an incomplete screen, a real run may not.
+    Refused when dev and final share a position: epsilon is chosen on dev only."""
     from blink.eval import endgames
 
-    summary_path = endgames.out_dir() / "endgames.json"
+    folder = endgames.out_dir()
+    summary_path = folder / "endgames.json"
     complete = summary_path.is_file() and json.loads(summary_path.read_text(encoding="utf-8"))["complete"]
     if not complete and ctx.positions is None:
         raise ValueError("the endgame screen is incomplete (fewer than 700 kept): run `blink eval endgames`")
-    return endgames.read_set(endgames.out_dir(), name)[: ctx.positions or count]
+    shared = endgames.overlap(endgames.read_set(folder, "dev"), endgames.read_set(folder, "final"))
+    if shared:
+        raise ValueError(
+            f"{shared} position{'s' if shared > 1 else ''} in both dev.jsonl and final.jsonl (move counters "
+            "aside): re-run `blink eval endgames`, which now screens each position once"
+        )
+    return endgames.read_set(folder, name)[: ctx.positions or count]
 
 
 def e2b_block(ctx, state: dict) -> dict:

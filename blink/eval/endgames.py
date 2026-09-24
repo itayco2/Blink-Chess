@@ -7,11 +7,16 @@ the epsilon choice) and the next 500 the final set (E8). The winning side is the
 the side to move or its opponent, whichever Stockfish rates +5.00. This is a proxy for "won" (no
 tablebase is used, plan section 1), and both searches are cached, so an interrupted screen resumes
 without repeating a search.
+
+endgames.epd repeats some positions with other move counters (22 of them). A position is screened only the
+first time it appears (placement, side to move, castling and en passant; the counters ignored), so no
+position sits in both the dev set, which chooses epsilon, and the final set, which is published.
+endgames.json records the repeats skipped and the dev/final overlap, which E2b and E8 refuse unless 0.
 """
 
 import json
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -97,11 +102,34 @@ def _confirmed(line: int, fen: str, first: SfLabel, second: SfLabel, side: chess
     )
 
 
+def position_key(fen: str) -> str:
+    """A position without its move counters: placement, side to move, castling and en passant."""
+    return " ".join(fen.split()[:4])
+
+
+def overlap(first: Iterable[Endgame], second: Iterable[Endgame]) -> int:
+    """How many positions (counters ignored) appear in both sets."""
+    return len({position_key(e.fen) for e in first} & {position_key(e.fen) for e in second})
+
+
+def first_sightings(positions: Iterator[tuple[int, str]], repeats: list[int]) -> Iterator[tuple[int, str]]:
+    """Each position the first time it appears; the lines of later repeats are appended to `repeats`."""
+    seen: set[str] = set()
+    for line, fen in positions:
+        key = position_key(fen)
+        if key in seen:
+            repeats.append(line)
+            continue
+        seen.add(key)
+        yield line, fen
+
+
 @dataclass(frozen=True)
 class ScreenResult:
     kept: tuple[Endgame, ...]
     screened: int
     passed_screen: int  # positions at +5.00 at 1M nodes, each confirmed at 10M
+    repeats_skipped: int = 0  # lines holding a position already seen (other move counters)
 
     @property
     def dev(self) -> tuple[Endgame, ...]:
@@ -131,10 +159,13 @@ def screen(
     progress: Callable[[int, int], None] | None = None,
 ) -> ScreenResult:
     """Screen positions in order until `want` are kept (or the positions run out), a batch at a time so
-    the labelers can search on several processes; a position after the `want`-th keep is not counted."""
+    the labelers can search on several processes; a position after the `want`-th keep is not counted,
+    and a repeat of a position already seen is skipped."""
     kept: list[Endgame] = []
+    repeats: list[int] = []
     screened = passed = 0
-    for batch in _batches(positions, BATCH_PER_PROC * max(screen_labeler.procs, confirm_labeler.procs)):
+    size = BATCH_PER_PROC * max(screen_labeler.procs, confirm_labeler.procs)
+    for batch in _batches(first_sightings(positions, repeats), size):
         firsts = screen_labeler.label_many([(fen, None) for _, fen in batch])
         sides = [winner(label, chess.Board(fen).turn) for label, (_, fen) in zip(firsts, batch, strict=True)]
         seconds = iter(
@@ -151,8 +182,8 @@ def screen(
             if progress is not None:
                 progress(screened, len(kept))
             if len(kept) >= want:
-                return ScreenResult(tuple(kept), screened, passed)
-    return ScreenResult(tuple(kept), screened, passed)
+                return ScreenResult(tuple(kept), screened, passed, len(repeats))
+    return ScreenResult(tuple(kept), screened, passed, len(repeats))
 
 
 def _write(path: Path, text: str) -> None:
@@ -169,9 +200,11 @@ def write_sets(result: ScreenResult, folder: Path) -> dict:
     summary = {
         "screened": result.screened,
         "passed_screen": result.passed_screen,
+        "repeats_skipped": result.repeats_skipped,
         "kept": len(result.kept),
         "dev": len(result.dev),
         "final": len(result.final),
+        "overlap_positions": overlap(result.dev, result.final),
         "screen_nodes": SCREEN_NODES,
         "confirm_nodes": CONFIRM_NODES,
         "threshold_pawns": THRESHOLD_PAWNS,

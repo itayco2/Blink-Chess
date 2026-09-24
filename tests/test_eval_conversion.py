@@ -1,5 +1,6 @@
 """E8 conversion, the endgame screen and E2b, the epsilon rule (plan P8)."""
 
+import dataclasses
 import json
 import os
 
@@ -50,9 +51,15 @@ def test_a_black_to_move_position_lost_for_black_is_won_for_white(tmp_path):
     assert found == endgames.Endgame(7, fen, "white", 9.0, 8.0) and found.blink_color == chess.WHITE
 
 
+def rook_on(file_index: int) -> str:
+    """A distinct won position for each file of White's back-rank rook (a-e)."""
+    rank = f"{file_index or ''}R{5 - file_index}K1".replace("R0K", "RK")
+    return chess.Board(f"6k1/5ppp/8/8/8/8/5PPP/{rank} w - - 0 1").fen()
+
+
 def test_the_screen_stops_at_want_and_splits_200_dev_then_500_final(tmp_path):
-    fens = [chess.Board(MATE_IN_ONE_WHITE).fen()] * 5
-    labeler = fake_labeler(tmp_path, "s", {fens[0]: 6.0})
+    fens = [rook_on(i) for i in range(5)]
+    labeler = fake_labeler(tmp_path, "s", dict.fromkeys(fens, 6.0))
     result = endgames.screen(iter(enumerate(fens, start=1)), labeler, labeler, want=3)
     assert len(result.kept) == 3 and result.screened == 3
     kept = tuple(endgame(fens[0], line=i) for i in range(750))
@@ -199,3 +206,44 @@ def test_the_batched_screen_keeps_a_position_won_for_black(tmp_path):
 def test_an_empty_conversion_has_no_percentage():
     empty = conversion.ConversionResult("Blink-value", ())
     assert empty.as_dict()["pct"] is None and empty.as_dict()["wilson95"] is None
+
+
+def test_a_position_repeated_with_other_move_counters_is_screened_once(tmp_path):
+    """endgames.epd repeats 22 positions with different counters: one could land in dev and in final."""
+    fens = [rook_on(0), chess.Board(MATE_IN_ONE_WHITE).fen(), rook_on(0).replace(" 0 1", " 0 45"), rook_on(1)]
+    labeler = fake_labeler(tmp_path, "s", dict.fromkeys(fens, 6.0))
+    result = endgames.screen(iter(enumerate(fens, start=1)), labeler, labeler)
+    assert [e.line for e in result.kept] == [1, 2, 4]
+    assert (result.screened, result.repeats_skipped) == (3, 1)
+
+
+def test_the_sets_record_how_many_positions_dev_and_final_share(tmp_path):
+    distinct = tuple(endgame(rook_on(i), line=i) for i in range(4))
+    summary = endgames.write_sets(endgames.ScreenResult(distinct, 4, 4, 2), tmp_path)
+    assert (summary["overlap_positions"], summary["repeats_skipped"]) == (0, 2)
+    shared = endgame(rook_on(0).replace(" 0 1", " 3 60"), line=9)
+    assert endgames.overlap([distinct[0]], [shared]) == 1
+
+
+def test_e2b_and_e8_refuse_endgame_sets_that_share_a_position(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    folder = endgames.out_dir()
+    folder.mkdir(parents=True)
+    dev = [endgame(rook_on(0), line=1), endgame(rook_on(1), line=2)]
+    final = [endgame(rook_on(2), line=3)]
+
+    def write(final_rows):
+        for name, rows in (("dev", dev), ("final", final_rows)):
+            text = "".join(json.dumps(dataclasses.asdict(e)) + "\n" for e in rows)
+            (folder / f"{name}.jsonl").write_text(text, encoding="utf-8")
+        (folder / "endgames.json").write_text(json.dumps({"complete": True}), encoding="utf-8")
+
+    write(final)
+    ctx = SimpleNamespace(positions=None)
+    assert conversion._endgame_set(ctx, "final", 500) == final
+    write([*final, endgame(rook_on(1).replace(" 0 1", " 0 30"), line=7)])
+    for name in ("dev", "final"):
+        with pytest.raises(ValueError, match="1 position"):
+            conversion._endgame_set(ctx, name, 500)

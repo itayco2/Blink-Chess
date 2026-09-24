@@ -193,7 +193,8 @@ def _cmd_endgames(args: argparse.Namespace) -> int:
     print(
         f"screened {result.screened:,} positions: {result.passed_screen} at +5.00 after "
         f"{args.screen_nodes:,} nodes, {len(result.kept)} confirmed at {args.confirm_nodes:,}; "
-        f"dev {summary['dev']}, final {summary['final']}; {searched} new searches in {seconds:.0f} s"
+        f"dev {summary['dev']}, final {summary['final']} (sharing {summary['overlap_positions']}); "
+        f"{result.repeats_skipped} repeated positions skipped; {searched} new searches in {seconds:.0f} s"
     )
     for game in result.kept:
         scores = f"+{game.screen_pawns:.2f} / +{game.confirm_pawns:.2f}"
