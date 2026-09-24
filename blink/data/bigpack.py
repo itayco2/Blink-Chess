@@ -526,3 +526,20 @@ def bigpack(cfg: BigPackConfig) -> dict:
             f"{cfg.out} holds an unfinished pass 1; pass --resume or --overwrite to restart it"
         )
     return run_pass2(cfg, _start(cfg, identity, blocked, blocklist_entry), blocked)
+
+
+def write_rebalance(pack_dir: Path, games: rebalance.GamesHistogram) -> dict:
+    """Fill manifest["rebalance"] from a games histogram and the packed train roots. Returns the block."""
+    manifest = read_manifest(pack_dir)
+    if manifest.get("status") != "complete":
+        raise ValueError(f"{pack_dir} is not a complete pack (status {manifest.get('status')!r})")
+    evaldb = manifest["evaldb_hist"]["roots"]
+    block = {
+        "buckets": rebalance.NUM_BUCKETS,
+        "weights": rebalance.table(games.counts, evaldb).tolist(),
+        "definition": rebalance.DEFINITION,
+        "p_games": [int(c) for c in games.counts],
+        "p_evaldb": evaldb,
+        "games": {k: v for k, v in games.as_dict().items() if k != "counts"},
+    }
+    return write_manifest(pack_dir, {**manifest, "rebalance": block})["rebalance"]
