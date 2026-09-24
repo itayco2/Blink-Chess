@@ -7,10 +7,12 @@ import pytest
 from blink.report import compute
 
 
-def _run(root, name, rows, batch_size=256, device="cuda", nvsmi=None):
+def _run(root, name, rows, batch_size=256, device="cuda", nvsmi=None, branched_from=None):
     run = root / name
     run.mkdir(parents=True)
     config = {"run": name, "device": device, "config": {"batch_size": batch_size}}
+    if branched_from is not None:
+        config["branched_from"] = branched_from
     (run / "config.json").write_text(json.dumps(config), encoding="utf-8")
     if rows is not None:
         text = "".join(json.dumps(r) + "\n" for r in rows)
@@ -152,3 +154,38 @@ def test_an_unusable_power_log_or_config_is_skipped_not_fatal(tmp_path):
     (other / "config.json").write_text(json.dumps({"device": "cuda", "config": {}}), encoding="utf-8")
     (other / "metrics.jsonl").write_text('{"step": 1, "samples_per_s": null}\n', encoding="utf-8")
     assert "batch_size" in compute.run_compute(other).reason
+
+
+def _steady(first: int, last: int, rate: float = 2048.0) -> list[dict]:
+    return [{"step": s, "samples_per_s": rate} for s in range(first, last + 1, 50)]
+
+
+def test_a_branched_run_bills_only_the_steps_it_trained(tmp_path):
+    """A preview cooldown loads ckpt_<N>.pt and counts on from step N: its first window starts at N, not 0."""
+    _run(tmp_path, "long", _steady(50, 36_000), batch_size=1024)
+    parent_ckpt = str(tmp_path / "long" / "ckpt_000010800.pt")
+    preview = _run(
+        tmp_path, "long-preview", _steady(10_850, 11_800), batch_size=1024, branched_from=parent_ckpt
+    )
+    result = compute.run_compute(preview)
+    assert result.gpu_hours == pytest.approx(1_000 * 1024 / 2048 / 3600)
+    report = compute.project_compute(tmp_path, flagship="long", now="t")
+    hours = {r["run"]: r["gpu_hours"] for r in report["runs"]}
+    assert hours["long-preview"] == pytest.approx(0.139, abs=1e-3)
+    assert report["total_gpu_hours"] == pytest.approx((36_000 + 1_000) * 1024 / 2048 / 3600)
+
+
+def test_the_start_step_comes_from_the_branch_checkpoint_name(tmp_path):
+    assert compute.start_step({}) == 0 and compute.start_step({"branched_from": None}) == 0
+    assert compute.start_step({"branched_from": "D:/blink/runs/long/ckpt_000010800.pt"}) == 10_800
+    assert compute.start_step({"branched_from": r"C:\runs\long\ckpt_000000030.pt"}) == 30
+    with pytest.raises(ValueError, match="branch"):
+        compute.start_step({"branched_from": "runs/long/weights.pt"})
+    windows = compute.windows([{"step": 150, "samples_per_s": 256.0}], 256, start=100)
+    assert windows == [(50.0, None)]
+
+
+def test_a_branch_whose_checkpoint_name_is_unreadable_is_skipped_not_overbilled(tmp_path):
+    run = _run(tmp_path, "odd", _rows(), branched_from="somewhere/weights.pt")
+    skipped = compute.run_compute(run)
+    assert isinstance(skipped, compute.Skipped) and "branch" in skipped.reason

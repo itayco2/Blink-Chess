@@ -5,7 +5,10 @@ batch_size rows each (roots plus children), logged with that window's samples_pe
 lasted steps * batch_size / samples_per_s seconds; evaluation and checkpoint time inside a window is
 included, because the GPU was held for it. A resume rewinds the log to its checkpoint, so steps a dead
 attempt computed and threw away are not counted (the published hours slightly undercount, never
-overcount). Runs trained on the CPU and folders without a metrics.jsonl are listed as skipped.
+overcount). A branch (a preview cooldown) loads its parent's ckpt_<N>.pt and counts on from step N, so
+its first window starts at N, read from config.json "branched_from": the parent's first N steps are
+billed once, to the parent. Runs trained on the CPU, folders without a metrics.jsonl and a branch whose
+checkpoint name gives no step are listed as skipped.
 
 Energy (GPU board only, never the whole PC). When every window carries gpu_power_w (the mean board
 power over that window), energy is the sum of seconds times watts. Otherwise the run's nvidia-smi log
@@ -16,9 +19,10 @@ and kwh_coverage says what share of the GPU-hours the published kWh covers.
 
 import csv
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from blink.train.atomic import write_text_atomic
 
@@ -29,6 +33,7 @@ MAX_GAP_S = 120.0
 JOULES_PER_KWH = 3.6e6
 SCOPE = "training runs under BLINK_HOME/runs, from each run's own telemetry; GPU board energy only"
 _TIME_FORMATS = ("%Y/%m/%d %H:%M:%S.%f", "%Y/%m/%d %H:%M:%S")
+_CHECKPOINT = re.compile(r"^ckpt_(\d+)\.pt$")  # blink.train.checkpoint.PATTERN (that module imports torch)
 
 
 @dataclass(frozen=True)
@@ -64,10 +69,21 @@ def read_metrics(path: Path) -> list[dict]:
     return [by_step[step] for step in sorted(by_step)]
 
 
-def windows(rows: list[dict], batch_size: int) -> list[tuple[float, float | None]]:
-    """(seconds, mean board watts or None) for every logged window."""
-    out, previous = [], 0
-    for row in rows:
+def start_step(config: dict) -> int:
+    """The step a run's counter started from: 0, or N for a branch from a ckpt_<N>.pt."""
+    source = config.get("branched_from")
+    if not source:
+        return 0
+    match = _CHECKPOINT.match(PureWindowsPath(str(source)).name)  # the name, whichever separator
+    if match is None:
+        raise ValueError(f"branched_from {source!r} is not a ckpt_<step>.pt, so the branch step is unknown")
+    return int(match.group(1))
+
+
+def windows(rows: list[dict], batch_size: int, start: int = 0) -> list[tuple[float, float | None]]:
+    """(seconds, mean board watts or None) for every logged window after the run's start step."""
+    out, previous = [], start
+    for row in (r for r in rows if r["step"] > start):
         steps = row["step"] - previous
         previous = row["step"]
         power = row.get(POWER_FIELD)
@@ -148,10 +164,14 @@ def run_compute(run_dir: Path) -> RunCompute | Skipped:
     batch_size = config.get("config", {}).get("batch_size")
     if not batch_size:
         return Skipped(run_dir.name, "config.json has no config.batch_size")
+    try:
+        start = start_step(config)
+    except ValueError as exc:
+        return Skipped(run_dir.name, str(exc))
     rows = read_metrics(metrics_path)
     if not rows:
         return Skipped(run_dir.name, "metrics.jsonl has no complete rows")
-    spans = windows(rows, int(batch_size))
+    spans = windows(rows, int(batch_size), start)
     kwh, source = _kwh(run_dir, spans)
     return RunCompute(run_dir.name, rows[-1]["step"], sum(s for s, _ in spans) / 3600, kwh, source)
 

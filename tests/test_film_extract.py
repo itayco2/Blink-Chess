@@ -253,3 +253,17 @@ def test_milestones_mark_the_first_eval_step_whose_ema_top1_passes_each_rung(tmp
     with pytest.raises(extract.FilmError, match="LABEL=TOP1"):
         extract.parse_milestone("no equals sign")
     assert extract.parse_milestone("passed the MLP=0.21") == ("passed the MLP", 0.21)
+
+
+def test_gpu_hours_of_a_branched_run_start_at_its_branch_step(tmp_path):
+    """A preview branched at step 250 bills 250-500 as its own GPU time, not steps 0-500."""
+    run = tmp_path / "runs" / "long-preview"
+    run.mkdir(parents=True)
+    rows = [{"step": 500, "samples_per_s": 250 * 8 / 36.0}]
+    (run / "metrics.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    config = {
+        "config": {"batch_size": 8},
+        "branched_from": str(tmp_path / "runs" / "long" / "ckpt_000000250.pt"),
+    }
+    (run / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    assert extract.gpu_hours_by_step(run) == [(500, pytest.approx(0.01))]

@@ -200,11 +200,16 @@ def gpu_hours_by_step(run_dir: Path) -> list[tuple[int, float]]:
     metrics, config = Path(run_dir) / "metrics.jsonl", Path(run_dir) / "config.json"
     if not metrics.is_file() or not config.is_file():
         return []
-    batch = json.loads(config.read_text(encoding="utf-8")).get("config", {}).get("batch_size")
+    record = json.loads(config.read_text(encoding="utf-8"))
+    batch = record.get("config", {}).get("batch_size")
     if not batch:
         return []
-    rows = compute.read_metrics(metrics)
-    cumulative = np.cumsum([seconds for seconds, _ in compute.windows(rows, batch)]) / 3600
+    try:
+        start = compute.start_step(record)  # a branch counts from its parent's checkpoint step
+    except ValueError:
+        return []  # the branch step is unknown: no GPU-hours rather than the parent's counted twice
+    rows = [row for row in compute.read_metrics(metrics) if row["step"] > start]
+    cumulative = np.cumsum([seconds for seconds, _ in compute.windows(rows, batch, start)]) / 3600
     return [(row["step"], float(hours)) for row, hours in zip(rows, cumulative, strict=True)]
 
 
