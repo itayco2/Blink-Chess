@@ -188,6 +188,7 @@ def _prepare_out(out: Path, overwrite: bool) -> None:
         raise FileExistsError(
             f"{out} already holds a pack ({len(existing)} files); pass --overwrite to replace it"
         )
+    (out / MANIFEST).unlink(missing_ok=True)  # until the new one lands, the directory is not a pack
 
 
 def _remove_stale(out: Path, keep: set[str]) -> None:

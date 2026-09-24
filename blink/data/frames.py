@@ -15,6 +15,8 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any, NamedTuple
 
+import zstandard
+
 from blink.data import zst
 
 
@@ -49,7 +51,10 @@ def decode_frame(data: bytes) -> FrameText:
 
 def _work_on_frame(fn: Callable[[list[bytes]], Any], frame: zst.Frame) -> tuple[FrameText, FrameOutput]:
     start = time.perf_counter()
-    text = zst.decompress_frame(frame.data)
+    try:
+        text = zst.decompress_frame(frame.data)
+    except zstandard.ZstdError as exc:
+        raise zst.FormatError(f"cannot decompress the frame at offset {frame.offset}: {exc}") from None
     piece = split_text(text)
     decoded = time.perf_counter()
     result = fn(piece.lines)

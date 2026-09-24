@@ -143,3 +143,14 @@ def test_run_frames_reports_bytes_and_line_counts_per_frame(tmp_path):
     assert sum(out.result for out in outs) == 50
     assert sum(out.compressed for out in outs) == ends[-1] - zst.HEADER.size * len(ends)
     assert sum(out.decompressed for out in outs) == len(lines_text(lines))
+
+
+def test_a_corrupt_frame_is_reported_with_its_offset(tmp_path):
+    path = tmp_path / "db.jsonl.zst"
+    ends = write_pzstd(path, lines_text(_lines()), frame_bytes=1000)
+    data = bytearray(path.read_bytes())
+    start = ends[2] + zst.HEADER.size
+    data[start + 8 : start + 40] = bytes([0xFF]) * 32  # garble the block data behind a valid frame header
+    path.write_bytes(bytes(data))
+    with pytest.raises(zst.FormatError, match=f"offset {start}"):
+        _stitched(zst.FrameReader(path))

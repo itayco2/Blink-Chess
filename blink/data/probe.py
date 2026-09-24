@@ -32,7 +32,7 @@ OWN_KING = encode.OWN + chess.KING - 1
 CASTLING_MOVES = np.array(
     [moves.FROM_TO.index((chess.E1, chess.G1)), moves.FROM_TO.index((chess.E1, chess.C1))], dtype=np.uint16
 )
-FEN_FIELDS = re.compile(rb'"fen"\s*:\s*"(\S+) ([wb]) (\S+)')  # placement, side to move, castling
+FEN_FIELDS = re.compile(rb'"fen"\s*:\s*"([^\s"]+) ([wb]) ([^\s"]+)')  # placement, side to move, castling
 # What each standard castling right needs on the board; anything else is Chess960 (X-FEN or Shredder).
 STANDARD_RIGHTS = {
     "K": ((chess.E1, "K"), (chess.H1, "R")),

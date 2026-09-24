@@ -144,3 +144,17 @@ def test_an_unexpected_parser_exception_is_counted_not_swallowed(monkeypatch):
     parsed = pack.parse_lines([b"{}", b"{}"])
     assert parsed.errors == {"RuntimeError": 2}
     assert len(parsed.records) == 0 and parsed.error_samples
+
+
+def test_overwrite_removes_the_old_manifest_before_writing_any_shard(tmp_path, source, monkeypatch):
+    """A directory with a manifest is a complete pack: a crash mid-overwrite must not leave the old one."""
+    out = tmp_path / "out"
+    _pack(source, out)
+
+    def crash(*args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pack, "write_shards", crash)
+    with pytest.raises(OSError, match="disk full"):
+        _pack(source, out, overwrite=True)
+    assert not (out / "manifest.json").exists()

@@ -107,3 +107,8 @@ def test_probe_report_is_written_as_json_and_summarised(tmp_path, source):
     text = probe.summary(report)
     assert "lines" in text and "legal" in text and "lines/s" in text
     assert report["frames"] == 2 and report["end"] == "limit"
+
+
+def test_the_fen_pattern_stops_at_the_closing_quote():
+    fields = probe.FEN_FIELDS.search(b'{"fen":"r3k2r/8/8/8/8/8/8/R3K2R w KQkq","evals":[]}')
+    assert fields.groups() == (b"r3k2r/8/8/8/8/8/8/R3K2R", b"w", b"KQkq")
