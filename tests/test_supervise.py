@@ -9,11 +9,14 @@ second, and each test checks the verdict, the files it leaves and that the child
 import json
 import math
 import sys
+import time
+import types
 from pathlib import Path
 
 import psutil
 import pytest
 
+from blink import cli, heartbeat
 from blink.train import status, supervise
 
 FAKE_TRAINER = r"""
@@ -277,3 +280,57 @@ def test_train_args_get_the_run_name_and_refuse_another_one():
         supervise.train_argv(["train", "--run", "other"], "long")
     with pytest.raises(ValueError, match="train"):
         supervise.train_argv(["eval", "--run", "long"], "long")
+
+
+def test_the_supervise_command_wraps_blink_train_and_adds_the_run_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    argv = ["supervise", "--run", "long", "--dry-run", "--", "train", "--config", "configs/t.toml"]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.endswith("-m blink.cli train --config configs/t.toml --run long")
+
+
+def test_the_supervise_command_refuses_a_mismatched_run_and_an_unknown_rule(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    assert cli.main(["supervise", "--run", "long", "--", "train", "--run", "short"]) == 2
+    assert "--run short" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli.main(["supervise", "--run", "long", "--disable", "sleepy", "--", "train"])
+
+
+def test_the_supervise_command_runs_a_child_to_the_end(tmp_path, monkeypatch, capsys):
+    """A real `blink train` child that fails fast on a missing config: 3 crash resumes, then a stop."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    argv = [
+        "supervise",
+        "--run",
+        "r",
+        "--interval",
+        "0.2",
+        "--backoff",
+        "0",
+        "--",
+        "train",
+        "--config",
+        "nope.toml",
+    ]
+    code = cli.main([*argv, "--data", str(tmp_path)])
+    assert code == supervise.EXIT_STOPPED
+    record = supervise.read_record(tmp_path / "runs" / "r")
+    assert record["status"] == "stopped: crash, exit 2 after 3 restarts"
+    assert record["launch_command"]
+
+
+def test_a_momentarily_unreadable_heartbeat_is_not_a_stale_one(tmp_path):
+    """Found by this suite: a read that raced the trainer's os.replace once looked like a 1 s old run."""
+    run_dir = tmp_path / "runs" / "fake"
+    run_dir.mkdir(parents=True)
+    cfg = supervise.SuperviseConfig(heartbeat_stale_s=0.5, startup_grace_s=0.0)
+    sup = supervise.Supervisor(cfg, run_dir, ["python"], log=lambda _: None)
+    started = time.time() - 5.0
+    sup.child = supervise._Child(types.SimpleNamespace(pid=0, poll=lambda: None), ["python"], started)
+    heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 3})
+    sup._track_progress()
+    (run_dir / "heartbeat.json").write_text("{half a jso", encoding="utf-8")  # mid-replace
+    assert sup._check(time.time()) is None
+    assert supervise.heartbeat_verdict(None, started, time.time(), True, cfg).rule == "heartbeat"

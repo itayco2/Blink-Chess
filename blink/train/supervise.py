@@ -295,6 +295,7 @@ class _Child:
     started: float
     first_step: int | None = None
     progressed: bool = False
+    last_beat: float | None = None  # the newest heartbeat time read since this child started
 
 
 class Supervisor:
@@ -356,10 +357,16 @@ class Supervisor:
         self._write_record("running", "running")
 
     def _track_progress(self) -> None:
-        """Note the child's first fresh heartbeat step, and whether it has moved on since."""
+        """Note the child's newest heartbeat, its first step, and whether it has moved on since.
+
+        A heartbeat that cannot be read at this instant (the trainer is replacing it) changes nothing:
+        only beats that were read count, so a momentary lock never looks like a stale run.
+        """
         beat = heartbeat.read(self._path("heartbeat.json")) or {}
-        if float(beat.get("time", 0.0)) < self.child.started:
+        beat_time = float(beat.get("time", 0.0))
+        if beat_time < self.child.started:
             return
+        self.child.last_beat = max(self.child.last_beat or beat_time, beat_time)
         if self.child.first_step is None:
             self.child.first_step = beat.get("step")
         elif beat.get("step") != self.child.first_step:
@@ -382,12 +389,12 @@ class Supervisor:
             return self._nan(min(fresh_nan))
         if self.cfg.on("vaa") and vaa_steps(evals) - self.baseline_vaa:
             return self._finish("paused", None)
-        beat = heartbeat.read(self._path("heartbeat.json")) or {}
+        self._track_progress()
         child, cfg = self.child, self.cfg
         checks = (
             (
                 "heartbeat",
-                lambda: heartbeat_verdict(beat.get("time"), child.started, now, child.progressed, cfg),
+                lambda: heartbeat_verdict(child.last_beat, child.started, now, child.progressed, cfg),
             ),
             ("throughput", lambda: throughput_verdict(self._timed(rows, now), cfg)),
             ("clip", lambda: clip_verdict(rows, cfg)),
