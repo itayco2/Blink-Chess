@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Heavy artifacts never live in git (they sit under BLINK_HOME=D:\blink)
+*.pt
+*.safetensors
+*.onnx
+*.mp4
+*.zst
+*.npy
+*.npz
+
+# Site build inputs fetched at deploy time
+site/models/
+site/node_modules/
+
+# Secrets never live in the repo
+.env
+.env.*
+*.dpapi
+
+# Local-only working files
+STATUS.md
+post-draft.md
+uv.toml
+
+# Runs: only small, allowlisted summaries are ever tracked
+runs/**
+!runs/**/
+!runs/**/config.json

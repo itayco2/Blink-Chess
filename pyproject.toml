@@ -1,0 +1,75 @@
+[project]
+name = "blink-chess"
+version = "0.1.0"
+description = "Blink: a searchless chess transformer trained by supervised learning on the Lichess evaluation database."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Itay Cohen" }]
+dependencies = [
+    "numpy==2.5.3",
+    "zstandard==0.25.0",
+    "orjson==3.12.0",
+    "chess==1.11.2",
+    "psutil>=7",
+]
+
+[project.scripts]
+blink = "blink.cli:main"
+
+# Groups, not extras: uv syncs exactly, so an extra would be uninstalled by any plain `uv run`.
+# All three groups are on by default; the torch-free CI leg passes --no-group train --no-group compile.
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov>=7",
+    "ruff==0.16.8",
+]
+train = ["torch==2.14.0"]
+compile = ["triton-windows>=3.8,<3.9; sys_platform == 'win32'"]
+
+[tool.uv]
+default-groups = ["dev", "train", "compile"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "blink"
+module-root = ""
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "cuda: needs a CUDA GPU and the train extra",
+    "torch: needs the train extra (skipped on the torch-free CI leg)",
+    "local: needs files that only exist on the build machine",
+]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.coverage.run]
+source = ["blink"]

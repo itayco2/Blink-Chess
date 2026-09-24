@@ -1,0 +1,15 @@
+#!/bin/sh
+# Blocks a push if a Lichess token pattern exists anywhere in git history, not only in the
+# working tree: a token that was committed and then deleted is still public once pushed.
+# Enable once per clone with: git config core.hooksPath .githooks
+if git log -p --all | grep -E -q '(lip|lio)_[A-Za-z0-9]{16,}'; then
+    echo "pre-push: a Lichess token pattern is in git history. Push blocked. Rewrite history and revoke the token." >&2
+    exit 1
+fi
+
+if [ -x .venv/Scripts/python.exe ]; then PY=.venv/Scripts/python.exe; else PY=.venv/bin/python; fi
+if ! "$PY" -m pytest -q tests/test_repo_hygiene.py >/dev/null 2>&1; then
+    echo "pre-push: repo hygiene tests failed. Run: $PY -m pytest tests/test_repo_hygiene.py" >&2
+    exit 1
+fi
+exit 0
