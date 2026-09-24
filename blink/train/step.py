@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from blink.model.losses import mixed_losses
+from blink.model.value_mapping import LICHESS
 from blink.train.batch import make_batch, make_child_batch, take
 from blink.train.source import StepData
 
@@ -54,9 +55,14 @@ def accumulate(
     alpha: float,
     tau: float,
     lambda_v: float,
+    value_mapping: str = LICHESS,
 ) -> Accumulated:
-    """Backward over the whole step in passes of at most `micro` rows (0: one pass). Grads accumulate."""
-    roots, children = make_batch(data.roots, device), make_child_batch(data.children, device)
+    """Backward over the whole step in passes of at most `micro` rows (0: one pass). Grads accumulate.
+
+    `value_mapping` (train.value_mapping) picks the value targets of roots and children alike.
+    """
+    roots = make_batch(data.roots, device, value_mapping)
+    children = make_child_batch(data.children, device, value_mapping)
     root_w = _weights(data.root_weight, len(roots), device)
     child_w = _weights(data.child_weight, len(children), device)
     n_roots, rows = len(roots), len(roots) + len(children)

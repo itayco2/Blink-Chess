@@ -127,6 +127,28 @@ def test_onnx_matches_torch_within_1e_4(tiny, exported):
     assert report.max_abs_value <= 1e-4
 
 
+@pytest.mark.parametrize("bias", ["gab", "static_bias"])
+def test_a_blinknet_with_an_attention_bias_exports_and_matches_torch(bias, tmp_path):
+    """Recipe D's GAB-lite and a06's static bias both feed SDPA an attn_mask; traced with a fused CPU
+    kernel that failed to export ("Cannot view a tensor ...") until export traced the math backend."""
+    from train_helpers import tiny_model_config
+
+    from blink.export import onnx as export_onnx
+    from blink.export import positions
+    from blink.model.transformer import BlinkNet
+
+    torch.manual_seed(0)
+    model = BlinkNet(tiny_model_config(**{bias: True})).eval()
+    generator = torch.Generator().manual_seed(1)
+    with torch.no_grad():
+        for p in model.parameters():  # non-zero biases and heads, so the parity check means something
+            p.copy_(torch.randn(p.shape, generator=generator) * 0.05)
+    out = export_onnx.export(model, tmp_path / "model.onnx")
+    tokens = positions.encode_fens(positions.random_fens(64, seed=7))
+    report = export_onnx.compare(model, out, tokens, batch_size=32)
+    assert report.positions == 64 and report.passed, report
+
+
 def test_the_onnx_evaluator_returns_value_probabilities_that_sum_to_one(exported):
     from blink.export import evaluators, positions
 
