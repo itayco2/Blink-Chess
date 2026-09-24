@@ -6,8 +6,10 @@ a real model is asked for, so the harness and its tests run without torch. `rand
 `random-net`) selects the deterministic random-logit evaluator used to test the harness end to end.
 """
 
+import functools
 import importlib.util
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -78,3 +80,17 @@ class JsonlSink:
     def __call__(self, record: DecisionRecord) -> None:
         with open(self.path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.as_dict()) + "\n")
+
+
+def friendly(command: Callable[..., int]) -> Callable[..., int]:
+    """Wrap a CLI command so a missing model loader prints one clear line and exits 2, not a traceback."""
+
+    @functools.wraps(command)
+    def run(*args, **kwargs) -> int:
+        try:
+            return command(*args, **kwargs)
+        except ModelUnavailable as exc:
+            print(f"blink: {exc}", file=sys.stderr)
+            return 2
+
+    return run

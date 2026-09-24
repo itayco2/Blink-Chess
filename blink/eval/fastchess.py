@@ -171,7 +171,17 @@ def run_fastchess(command: Sequence[str], log: Path) -> int:
     return proc.returncode
 
 
-def run_gauntlet(
+@dataclass(frozen=True)
+class Gauntlet:
+    blink: EngineSpec
+    anchor: EngineSpec
+    plan: GauntletPlan
+
+    def command(self) -> list[str]:
+        return build_command(fastchess_exe(), self.blink, self.anchor, self.plan)
+
+
+def prepare_gauntlet(
     model: str,
     mode: str,
     device: str,
@@ -182,30 +192,41 @@ def run_gauntlet(
     concurrency: int = 5,
     max_moves: int = MAX_MOVES,
     tc: str | None = None,
-) -> dict:
-    """Play Blink against one SF19 anchor, then audit the PGN. Returns (and writes) a JSON report."""
+) -> Gauntlet:
+    """Blink against one SF19 anchor: engines, book slice and a fresh timestamped PGN under out_dir."""
     blink_spec = blink_engine(model, mode, device)
     anchor_spec = stockfish_anchor(anchor, stockfish_exe())
     if tc:
         blink_spec, anchor_spec = with_tc(blink_spec, tc), with_tc(anchor_spec, tc)
     book_path, start = _book_start(book, games // 2)
     pgn = out_dir / f"{blink_spec.name}_vs_{anchor_spec.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn"
-    plan = GauntletPlan(games, book_path, start, concurrency, pgn, max_moves)
-    command = build_command(fastchess_exe(), blink_spec, anchor_spec, plan)
+    return Gauntlet(
+        blink_spec, anchor_spec, GauntletPlan(games, book_path, start, concurrency, pgn, max_moves)
+    )
+
+
+def execute(gauntlet: Gauntlet) -> dict:
+    """Run fastchess, then audit its PGN. Writes <pgn>.log, <pgn>.nosearch.json and returns the report."""
+    pgn = gauntlet.plan.pgn_out
+    command = gauntlet.command()
     started = time.perf_counter()
     returncode = run_fastchess(command, pgn.with_suffix(".log"))
     audit = nosearch.audit([pgn]) if pgn.is_file() else nosearch.audit([])
-    report = {
-        "blink": blink_spec.name,
-        "anchor": anchor_spec.name,
+    nosearch.write_report(audit, pgn.with_suffix(".nosearch.json"))
+    return {
+        "blink": gauntlet.blink.name,
+        "anchor": gauntlet.anchor.name,
         "command": command,
         "returncode": returncode,
         "seconds": round(time.perf_counter() - started, 1),
         "pgn": str(pgn),
         "summary": parse_summary(pgn.with_suffix(".log").read_text(encoding="utf-8", errors="replace")),
         "audit": audit,
-        "blink_forfeits": audit["forfeits"].get(blink_spec.name, {}),
-        "anchor_forfeits": audit["forfeits"].get(anchor_spec.name, {}),
+        "blink_forfeits": audit["forfeits"].get(gauntlet.blink.name, {}),
+        "anchor_forfeits": audit["forfeits"].get(gauntlet.anchor.name, {}),
     }
-    nosearch.write_report(audit, pgn.with_suffix(".nosearch.json"))
-    return report
+
+
+def run_gauntlet(**kwargs) -> dict:
+    """prepare_gauntlet(**kwargs), then execute it."""
+    return execute(prepare_gauntlet(**kwargs))
