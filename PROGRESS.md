@@ -2,9 +2,9 @@
 
 The public checklist. Numbers appear here only once they are measured.
 
-- [ ] P0 Environment, doctor, scaffold
-- [ ] P1 Walking skeleton and the contract
-- [ ] P2 Full data pack
+- [x] P0 Environment, doctor, scaffold (RTX 3070: torch 2.14 cu130, bf16, efficient SDPA; eval DB sha256 verified)
+- [x] P1 Walking skeleton and the contract (policy loss 7.54 to 2.94 in 3,000 steps; 0 no-search violations)
+- [ ] P2 Full data pack (blocklist of 636,245 positions built; games10k labelling)
 - [ ] P3 Baseline ladder (rungs 0 to 3)
 - [ ] P4 Scale-up, dashboard, benchmark
 - [ ] P5 Recipe ablations and the s10m rung
