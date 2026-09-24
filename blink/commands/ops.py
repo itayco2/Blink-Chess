@@ -649,9 +649,7 @@ def _register_lichess(sub: argparse._SubParsersAction) -> None:
     for parser in (check, watcher):
         parser.add_argument("--bot", required=True)
         parser.add_argument("--window", type=_positive(int), default=50)
-        parser.add_argument(
-            "--pgn-dir", help="lichess-bot's PGNs, for aborted games (default BLINK_HOME/lichess/pgn)"
-        )
+        parser.add_argument("--pgn-dir", help="the PGNs lichess-bot saves (default BLINK_HOME/lichess/pgn)")
         _pause_options(parser, timeout=0.0)  # a stop-rule pause never waits for the live game
     stop = actions.add_parser("pause", help="flag, wait for no live game, then stop the bot by PID")
     stop.add_argument("--bot", required=True)
