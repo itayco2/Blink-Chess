@@ -421,11 +421,13 @@ def cmd_sweep_rescore(args: argparse.Namespace) -> int:
 
 
 def cmd_sweep_sizes(args: argparse.Namespace) -> int:
-    from blink.train import sweep
+    from blink.train import size_sweep, sweep
 
     try:
         sizes = [s for s in (args.sizes or "").split(",") if s] or None
-        setup = sweep.load_size_sweep(_repo_config(args.config, "sweep.toml"), sizes=sizes, hours=args.hours)
+        setup = size_sweep.load_size_sweep(
+            _repo_config(args.config, "sweep.toml"), sizes=sizes, hours=args.hours
+        )
         bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep sizes: {exc}", file=sys.stderr)
@@ -437,7 +439,7 @@ def cmd_sweep_sizes(args: argparse.Namespace) -> int:
 
     out = _home_eval("sweep.json", args.out)
     rules = nstar.load_rules(_repo_config(args.config, "sweep.toml"))
-    report = sweep.run_sizes(setup, bench, out, sweep.supervised_runner(_say), log=_say, rules=rules)
+    report = size_sweep.run_sizes(setup, bench, out, sweep.supervised_runner(_say), log=_say, rules=rules)
     for size, entry in report["sizes"].items():
         _say(f"  {size}: {entry['status']}, VAA {entry.get('vaa')}, {entry.get('samples_per_s')} samples/s")
     return 0

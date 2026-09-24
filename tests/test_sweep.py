@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from blink import cli, heartbeat
-from blink.train import nstar, sweep
+from blink.train import nstar, size_sweep, sweep
 from blink.train.supervise import Outcome
 
 REPO = Path(__file__).resolve().parent.parent
@@ -671,11 +671,11 @@ def test_the_size_sweep_skips_a_conditional_size_below_the_epoch_floor(tmp_path,
         (tmp_path / f"{size}.toml").write_text(BASE, encoding="utf-8")
     bench = _bench({"s": 9000.0, "m": 3000.0, "l": 1200.0}, {"s": 10.0, "m": 20.0, "l": 30.0})
     runner = SizeRunner(tmp_path / "home")
-    setup = sweep.SizeSweep(
+    setup = size_sweep.SizeSweep(
         sizes=("s", "m", "l"), conditional=("l",), hours=0.01, recipe=None, data=tmp_path, config_dir=tmp_path
     )
     out = tmp_path / "sweep.json"
-    report = sweep.run_sizes(setup, bench, out, runner=runner, log=lambda _: None)
+    report = size_sweep.run_sizes(setup, bench, out, runner=runner, log=lambda _: None)
     assert [r.run for r in runner.requests] == ["size-s", "size-m"]
     assert report["sizes"]["l"]["status"].startswith("not run: fails the epoch floor")
     assert report["sizes"]["m"]["vaa"] == 0.54 and report["sizes"]["m"]["samples_per_s"] == 3000.0
@@ -789,10 +789,10 @@ def test_the_size_sweep_plans_each_size_at_its_own_compile_modes_rate(tmp_path, 
     bench = json.loads(
         _two_mode_bench(tmp_path / "bench.json", "m", 3000.0, 4500.0).read_text(encoding="utf-8")
     )
-    setup = sweep.SizeSweep(
+    setup = size_sweep.SizeSweep(
         sizes=("m",), conditional=(), hours=0.01, recipe=None, data=tmp_path, config_dir=tmp_path
     )
     runner = SizeRunner(tmp_path / "home")
-    report = sweep.run_sizes(setup, bench, tmp_path / "sweep.json", runner=runner, log=lambda _: None)
+    report = size_sweep.run_sizes(setup, bench, tmp_path / "sweep.json", runner=runner, log=lambda _: None)
     assert report["sizes"]["m"]["samples_per_s"] == 3000.0 and report["sizes"]["m"]["compile"] == "off"
     assert runner.requests[0].bench_rate == 3000.0
