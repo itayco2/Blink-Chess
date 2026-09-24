@@ -122,12 +122,20 @@ def _layout(root: Path) -> tuple[list[Path], list[Path], Path]:
     return skeleton, [], root / "val.bin"
 
 
-def _world(manifest_bytes: bytes, manifest: dict[str, Any]) -> str:
-    return manifest.get("world") or world_id(
-        hashlib.sha1(manifest_bytes).hexdigest(),
-        manifest.get("blocklist_sha", NO_BLOCKLIST),
-        manifest.get("split_rule", SPLIT_RULE),
-    )
+def pack_world(manifest_bytes: bytes, manifest: dict[str, Any]) -> str:
+    """WORLD of a pack: sha1(contract, manifest sha, blocklist sha, split rule and salt)[:12].
+
+    A v1 manifest names its blocklist as {"sha256": ...} and its test_grouped salt under "grouped";
+    the P1 skeleton manifest has neither (blocklist null), so its world is unchanged."""
+    if manifest.get("world"):
+        return manifest["world"]
+    blocklist = manifest.get("blocklist")
+    blocklist_sha = blocklist.get("sha256", NO_BLOCKLIST) if isinstance(blocklist, dict) else NO_BLOCKLIST
+    split_rule = manifest.get("split_rule", SPLIT_RULE)
+    salt = (manifest.get("grouped") or {}).get("salt")
+    if salt is not None:
+        split_rule = f"{split_rule}; grouped salt {salt}"
+    return world_id(hashlib.sha1(manifest_bytes).hexdigest(), blocklist_sha, split_rule)
 
 
 def _shard_plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
@@ -160,7 +168,7 @@ def _shard_plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:
         "val_records": 0 if val is None else len(val),
     }
     source = mixed_source(root_stream, child_stream, _weigher(manifest, cfg))
-    return DataPlan(source, val, _world(manifest_bytes, manifest), description, _probe(args, root))
+    return DataPlan(source, val, pack_world(manifest_bytes, manifest), description, _probe(args, root))
 
 
 def plan(args: argparse.Namespace, cfg: TrainConfig) -> DataPlan:

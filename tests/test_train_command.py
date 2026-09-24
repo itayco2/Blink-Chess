@@ -197,6 +197,22 @@ def test_a_v1_pack_mixes_root_and_child_shards_with_the_manifest_weights(
     assert all("ema_vaa" in row for row in evals) and "vaa" in evals[-1] and evals[-1]["vaa_n"] == 12
 
 
+def test_a_v1_world_names_the_packs_blocklist_sha_and_grouped_salt():
+    """WORLD = sha1(contract, manifest sha, blocklist sha, split rule and salt): the v1 keys feed it."""
+    import hashlib
+
+    from blink.commands.train_data import pack_world
+    from blink.train.world import NO_BLOCKLIST, world_id
+
+    v1 = {"blocklist": {"sha256": "ab" * 32}, "grouped": {"salt": 7}, "split_rule": "rule"}
+    raw = json.dumps(v1).encode("utf-8")
+    sha = hashlib.sha1(raw).hexdigest()
+    assert pack_world(raw, v1) == world_id(sha, "ab" * 32, "rule; grouped salt 7")
+    skeleton = {"blocklist": None, "split_rule": "rule"}  # the P1 layout keeps its world
+    assert pack_world(raw, skeleton) == world_id(sha, NO_BLOCKLIST, "rule")
+    assert pack_world(raw, {**v1, "world": "fixedworld12"}) == "fixedworld12"
+
+
 def test_a_config_with_children_is_refused_on_a_pack_without_child_shards(
     home, tmp_path, fake_loader, capsys
 ):
