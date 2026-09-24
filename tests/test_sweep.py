@@ -290,8 +290,14 @@ class SizeRunner(FakeRunner):
 
 
 def test_sweep_choose_command_reads_bench_and_sweep_json(tmp_path, capsys):
+    """The command judges sizes at the compile mode the repo's recipe trains in (PF66)."""
+    from blink.model.config import compile_mode, read_tables
+
+    mode = compile_mode(read_tables(sweep.CONFIG_DIR / "recipe.toml"))
+    data = _bench({"s": 9000.0, "m": 3000.0}, {"s": 10.0, "m": 20.0})
+    data["throughput"] = [{**row, "compile": mode} for row in data["throughput"]]
     bench = tmp_path / "bench.json"
-    bench.write_text(json.dumps(_bench({"s": 9000.0, "m": 3000.0}, {"s": 10.0, "m": 20.0})), encoding="utf-8")
+    bench.write_text(json.dumps(data), encoding="utf-8")
     sizes = tmp_path / "sweep.json"
     sizes.write_text(json.dumps({"sizes": {"s": {"vaa": 0.50}, "m": {"vaa": 0.52}}}), encoding="utf-8")
     argv = ["sweep", "choose", "--bench", str(bench), "--sweep", str(sizes), "--sigma", "0.005"]

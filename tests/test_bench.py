@@ -1,6 +1,7 @@
 """`blink bench throughput|loader|play`: measured numbers into bench.json (plan P4)."""
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -225,3 +226,48 @@ def test_best_rates_for_a_compile_mode_use_only_rows_measured_in_that_mode():
     assert bench.best_rates(data)["s"]["samples_per_s"] == 9938.0
     assert bench.best_rates(data, compile="off")["s"]["samples_per_s"] == 5494.0
     assert bench.best_rates(data, compile="inductor")["s"]["samples_per_s"] == 9938.0
+
+
+class _Shared:
+    """Stands in for the parent's shared start time (a multiprocessing Value)."""
+
+    value = 0.0
+
+
+def test_the_start_signal_goes_out_only_when_every_worker_is_warm():
+    """PF67: multiprocessing.Barrier died with WinError 5 at 5 CUDA processes; a start time replaced it."""
+    import queue
+
+    messages, start_at = queue.Queue(), _Shared()
+    for item in [("ready", 1), ("ready", 2), ("ok", [0.1]), ("ready", 3), ("ok", [0.2]), ("ok", [0.3])]:
+        messages.put(item)
+    replies = bench._collect_replies(messages, start_at, workers=3, timeout_s=1.0)
+    assert [kind for kind, _ in replies] == ["ok", "ok", "ok"] and start_at.value > 0
+
+
+def test_a_worker_that_fails_before_the_start_aborts_the_others():
+    import queue
+
+    messages, start_at = queue.Queue(), _Shared()
+    for item in [("ready", 1), ("error", "CUDA error"), ("error", "aborted"), ("error", "aborted")]:
+        messages.put(item)
+    replies = bench._collect_replies(messages, start_at, workers=3, timeout_s=1.0)
+    assert start_at.value == bench.ABORT and [kind for kind, _ in replies] == ["error"] * 3
+
+
+def test_a_waiting_worker_starts_at_the_signal_or_stops_on_abort():
+    start_at = _Shared()
+    start_at.value = time.time() + 0.05
+    before = time.time()
+    bench._wait_for_start(start_at, timeout_s=5.0)
+    assert time.time() - before >= 0.04
+    start_at.value = bench.ABORT
+    with pytest.raises(RuntimeError, match="another play worker failed"):
+        bench._wait_for_start(start_at, timeout_s=5.0)
+
+
+def test_five_play_processes_start_together_and_report_every_latency(tiny_config):
+    specs = [bench.PlaySpec("tiny", tiny_config, rows=3, concurrency=5, iters=4, warmup=1, device="cpu")]
+    (row,) = bench.run_play(specs, log=lambda _: None)
+    assert row.get("error") is None, row.get("error")
+    assert row["latencies"] == 5 * 4
