@@ -2,9 +2,13 @@
 
 The dynamo exporter writes weights to a side file by default (external_data=True, PF29), which a
 static site cannot serve as one fetch, so external_data=False is passed and then checked on the file.
+The file is written as <name>.tmp, checked, and only then moved onto its name with os.replace, so a
+killed or failed export never leaves a partial model where `blink site serve` would find it.
 """
 
 import math
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,21 +50,35 @@ def export(module, out: Path) -> Path:
     module = module.eval()
     example = torch.zeros((EXAMPLE_BATCH, 64), dtype=torch.long)
     batch = torch.export.Dim("batch", min=1, max=MAX_BATCH)
+
+    def write(path: Path) -> None:
+        torch.onnx.export(
+            module,
+            (example,),
+            str(path),
+            dynamo=True,
+            opset_version=OPSET,
+            external_data=False,
+            input_names=[INPUT_NAME],
+            output_names=list(OUTPUT_NAMES),
+            dynamic_shapes=({0: batch},),
+            optimize=True,
+            verbose=False,
+        )
+
+    return write_checked(out, write)
+
+
+def write_checked(out: Path, write: Callable[[Path], None]) -> Path:
+    """`write` fills <out>.tmp; the file replaces `out` only once check_self_contained passes on it."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        module,
-        (example,),
-        str(out),
-        dynamo=True,
-        opset_version=OPSET,
-        external_data=False,
-        input_names=[INPUT_NAME],
-        output_names=list(OUTPUT_NAMES),
-        dynamic_shapes=({0: batch},),
-        optimize=True,
-        verbose=False,
-    )
-    check_self_contained(out)
+    tmp = out.with_name(out.name + ".tmp")
+    try:
+        write(tmp)
+        check_self_contained(tmp)
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
     return out
 
 
@@ -68,7 +86,10 @@ def check_self_contained(path: Path) -> int:
     """The ai.onnx opset of a file that holds every weight inline; raises ExportError otherwise."""
     import onnx
 
-    model = onnx.load(str(path), load_external_data=False)
+    try:
+        model = onnx.load(str(path), load_external_data=False)
+    except Exception as exc:  # onnx raises protobuf's DecodeError (and others) on a truncated file
+        raise ExportError(f"{path.name} is not a readable ONNX file: {exc}") from exc
     opsets = {entry.domain or "ai.onnx": entry.version for entry in model.opset_import}
     if opsets.get("ai.onnx") != OPSET:
         raise ExportError(f"{path.name}: ai.onnx opset {opsets.get('ai.onnx')}, expected {OPSET}")

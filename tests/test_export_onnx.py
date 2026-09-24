@@ -61,6 +61,43 @@ def test_export_is_one_self_contained_file(exported):
     assert all(len(t.external_data) == 0 for t in model.graph.initializer)
 
 
+def test_an_export_that_dies_mid_write_leaves_the_previous_model_in_place(tmp_path):
+    from blink.export import onnx as export_onnx
+
+    out = tmp_path / "model.onnx"
+    out.write_bytes(b"previous model")
+
+    def killed_mid_write(path):
+        path.write_bytes(b"half a model")
+        raise RuntimeError("the exporter died")
+
+    with pytest.raises(RuntimeError, match="died"):
+        export_onnx.write_checked(out, killed_mid_write)
+    assert out.read_bytes() == b"previous model"
+    assert [p.name for p in tmp_path.iterdir()] == ["model.onnx"]
+
+
+def test_a_written_file_that_fails_the_check_never_replaces_the_destination(tmp_path):
+    from blink.export import onnx as export_onnx
+
+    out = tmp_path / "model.onnx"
+    out.write_bytes(b"previous model")
+    with pytest.raises(export_onnx.ExportError, match="not a readable ONNX file"):
+        export_onnx.write_checked(out, lambda path: path.write_bytes(b"not an onnx file"))
+    assert out.read_bytes() == b"previous model"
+    assert [p.name for p in tmp_path.iterdir()] == ["model.onnx"]
+
+
+def test_a_checked_export_replaces_the_destination_in_one_step(tiny, exported, tmp_path):
+    from blink.export import onnx as export_onnx
+
+    out = tmp_path / "model.onnx"
+    out.write_bytes(b"previous model")
+    export_onnx.write_checked(out, lambda path: path.write_bytes(exported.read_bytes()))
+    assert out.read_bytes() == exported.read_bytes()
+    assert [p.name for p in tmp_path.iterdir()] == ["model.onnx"]
+
+
 def test_the_exported_graph_takes_int64_tokens_with_a_dynamic_batch(exported):
     model = onnx.load(str(exported), load_external_data=False)
     (tokens,) = model.graph.input
