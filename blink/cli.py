@@ -1,11 +1,18 @@
-"""The `blink` command: one task runner for Windows and Linux (it replaces make)."""
+"""The `blink` command: one task runner for Windows and Linux (it replaces make).
+
+Each area registers its own subcommands from a module in blink/commands/ that exposes
+`register(subparsers)`. Areas that do not exist yet are simply absent from --help.
+"""
 
 import argparse
+import importlib
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from blink import checks
+
+COMMAND_MODULES = ("data", "train", "dashboard", "play", "evaluate", "export", "site")
 
 
 def configure_stdio() -> None:
@@ -46,10 +53,7 @@ def _cmd_heartbeat_probe(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="blink", description="Blink: a searchless chess transformer.")
-    sub = parser.add_subparsers(dest="command", required=True)
-
+def _register_core(sub: argparse._SubParsersAction) -> None:
     doctor = sub.add_parser("doctor", help="report this machine's facts and check them")
     doctor.add_argument("--create-layout", action="store_true", help="create the BLINK_HOME subdirectories")
     doctor.set_defaults(func=_cmd_doctor)
@@ -64,6 +68,20 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--minutes", type=float, default=20.0)
     probe.add_argument("--interval", type=float, default=10.0)
     probe.set_defaults(func=_cmd_heartbeat_probe)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="blink", description="Blink: a searchless chess transformer.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    _register_core(sub)
+    for name in COMMAND_MODULES:
+        try:
+            module = importlib.import_module(f"blink.commands.{name}")
+        except ModuleNotFoundError as exc:
+            if exc.name == f"blink.commands.{name}":
+                continue  # this area is not built yet
+            raise
+        module.register(sub)
     return parser
 
 
