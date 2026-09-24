@@ -476,8 +476,6 @@ def default_runners() -> dict[str, Runner]:
 
 # ------------------------------------------------------------------------------ results/results.json
 
-LADDER_NAMES = ("Random", "Material", "Linear", "MLP")
-
 
 def row_kind(agent: str) -> str:
     if agent.startswith("Blink"):
@@ -495,10 +493,22 @@ def final_slice_pgns(state: dict) -> list[str]:
     return [*e5.get("final_slice_pgns", []), *e6.get("pgns", []), *e7.get("final_slice_pgns", [])]
 
 
+def _blink_puzzles(agent: str) -> dict:
+    """What `blink eval puzzles --model <m>` wrote for a Blink-<mode>-<model> agent, if it ran."""
+    _, mode, tag = agent.split("-", 2)
+    path = paths.home() / "eval" / "puzzles" / f"puzzles_dm10k_{tag}_{mode}.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
 def _puzzle_fields(agent: str, state: dict) -> dict:
-    if row_kind(agent) != "reference":
+    """DeepMind's 10K puzzles for a row: DM-9M from E0, a Blink agent from `blink eval puzzles`."""
+    kind = row_kind(agent)
+    if kind == "reference":
+        done = (state.get("E0") or {}).get("dm_puzzles") or {}
+    elif kind == "blink" and agent.count("-") >= 2:
+        done = _blink_puzzles(agent)
+    else:
         return {}
-    done = (state.get("E0") or {}).get("dm_puzzles") or {}
     if "accuracy" not in done:
         return {}
     low, high = done["wilson95"]

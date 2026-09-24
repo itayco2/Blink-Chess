@@ -283,3 +283,15 @@ def test_the_sf_self_check_fails_on_any_forfeit_even_at_50_percent():
     )
     assert forfeited["within_band"] and not forfeited["passed"]
     assert not orchestrate.selfcheck_verdict({"score": 0.60, "audit": {"forfeits": {}}})["passed"]
+
+
+def test_a_blink_row_takes_its_puzzle_score_from_blink_eval_puzzles(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    folder = tmp_path / "eval" / "puzzles"
+    folder.mkdir(parents=True)
+    done = {"accuracy": 0.8, "wilson95": [0.79, 0.81]}
+    (folder / "puzzles_dm10k_ship_value.json").write_text(json.dumps(done), encoding="utf-8")
+    fields = orchestrate._puzzle_fields("Blink-value-ship", {})
+    assert fields["dm_puzzles_pct"] == pytest.approx(80.0)
+    assert fields["dm_puzzles_ci"] == pytest.approx((79.0, 81.0))
+    assert orchestrate._puzzle_fields("Blink-policy-ship", {}) == {}
