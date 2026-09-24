@@ -108,7 +108,9 @@ def test_blink_gauntlet_dry_run_with_a_dm_selector_prints_deepminds_engine(tmp_p
     assert cli.main([*args, "--book", str(tmp_path / "book.pgn"), "--out", str(tmp_path)]) == 0
     printed = capsys.readouterr().out
     assert "name=DM-9M" in printed and "--model=dm:9M" in printed
-    assert "Blink-" not in printed and "--mode=" not in printed
+    # Check the engine-name field, not the whole text: the checkout path contains the repo name
+    # "Blink-Chess" on CI (PF63).
+    assert "name=Blink-" not in printed and "--mode=" not in printed
 
 
 def test_blink_gauntlet_with_a_dm_selector_reports_deepminds_moves(
@@ -122,7 +124,7 @@ def test_blink_gauntlet_with_a_dm_selector_reports_deepminds_moves(
     printed = capsys.readouterr().out
     assert printed.startswith("DM-9M vs SF1320: games 1")
     assert "DM-9M forfeits {}" in printed and "no-search decisions 2, violations 0" in printed
-    assert "Blink" not in printed
+    assert "Blink-policy" not in printed and "Blink-value" not in printed
 
 
 @pytest.mark.local

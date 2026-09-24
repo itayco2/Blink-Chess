@@ -89,6 +89,63 @@ def _row(size, micro, rate, peak, compile="off", oom=False, error=None):
     return dict(zip(keys, (size, micro, rate, peak, compile, oom, error), strict=True))
 
 
+def test_a_recipe_with_clip_auto_benchmarks_without_error(tmp_path):
+    """PF64: the recipe's clip_norm = "auto" reached clip_grad_norm_ as a string and every row errored."""
+    config = tmp_path / "auto.toml"
+    config.write_text(TINY + 'clip_norm = "auto"\n', encoding="utf-8")
+    spec = bench.ThroughputSpec("auto", config, micro=8, compile="off", steps=1, warmup=1, device="cpu")
+    row = bench.measure_throughput(spec)
+    assert row["error"] is None and row["samples_per_s"] > 0
+
+
+@pytest.mark.cuda
+def test_the_cudagraphs_backend_trains_several_steps_in_the_bench(tiny_config):
+    """PF64: with accumulation, a .grad that keeps the graph's output is overwritten by the next replay."""
+    spec = bench.ThroughputSpec(
+        "tiny", tiny_config, micro=16, compile="cudagraphs", steps=3, warmup=2, effective_batch=64
+    )
+    row = bench.measure_throughput(spec)
+    assert row["error"] is None, row["error"]
+    assert row["spilled"] is False and 0 < row["peak_reserved_gb"] < row["vram_total_gb"]
+
+
+@pytest.mark.cuda
+def test_cuda_graph_gradients_over_accumulated_micro_batches_match_eager_ones(tiny_config):
+    """Our own .grad buffers must hold this step's sum, not a replay's overwritten output."""
+    import copy
+
+    from blink.model.config import load_config
+    from blink.model.transformer import BlinkNet
+    from blink.train.batch import make_batch
+
+    cfg = load_config(tiny_config)
+    torch.manual_seed(0)
+    eager = BlinkNet(cfg.model).cuda()
+    graphed = copy.deepcopy(eager)
+    batch = make_batch(bench.synthetic_records(16, seed=1), torch.device("cuda"))
+    frozen = torch.optim.SGD(graphed.parameters(), lr=0.0)  # the step leaves both models equal
+    step_model = bench._compiled(graphed, "cudagraphs")
+    for _ in range(3):
+        bench._train_step(step_model, frozen, batch, 2, cfg, "cuda", float("inf"), graphs=True)
+    bench._train_step(
+        eager, torch.optim.SGD(eager.parameters(), lr=0.0), batch, 2, cfg, "cuda", float("inf"), False
+    )
+    for (name, a), b in zip(eager.named_parameters(), graphed.parameters(), strict=True):
+        torch.testing.assert_close(b.grad, a.grad, rtol=2e-2, atol=1e-4, msg=name)
+
+
+def test_a_peak_above_the_cards_vram_is_a_spill_into_system_memory():
+    """PF64: with the driver's sysmem fallback a row that should OOM runs slowly instead (16.7 GiB on 8)."""
+    assert bench.spilled(peak_gb=16.66, total_gb=8.0) is True
+    assert bench.spilled(peak_gb=7.9, total_gb=8.0) is False
+    assert bench.spilled(peak_gb=None, total_gb=8.0) is False
+
+
+def test_best_rates_never_pick_a_spilled_row_even_without_a_budget():
+    rows = [_row("m", 256, 900.0, 3.0), {**_row("m", 512, 5000.0, 16.7), "spilled": True}]
+    assert bench.best_rates({"throughput": rows})["m"]["micro"] == 256
+
+
 def test_best_rates_skip_oom_errors_small_micro_batches_and_rows_over_the_vram_budget():
     rows = [
         _row("m", 128, 9000.0, 1.0),

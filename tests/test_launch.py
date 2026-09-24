@@ -143,6 +143,13 @@ def test_ps_rows_show_each_blink_process_with_its_heartbeat(tmp_path):
     assert "long" in text and "12 s ago" in text
 
 
+def test_a_windows_path_to_blink_exe_is_recognised_on_any_os():
+    """PF63: pathlib on Linux does not split backslashes, so CI missed C:\\...\\blink.exe."""
+    assert launch.is_blink([r"C:\v\Scripts\blink.exe", "heartbeat-probe"])
+    assert launch.is_blink(["/home/u/.venv/bin/blink-uci", "--mode", "policy"])
+    assert not launch.is_blink([r"C:\Windows\notepad.exe", "blink.txt"])
+
+
 def test_ps_finds_a_real_blink_process(tmp_path):
     out = tmp_path / "hb.json"
     argv = [sys.executable, "-m", "blink.cli", "heartbeat-probe", "--out", str(out), "--minutes", "0.05"]

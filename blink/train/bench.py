@@ -93,19 +93,32 @@ def _compiled(model, mode: str):
     return torch.compile(model) if mode == "inductor" else torch.compile(model, backend="cudagraphs")
 
 
-def _train_step(model, optimizer, batch, accum: int, cfg, device_type: str):
-    """One optimizer step over `accum` micro-batches, as the trainer does: bf16 autocast, clip, AdamW."""
+def _train_step(model, optimizer, batch, accum: int, cfg, device_type: str, clip: float, graphs: bool):
+    """One optimizer step over `accum` micro-batches, as the trainer does: bf16 autocast, clip, AdamW.
+
+    `clip` is GradClip.limit(): with clip_norm = "auto" that is infinity, as in the trainer's warmup,
+    and clip_grad_norm_ does the same work for any limit. Under CUDA graphs every replay reuses the
+    graph's memory: a .grad left as None would keep the graph's own output, which the next
+    micro-batch overwrites. So the gradients are our own zeroed buffers that backward adds into, and
+    each micro-batch is marked as a new step before it runs.
+    """
     import torch
 
     from blink.model.losses import compute_losses
 
-    optimizer.zero_grad(set_to_none=True)
+    if graphs:
+        for param in model.parameters():
+            if param.grad is None:
+                param.grad = torch.zeros_like(param)
+    optimizer.zero_grad(set_to_none=not graphs)
     for _ in range(accum):
+        if graphs:
+            torch.compiler.cudagraph_mark_step_begin()
         with torch.autocast(device_type, dtype=torch.bfloat16, enabled=device_type == "cuda"):
             policy, value = model(batch.tokens)
         loss_policy, loss_value = compute_losses(policy, value, batch, cfg.alpha, cfg.tau)
         ((loss_policy + cfg.lambda_v * loss_value) / accum).backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip_norm)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     optimizer.step()
     return loss_policy.detach() + cfg.lambda_v * loss_value.detach()
 
@@ -123,6 +136,7 @@ def _timed_steps(spec: ThroughputSpec) -> dict[str, Any]:
     from blink.model.config import load_config
     from blink.model.transformer import BlinkNet, count_parameters
     from blink.train.batch import make_batch
+    from blink.train.clipping import GradClip
     from blink.train.loop import build_optimizer
 
     cfg = load_config(spec.config)
@@ -132,13 +146,20 @@ def _timed_steps(spec: ThroughputSpec) -> dict[str, Any]:
     step_model = _compiled(model, spec.compile)
     batch = make_batch(synthetic_records(spec.micro, seed=spec.micro), device)
     accum = max(1, spec.effective_batch // spec.micro)
+    step_args = (
+        accum,
+        cfg,
+        device.type,
+        GradClip(cfg.clip_norm, cfg.warmup_steps).limit(),
+        spec.compile == "cudagraphs",
+    )
     started = time.perf_counter()
     for _ in range(spec.warmup):
-        _train_step(step_model, optimizer, batch, accum, cfg, device.type)
+        _train_step(step_model, optimizer, batch, *step_args)
     _sync(device)
     warm = time.perf_counter()
     for _ in range(spec.steps):
-        loss = _train_step(step_model, optimizer, batch, accum, cfg, device.type)
+        loss = _train_step(step_model, optimizer, batch, *step_args)
     _sync(device)
     elapsed = time.perf_counter() - warm
     samples = spec.steps * accum * spec.micro
@@ -168,6 +189,11 @@ def _release() -> None:
     torch._dynamo.reset()
 
 
+def spilled(peak_gb: float | None, total_gb: float) -> bool:
+    """Reserved past the card's own VRAM: the driver's sysmem fallback paged it to system RAM (PF64)."""
+    return peak_gb is not None and peak_gb > total_gb
+
+
 def measure_throughput(spec: ThroughputSpec) -> dict[str, Any]:
     """One row. Never raises for a failed configuration: the failure is the row's result."""
     import torch
@@ -192,6 +218,8 @@ def measure_throughput(spec: ThroughputSpec) -> dict[str, Any]:
         row.update(oom=_is_oom(exc), error=f"{type(exc).__name__}: {exc}"[:300], samples_per_s=0.0)
     finally:
         row["peak_reserved_gb"] = torch.cuda.max_memory_reserved() / GIB if on_cuda else None
+        row["vram_total_gb"] = torch.cuda.get_device_properties(0).total_memory / GIB if on_cuda else None
+        row["spilled"] = on_cuda and spilled(row["peak_reserved_gb"], row["vram_total_gb"])
         _release()
     return row
 
@@ -206,6 +234,7 @@ def run_throughput(specs: Sequence[ThroughputSpec], log: Log = print) -> list[di
         log(
             f"{spec.size} micro {spec.micro} compile {spec.compile}: {state}"
             + ("" if peak is None else f", peak reserved {peak:.2f} GiB")
+            + (" (SPILLED past VRAM into system RAM: not a usable rate)" if row["spilled"] else "")
         )
     return rows
 
@@ -383,12 +412,12 @@ def update_bench(path: Path, section: str, value: Any, machine: dict[str, Any] |
 
 
 def best_rates(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Per size, the fastest measured row that fits the VRAM budget at micro-batch >= 256."""
+    """Per size, the fastest measured row that fits the VRAM budget at micro-batch >= 256, unspilled."""
     budget = (data.get("machine") or {}).get("vram_budget_gb")
     best: dict[str, dict[str, Any]] = {}
     for row in data.get("throughput", []):
         peak = row.get("peak_reserved_gb")
-        fits = budget is None or peak is None or peak <= budget
+        fits = not row.get("spilled") and (budget is None or peak is None or peak <= budget)
         usable = not row.get("oom") and not row.get("error") and row.get("micro", 0) >= MIN_MICRO and fits
         if usable and row["samples_per_s"] > best.get(row["size"], {}).get("samples_per_s", -1.0):
             best[row["size"]] = row

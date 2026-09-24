@@ -16,6 +16,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -245,8 +246,13 @@ def launch(
 # ---------------------------------------------------------------- blink ops ps
 
 
+def _basename(arg: str) -> str:
+    """The last path part for either separator: a Windows path is not split by pathlib on Linux."""
+    return re.split(r"[\\/]", arg)[-1].lower()
+
+
 def is_blink(cmdline: Sequence[str]) -> bool:
-    names = [Path(arg).name.lower() for arg in cmdline]
+    names = [_basename(arg) for arg in cmdline]
     if any(name in ("blink.exe", "blink-uci.exe", "blink", "blink-uci") for name in names):
         return True
     return any(
