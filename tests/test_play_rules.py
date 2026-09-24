@@ -99,6 +99,15 @@ def test_the_value_tie_break_uses_the_root_policy_logit_within_epsilon():
     assert rules.tie_break(np.array([0.5, 0.5]), np.array([1.0, 2.0]), epsilon=0.0) == (1, True)
 
 
+def test_the_tie_set_is_every_child_near_the_best_value_that_shares_the_top_root_logit():
+    values = np.array([0.5, 0.5 - 1 / 512, 0.4, 0.5])
+    logits = np.array([1.0, 1.0, 5.0, 1.0])
+    for epsilon, expected in ((0.0, [0, 3]), (1 / 256, [0, 1, 3]), (0.2, [2])):
+        tied = rules.tie_set(values, logits, epsilon)
+        assert tied.tolist() == expected
+        assert rules.tie_break(values, logits, epsilon)[0] == tied[0]  # R4 plays the first of the set
+
+
 def test_the_clock_guard_fires_below_the_larger_of_3_seconds_and_10_p99():
     assert not rules.clock_guard(None, p99_s=0.05)
     assert rules.clock_guard(2.9, p99_s=0.05)

@@ -5,6 +5,7 @@ blink ops ps                                    Blink processes and launched job
 blink supervise --run NAME -- train ...         the trainer as a child, every P7 stop rule enforced
 blink bench throughput|loader|play              measured rates into bench.json (plan P4)
 blink sweep ablations|sizes|choose              plan P5 and P6
+blink sweep rescore                             score finished arms post hoc (games10k, mateset)
 
 Torch is imported only inside the commands that need it, so `blink --help` works torch-free.
 """
@@ -78,10 +79,21 @@ def _bench_rate(args: argparse.Namespace) -> tuple[float | None, str]:
         return None, "no --bench-rate or --bench-size"
     from blink.train.bench import best_rates
 
-    best = best_rates(_read_json(_home_eval("bench.json", args.bench), "bench.json")).get(args.bench_size)
+    mode = _train_compile_mode(_rest(args.train_args))
+    bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
+    best = best_rates(bench, compile=mode).get(args.bench_size)
     if best is None:
         raise ValueError(f"bench.json has no usable throughput row for size {args.bench_size}")
     return float(best["samples_per_s"]), f"size {args.bench_size} in bench.json"
+
+
+def _train_compile_mode(train_args: list[str]) -> str | None:
+    """The compile mode of the child's `--config` (None without one: any mode's best row)."""
+    from blink.model.config import compile_mode, read_tables
+
+    if "--config" not in train_args[:-1]:
+        return None
+    return compile_mode(read_tables(train_args[train_args.index("--config") + 1]))
 
 
 def _supervise_config(args: argparse.Namespace):
@@ -293,46 +305,46 @@ def _repo_config(given: str | None, default: str) -> Path:
     return Path(given) if given else CONFIG_DIR / default
 
 
-def _plan_rate(args: argparse.Namespace, size: str) -> float:
+def _plan_rate(args: argparse.Namespace, size: str, mode: str) -> float:
+    """--rate, or bench.json's best row for `size` measured in the compile mode the runs train in."""
     from blink.train.bench import best_rates
 
     if args.rate:
         return args.rate
-    best = best_rates(_read_json(_home_eval("bench.json", args.bench), "bench.json")).get(size)
+    bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
+    best = best_rates(bench, compile=mode).get(size)
     if best is None:
-        raise ValueError(f"bench.json has no usable throughput row for {size}; run `blink bench throughput`")
+        why = f"bench.json has no usable throughput row for {size} at compile {mode}"
+        # the plain command measures s, m, m12 and l in three modes, and would re-measure rows in use
+        raise ValueError(f"{why}; run `blink bench throughput --sizes {size} --micro 1024 --compile {mode}`")
     return float(best["samples_per_s"])
 
 
-def _print_arm_plan(plan, rate: float) -> None:
-    import tomllib
-
-    from blink.train import sweep
-
-    base = tomllib.loads(plan.recipe.read_text(encoding="utf-8"))
-    for arm in plan.arms:
-        if arm.combine:
-            _say(f"abl-{arm.name}: {arm.change}, chosen when it starts by the adopt rule")
-            continue
-        steps = sweep.steps_for(plan.hours, rate, sweep.batch_size_of(base, arm))
-        peak = sweep.merged_config(base, arm, steps)["train"]["peak_lr"]
-        _say(f"abl-{arm.name}: {arm.change}; steps {steps:,}; peak_lr {peak:g}; {arm.overrides}")
-
-
 def cmd_sweep_ablations(args: argparse.Namespace) -> int:
+    from blink.data import games10k
+    from blink.model.config import compile_mode, read_tables
     from blink.train import sweep
 
+    out = _home_eval("ablations.json", args.out)
     try:
         plan = sweep.load_plan(_repo_config(args.plan, "ablations/plan.toml"))
-        rate = _plan_rate(args, plan.size)
+        rate = _plan_rate(args, plan.size, compile_mode(read_tables(plan.recipe)))
+        # only the arms this launch plans afresh: not one the slip rule cuts, nor one already recorded
+        fresh = sweep.fresh_rate_arms(plan, out, args.slip)
+        arm_rates = sweep.own_bench_rates(plan, lambda size, mode: _plan_rate(args, size, mode), fresh)
         if args.dry_run:
-            _print_arm_plan(plan, rate)
+            for line in sweep.preview(plan, out, rate, arm_rates, args.slip):
+                _say(line)
             return 0
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep ablations: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    out = _home_eval("ablations.json", args.out)
-    report = sweep.run_ablations(plan, out, rate, sweep.supervised_runner(_say), log=_say, slip=args.slip)
+    # the arms' own inputs (blink train's defaults); the GPU is the sweep's and idle between arms
+    scorer = _child_scorer(games10k.default_path(), plan.data)
+    runner = sweep.supervised_runner(_say)
+    report = sweep.run_ablations(
+        plan, out, rate, runner, log=_say, slip=args.slip, arm_rates=arm_rates, scorer=scorer
+    )
     noise = report.get("noise") or {}
     sigma = noise.get("vaa", {}).get("sigma")
     _say(f"sigma VAA {sigma}, sigma ok {noise.get('sigma_ok')}; recipe {report['recipe']}")
@@ -342,12 +354,86 @@ def cmd_sweep_ablations(args: argparse.Namespace) -> int:
     return 0
 
 
+def _child_scorer(games: Path, pack: Path):
+    """The sweep's post-hoc scorer: `blink eval arm-metrics` in a child process on the GPU, which takes
+    its CUDA context and cached blocks with it when it exits. Scored in the sweep's own process, they
+    would stay held while the next arm's trainer (a15) sizes its micro-batch from the free VRAM."""
+    import subprocess
+
+    from blink.train.supervise import child_argv
+
+    def score(run: str) -> None:
+        args = ["eval", "arm-metrics", "--run", run, "--data", str(pack), "--games10k", str(games)]
+        code = subprocess.run(child_argv([*args, "--device", "cuda"]), check=False).returncode
+        if code != 0:
+            raise RuntimeError(f"`blink eval arm-metrics --run {run}` exited {code}")
+
+    return score
+
+
+def _posthoc_scorer(games: Path, mates: Path, device: str, force: bool = False):
+    """posthoc.score_run for one arm's run under BLINK_HOME/runs, on these games10k and mateset files."""
+    from blink.train import posthoc
+
+    def score(run: str) -> None:
+        posthoc.score_run(paths.home() / "runs" / run, games, mates, device, _say, force)
+
+    return score
+
+
+def cmd_sweep_rescore(args: argparse.Namespace) -> int:
+    """Arms trained before the checks scored games10k and the mateset get them from their final
+    checkpoints, then every arm is judged again, so a07 and a08 meet an a01-a03 floor of their metrics.
+
+    Refuses the GPU while a run trains or starts (posthoc.gpu_refusal). Exits 1 unless every finished
+    arm was scored, since a07 and a15 leave `held` only once the seeds are."""
+    from blink.data import games10k, mateset
+    from blink.train import posthoc, sweep
+
+    out = _home_eval("ablations.json", args.out)
+    try:
+        plan = sweep.load_plan(_repo_config(args.plan, "ablations/plan.toml"))
+        if not out.is_file():
+            raise FileNotFoundError(f"no ablations.json at {out}: nothing has run yet")
+        refusal = posthoc.gpu_refusal(args.device)
+        if refusal:
+            raise ValueError(refusal)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        print(f"blink sweep rescore: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    games = Path(args.games10k) if args.games10k else games10k.default_path()
+    mates = (Path(args.data) if args.data else plan.data) / mateset.OUTPUT
+    judged = sweep.rescore_ablations(plan, out, _posthoc_scorer(games, mates, args.device, args.force), _say)
+    for name, decision in judged["decisions"].items():
+        _say(f"  {name}: {'ADOPT' if decision['adopt'] else 'keep D'} ({decision['reason']})")
+    _say(f"recipe {judged['recipe']}")
+    return _rescore_outcome(judged["scored"], judged["not_scored"], out)
+
+
+def _rescore_outcome(scored: list[str], failed: dict[str, str], out: Path) -> int:
+    if not scored and not failed:
+        _say(f"nothing to score: no arm has finished in {out}")
+        return 1
+    if scored:
+        _say(
+            f"posthoc.json holds the scores of {', '.join(scored)}; {out} is the sweep's: a running sweep "
+            "reads them for a15 and its final report, else `blink sweep ablations` records them (and runs "
+            "any pending or held arm)"
+        )
+    if failed:
+        _say(f"not scored: {', '.join(failed)}" + ("" if scored else "; no arm was scored"))
+        return 1
+    return 0
+
+
 def cmd_sweep_sizes(args: argparse.Namespace) -> int:
-    from blink.train import sweep
+    from blink.train import size_sweep, sweep
 
     try:
         sizes = [s for s in (args.sizes or "").split(",") if s] or None
-        setup = sweep.load_size_sweep(_repo_config(args.config, "sweep.toml"), sizes=sizes, hours=args.hours)
+        setup = size_sweep.load_size_sweep(
+            _repo_config(args.config, "sweep.toml"), sizes=sizes, hours=args.hours
+        )
         bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep sizes: {exc}", file=sys.stderr)
@@ -355,9 +441,11 @@ def cmd_sweep_sizes(args: argparse.Namespace) -> int:
     if args.dry_run:
         _say(f"sizes {setup.sizes} ({setup.conditional} only above the epoch floor), {setup.hours} h each")
         return 0
+    from blink.train import nstar
+
     out = _home_eval("sweep.json", args.out)
-    rules = sweep.load_rules(_repo_config(args.config, "sweep.toml"))
-    report = sweep.run_sizes(setup, bench, out, sweep.supervised_runner(_say), log=_say, rules=rules)
+    rules = nstar.load_rules(_repo_config(args.config, "sweep.toml"))
+    report = size_sweep.run_sizes(setup, bench, out, sweep.supervised_runner(_say), log=_say, rules=rules)
     for size, entry in report["sizes"].items():
         _say(f"  {size}: {entry['status']}, VAA {entry.get('vaa')}, {entry.get('samples_per_s')} samples/s")
     return 0
@@ -373,15 +461,18 @@ def _sigma(args: argparse.Namespace) -> float:
 
 
 def cmd_sweep_choose(args: argparse.Namespace) -> int:
-    from blink.train import sweep
+    from blink.model.config import compile_mode, read_tables
+    from blink.train import nstar, sweep
 
     sweep_path = _home_eval("sweep.json", args.sweep)
     try:
         bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
         state = _read_json(sweep_path, "sweep.json")
         config = _repo_config(args.config, "sweep.toml")
-        rules = sweep.load_rules(config) if config.is_file() else sweep.ChooseRules()
-        choice = sweep.choose(bench, state.get("sizes", {}), _sigma(args), rules)
+        rules = nstar.load_rules(config) if config.is_file() else nstar.ChooseRules()
+        recipe = sweep.CONFIG_DIR / "recipe.toml"  # the long run trains in the recipe's compile mode
+        mode = compile_mode(read_tables(recipe)) if recipe.is_file() else None
+        choice = nstar.choose(bench, state.get("sizes", {}), _sigma(args), rules, compile=mode)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep choose: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -402,7 +493,10 @@ def _register_sweep(sub: argparse._SubParsersAction) -> None:
     abl = actions.add_parser("ablations", help="run the ablation arms in order (resumable)")
     abl.add_argument("--plan", help="default: configs/ablations/plan.toml")
     abl.add_argument(
-        "--rate", type=float, help="samples/s instead of bench.json's best row for the plan's size"
+        "--rate",
+        type=float,
+        help="samples/s for the plan size instead of bench.json's best row (a sweep under way keeps "
+        "the rate it pinned in ablations.json)",
     )
     abl.add_argument(
         "--slip", action="store_true", help="apply the P5 slip rule: drop the plan's slip_cut arms"
@@ -416,6 +510,18 @@ def _register_sweep(sub: argparse._SubParsersAction) -> None:
         "--ablations", help="ablations.json, for sigma (default BLINK_HOME/eval/ablations.json)"
     )
     choose.add_argument("--sigma", type=float, help="the a01-a03 VAA sigma, instead of ablations.json")
+    rescore = actions.add_parser(
+        "rescore", help="score finished arms' final checkpoints on games10k and the mateset, then judge again"
+    )
+    rescore.add_argument("--plan", help="default: configs/ablations/plan.toml")
+    rescore.add_argument("--out", help="ablations.json (default BLINK_HOME/eval/ablations.json)")
+    rescore.add_argument("--data", help="the pack whose mateset.npz is scored (default: the plan's data)")
+    rescore.add_argument("--games10k", help="default: BLINK_HOME/data/games10k.npy")
+    rescore.add_argument(
+        "--device", choices=("cuda", "cpu"), default="cuda", help="cuda is refused while a run is training"
+    )
+    rescore.add_argument("--force", action="store_true", help="score again even when already scored")
+    rescore.set_defaults(func=cmd_sweep_rescore)
     for parser in (abl, sizes, choose):
         parser.add_argument("--bench", help="bench.json (default BLINK_HOME/eval/bench.json)")
     for parser in (sizes, choose):

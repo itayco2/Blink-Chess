@@ -15,6 +15,7 @@ sizes are configs/<size>.toml (area P4 writes s, m, m12 and l) or any TOML path.
 import gc
 import json
 import multiprocessing
+import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -35,6 +36,9 @@ MIN_MICRO = 256  # a size is only eligible at micro-batch >= 256 (plan P6)
 GIB = 2**30
 KEYS = {"throughput": ("size", "micro", "compile"), "play": ("size", "rows", "concurrency")}
 WORKER_TIMEOUT_S = 900
+ABORT = -1.0  # the shared start time's value when a worker failed before the start
+START_DELAY_S = 0.5  # the start time is this far after the last worker reports warm
+START_POLL_S = 0.001
 
 Log = Callable[[str], None]
 
@@ -94,7 +98,7 @@ def _compiled(model, mode: str):
 
 
 def _train_step(model, optimizer, batch, accum: int, cfg, device_type: str, clip: float, graphs: bool):
-    """One optimizer step over `accum` micro-batches, as the trainer does: bf16 autocast, clip, AdamW.
+    """One optimizer step over `accum` micro-batches, as the trainer does: bf16 autocast, clip, step.
 
     `clip` is GradClip.limit(): with clip_norm = "auto" that is infinity, as in the trainer's warmup,
     and clip_grad_norm_ does the same work for any limit. Under CUDA graphs every replay reuses the
@@ -281,7 +285,7 @@ class PlaySpec:
     device: str = "cuda"
 
 
-def _latencies(config: str, rows: int, iters: int, warmup: int, device: str, barrier=None) -> list[float]:
+def _latencies(config: str, rows: int, iters: int, warmup: int, device: str, start=None) -> list[float]:
     import torch
 
     from blink.model.config import load_config
@@ -293,8 +297,8 @@ def _latencies(config: str, rows: int, iters: int, warmup: int, device: str, bar
     codes = random_codes(rows, seed=rows)
     for _ in range(warmup):
         evaluator.evaluate(codes)
-    if barrier is not None:
-        barrier.wait(timeout=WORKER_TIMEOUT_S)
+    if start is not None:
+        start()  # returns when every worker is warm
     out = []
     for _ in range(iters):
         started = time.perf_counter()
@@ -303,24 +307,61 @@ def _latencies(config: str, rows: int, iters: int, warmup: int, device: str, bar
     return out
 
 
-def _play_worker(config: str, rows: int, iters: int, warmup: int, device: str, barrier, results) -> None:
+def _wait_for_start(start_at, timeout_s: float = WORKER_TIMEOUT_S) -> None:
+    """Poll the parent's shared start time (wall clock, the same in every process); ABORT stops."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        value = start_at.value
+        if value == ABORT:
+            raise RuntimeError("another play worker failed before the start")
+        if value > 0 and time.time() >= value:
+            return
+        if time.monotonic() > deadline:
+            raise TimeoutError("no start signal from the parent")
+        time.sleep(START_POLL_S)
+
+
+def _play_worker(config: str, rows: int, iters: int, warmup: int, device: str, start_at, messages) -> None:
+    def start() -> None:
+        messages.put(("ready", os.getpid()))
+        _wait_for_start(start_at)
+
     try:
-        results.put(("ok", _latencies(config, rows, iters, warmup, device, barrier)))
+        messages.put(("ok", _latencies(config, rows, iters, warmup, device, start)))
     except BaseException as exc:  # noqa: BLE001 - reported to the parent, which raises it
-        barrier.abort()
-        results.put(("error", f"{type(exc).__name__}: {exc}"))
+        messages.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _collect_replies(messages, start_at, workers: int, timeout_s: float = WORKER_TIMEOUT_S) -> list:
+    """Every worker's final reply. The start time goes out once all are warm; a failure first aborts."""
+    ready, replies = 0, []
+    while len(replies) < workers:
+        kind, detail = messages.get(timeout=timeout_s)
+        if kind == "ready":
+            ready += 1
+            if ready == workers and start_at.value == 0.0:
+                start_at.value = time.time() + START_DELAY_S
+            continue
+        replies.append((kind, detail))
+        if kind == "error" and start_at.value == 0.0:
+            start_at.value = ABORT
+    return replies
 
 
 def _concurrent_latencies(spec: PlaySpec) -> list[float]:
-    """`concurrency` processes, each with its own model and CUDA context, timed from one barrier."""
+    """`concurrency` processes, each with its own model and CUDA context, timed from one start time.
+
+    A multiprocessing.Barrier failed here with WinError 5 on its semaphore at 5 CUDA processes and
+    left the parent waiting out its timeout (PF67); a queue and a shared start time need no semaphore.
+    """
     ctx = multiprocessing.get_context("spawn")
-    barrier, results = ctx.Barrier(spec.concurrency), ctx.Queue()
-    args = (str(spec.config), spec.rows, spec.iters, spec.warmup, spec.device, barrier, results)
+    messages, start_at = ctx.Queue(), ctx.Value("d", 0.0, lock=False)
+    args = (str(spec.config), spec.rows, spec.iters, spec.warmup, spec.device, start_at, messages)
     workers = [ctx.Process(target=_play_worker, args=args, daemon=True) for _ in range(spec.concurrency)]
     for worker in workers:
         worker.start()
     try:
-        replies = [results.get(timeout=WORKER_TIMEOUT_S) for _ in workers]
+        replies = _collect_replies(messages, start_at, spec.concurrency)
     finally:
         for worker in workers:
             worker.join(timeout=30)
@@ -412,11 +453,17 @@ def update_bench(path: Path, section: str, value: Any, machine: dict[str, Any] |
     return updated
 
 
-def best_rates(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Per size, the fastest measured row that fits the VRAM budget at micro-batch >= 256, unspilled."""
+def best_rates(data: dict[str, Any], compile: str | None = None) -> dict[str, dict[str, Any]]:
+    """Per size, the fastest measured row that fits the VRAM budget at micro-batch >= 256, unspilled.
+
+    With `compile`, only rows measured in that mode count: a run is planned and policed at the rate of
+    the mode it actually trains in (PF66).
+    """
     budget = (data.get("machine") or {}).get("vram_budget_gb")
     best: dict[str, dict[str, Any]] = {}
     for row in data.get("throughput", []):
+        if compile is not None and row.get("compile", "off") != compile:
+            continue
         peak = row.get("peak_reserved_gb")
         fits = not row.get("spilled") and (budget is None or peak is None or peak <= budget)
         usable = not row.get("oom") and not row.get("error") and row.get("micro", 0) >= MIN_MICRO and fits

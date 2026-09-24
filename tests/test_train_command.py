@@ -196,6 +196,72 @@ def test_a_v1_pack_mixes_root_and_child_shards_with_the_manifest_weights(
     assert all("ema_vaa" in row for row in evals) and "vaa" in evals[-1] and evals[-1]["vaa_n"] == 12
 
 
+def _pack_mateset(root) -> None:
+    from blink.board.value import CP_NONE
+    from blink.data import mateset, valprobe
+
+    roots = fixture_records()[:8].copy()
+    roots["cp"], roots["mate"] = CP_NONE, 2
+    valprobe.save_npz(root / "mateset.npz", mateset.build(roots, n=8))
+
+
+def test_a_v1_pack_run_scores_the_packs_mateset_and_blink_home_games10k_at_its_checks(
+    home, tmp_path, fake_loader
+):
+    _v1_pack(tmp_path / "v1")
+    _pack_mateset(tmp_path / "v1")
+    (home / "data").mkdir(parents=True)
+    np.save(home / "data" / "games10k.npy", fixture_records()[:30])
+    config = tmp_path / "mixed.toml"
+    config.write_text(MIXED_CONFIG, encoding="utf-8")
+    argv = [
+        "train",
+        "--config",
+        str(config),
+        "--run",
+        "v1",
+        "--data",
+        str(tmp_path / "v1"),
+        "--device",
+        "cpu",
+    ]
+    assert cli.main(argv) == 0
+    evals = _jsonl(home / "runs" / "v1" / "evals.jsonl")
+    final = evals[-1]
+    assert final["check"] == "100%" and final["games10k_n"] == 30 and final["mateset_n"] == 8
+    assert {"games10k_top1", "ema_games10k_top1", "shortest_mate", "ema_shortest_mate"} <= set(final)
+    assert "games10k_top1" not in evals[0]  # step 0 is not a check
+
+
+def test_games10k_can_be_pointed_elsewhere_and_a_raw_source_has_no_pack_mateset(home, config, raw, tmp_path):
+    from blink.commands import train_data
+    from blink.model.config import load_config
+
+    elsewhere = tmp_path / "held-out.npy"
+    args = cli.build_parser().parse_args(
+        ["train", "--config", str(config), "--run", "g", "--source-raw", str(raw), "--max-lines", "100"]
+    )
+    args.workers = 1
+    plan = train_data.plan(args, load_config(config))
+    assert plan.games10k == home / "data" / "games10k.npy" and plan.mateset is None
+    args.games10k = str(elsewhere)
+    assert train_data.plan(args, load_config(config)).games10k == elsewhere
+
+
+def test_a_pack_without_a_valprobe_says_vaa_will_not_be_recorded(tmp_path, capsys):
+    from argparse import Namespace
+
+    from blink.commands import train_data
+    from blink.model.config import TrainConfig
+
+    _v1_pack(tmp_path / "v1", weights=[1.0] * 48)
+    (tmp_path / "v1" / "valprobe.npz").unlink()
+    cfg = TrainConfig(batch_size=20, child_frac=0.25, val_size=8)
+    plan = train_data.plan(Namespace(source_raw=None, data=str(tmp_path / "v1"), valprobe=None), cfg)
+    assert plan.probe is None
+    assert "valprobe: none, so VAA will not be recorded" in capsys.readouterr().out
+
+
 def test_a_v1_world_names_the_packs_blocklist_sha_and_grouped_salt():
     """WORLD = sha1(contract, manifest sha, blocklist sha, split rule and salt): the v1 keys feed it."""
     import hashlib

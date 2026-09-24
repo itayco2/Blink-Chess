@@ -15,6 +15,11 @@ from typing import Any
 AUTO = "auto"
 HOUR_S = 3600.0
 COMPILE_MODES = ("off", "inductor")  # the cudagraphs backend measured no faster than eager (PF64)
+VALUE_MAPPINGS = ("lichess", "deepmind")  # the value head's targets (blink.model.value_mapping); P5 a08
+OPTIMIZERS = ("adamw", "muon")  # muon: arm a10, torch.optim.Muon on the trunk's hidden matrices
+# The adjust_lr_fn values torch.optim.Muon accepts in torch 2.14 (this module is torch-free, so the
+# list lives here; tests/test_muon.py pins it to the installed torch's own check).
+MUON_ADJUST_LR_FNS = ("original", "match_rms_adamw", "spectral_unclamped")
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,7 @@ class ModelConfig:
     head_dim: int = 32
     ffn_mult: int = 2
     gab: bool = False  # GAB-lite attention bias (blink.model.gab), shared by every layer
+    static_bias: bool = False  # a learned 64x64 bias per head in GAB-lite's place (blink.model.static_bias)
 
     def __post_init__(self) -> None:
         for name in ("d_model", "n_layers", "n_heads", "head_dim", "ffn_mult"):
@@ -33,6 +39,10 @@ class ModelConfig:
         if self.n_heads * self.head_dim != self.d_model:
             raise ValueError(
                 f"n_heads * head_dim must equal d_model: {self.n_heads} * {self.head_dim} != {self.d_model}"
+            )
+        if self.gab and self.static_bias:
+            raise ValueError(
+                "model.gab and model.static_bias are two attention biases for one slot: pick one"
             )
 
 
@@ -50,8 +60,12 @@ class TrainConfig:
     weight_decay: float = 0.1  # matrices only
     beta1: float = 0.9
     beta2: float = 0.95
+    optimizer: str = "adamw"  # or "muon": Muon on the trunk's hidden matrices, AdamW on the rest (a10)
+    # Muon's per-shape LR scaling. torch's default is "original"; match_rms_adamw reuses AdamW's LR and decay
+    muon_adjust_lr_fn: str = "match_rms_adamw"
     clip_norm: float | str = 1.0  # or "auto": 2 x the 95th percentile of the warmup gradient norms
     compile: str = "off"  # or "inductor": torch.compile the training forward (P4 bench)
+    value_mapping: str = "lichess"  # or "deepmind": the value head's targets (P5 a08); policy keeps Lichess W
     ema_max: float = 0.9999
     alpha: float = 0.5  # soft policy target mixing weight
     tau: float = 0.05  # soft policy target temperature over win-probability gaps
@@ -86,6 +100,11 @@ class TrainConfig:
         self._check_clip()
         if self.compile not in COMPILE_MODES:
             raise ValueError(f"train.compile must be one of {COMPILE_MODES}, got {self.compile!r}")
+        if self.value_mapping not in VALUE_MAPPINGS:
+            raise ValueError(
+                f"train.value_mapping must be one of {VALUE_MAPPINGS}, got {self.value_mapping!r}"
+            )
+        self._check_optimizer()
 
     def _check_positive(self) -> None:
         positive = (
@@ -129,6 +148,15 @@ class TrainConfig:
             return
         if isinstance(clip, bool) or not isinstance(clip, int | float) or clip <= 0:
             raise ValueError(f"train.clip_norm must be a positive number or 'auto', got {clip!r}")
+
+    def _check_optimizer(self) -> None:
+        """muon_adjust_lr_fn is checked under AdamW too: a typo must not wait for the day it is used."""
+        if self.optimizer not in OPTIMIZERS:
+            raise ValueError(f"train.optimizer must be one of {OPTIMIZERS}, got {self.optimizer!r}")
+        if self.muon_adjust_lr_fn not in MUON_ADJUST_LR_FNS:
+            raise ValueError(
+                f"train.muon_adjust_lr_fn must be one of {MUON_ADJUST_LR_FNS}, got {self.muon_adjust_lr_fn!r}"
+            )
 
     @property
     def children_per_step(self) -> int:
@@ -182,6 +210,16 @@ def _read_tables(path: Path, seen: tuple[Path, ...] = ()) -> dict[str, dict[str,
     if "base" in data:
         tables = _read_tables(path.parent / str(data["base"]), (*seen, path))
     return {name: {**tables[name], **data.get(name, {})} for name in ("model", "train")}
+
+
+def read_tables(path: str | Path) -> dict[str, dict[str, Any]]:
+    """A config file's [model] and [train] tables with its `base` chain resolved: what load_config reads."""
+    return _read_tables(Path(path))
+
+
+def compile_mode(tables: dict[str, dict[str, Any]]) -> str:
+    """The train.compile a config's tables ask for ("off" when unset)."""
+    return str(tables.get("train", {}).get("compile", COMPILE_MODES[0]))
 
 
 def load_config(path: str | Path) -> TrainConfig:

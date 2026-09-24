@@ -1,7 +1,8 @@
-"""`blink eval puzzles|signcheck` and `blink audit no-search`."""
+"""`blink eval puzzles|signcheck|arm-metrics` and `blink audit no-search`."""
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -82,6 +83,33 @@ def _cmd_signcheck(args: argparse.Namespace) -> int:
     return 0 if result["passes_3x"] else 1
 
 
+def _cmd_arm_metrics(args: argparse.Namespace) -> int:
+    """games10k_top1 and the mate rates of a finished run's final checkpoint, into its posthoc.json."""
+    from blink.data import games10k, mateset
+    from blink.train import posthoc
+    from blink.train.status import valid_run_name
+
+    if not valid_run_name(args.run):
+        print(f"blink eval arm-metrics: bad run name {args.run!r}", file=sys.stderr)
+        return 2
+    refusal = posthoc.gpu_refusal(args.device)
+    if refusal:
+        print(f"blink eval arm-metrics: {refusal}", file=sys.stderr)
+        return 2
+    run_dir = paths.home() / "runs" / args.run
+    pack = args.data or posthoc.pack_of(run_dir)
+    games = args.games10k or games10k.default_path()
+    try:
+        mates = None if pack is None else pack / mateset.OUTPUT
+        posthoc.score_run(
+            run_dir, games, mates, args.device, lambda line: print(line, flush=True), args.force
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"blink eval arm-metrics: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def _cmd_audit_no_search(args: argparse.Namespace) -> int:
     files = nosearch.pgn_files(args.pgn)
     report = nosearch.audit(files, engine=args.engine)
@@ -128,6 +156,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sc.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     sc.add_argument("--out", type=Path, default=None, help="also write the result JSON here")
     sc.set_defaults(func=factory.friendly(_cmd_signcheck))
+
+    am = ev_sub.add_parser(
+        "arm-metrics",
+        help="score a finished run's final checkpoint on games10k and its pack's mateset (posthoc.json)",
+    )
+    am.add_argument("--run", required=True, help="a run under BLINK_HOME/runs, e.g. abl-a01")
+    am.add_argument(
+        "--data", type=Path, default=None, help="the pack whose mateset.npz is scored (default: the run's)"
+    )
+    am.add_argument("--games10k", type=Path, default=None, help="default: BLINK_HOME/data/games10k.npy")
+    am.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    am.add_argument("--force", action="store_true", help="score again even when already scored")
+    am.set_defaults(func=_cmd_arm_metrics)
 
     audit = subparsers.add_parser("audit", help="compliance audits")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True)

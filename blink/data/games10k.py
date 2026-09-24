@@ -25,8 +25,10 @@ from blink import paths
 from blink.board import encode, moves, value
 from blink.data import blocklist
 from blink.data.record import NO_MOVE, ROOT_DTYPE
+from blink.train.atomic import replace_with_retry
 
 MAX_PROCS = 5
+OUTPUT = "games10k.npy"  # ROOT_DTYPE records under BLINK_HOME/data, where the trainer's checks read it
 
 
 def default_procs(cpu_count: int | None = os.cpu_count()) -> int:
@@ -100,6 +102,20 @@ def remaining(fens: Iterable[str], done: dict[str, Label]) -> list[str]:
     return [f for f in fens if f not in done]
 
 
+def default_path() -> Path:
+    """BLINK_HOME/data/games10k.npy: where `run` writes the set, and where training looks for it."""
+    return paths.home() / "data" / OUTPUT
+
+
+def write_records(path: Path, records: np.ndarray) -> None:
+    """np.save to a .tmp sibling, then replace: a training run's check reads this file, so it must
+    never see half of it (an empty or truncated .npy) while the labeller writes it again."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as handle:
+        np.save(handle, records)
+    replace_with_retry(tmp, path)
+
+
 def run(n: int, nodes: int, procs: int, home: Path) -> dict:
     evaldir, data = home / "eval", home / "data"
     with open(evaldir / "heldout_games.pgn", encoding="utf-8") as fh:
@@ -125,7 +141,7 @@ def run(n: int, nodes: int, procs: int, home: Path) -> dict:
             for f in fens
         ]
     )
-    np.save(data / "games10k.npy", records)
+    write_records(data / OUTPUT, records)
     (data / "games10k_fens.txt").write_text("\n".join(fens) + "\n", encoding="utf-8")
     return {
         "positions": len(fens),

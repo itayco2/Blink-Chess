@@ -1,4 +1,4 @@
-"""The resumable trainer: bf16 autocast on CUDA (fp32 on CPU), AdamW, WSD, EMA, Recipe D batches.
+"""The resumable trainer: bf16 autocast on CUDA (fp32 on CPU), AdamW or Muon, WSD, EMA, Recipe D batches.
 
 Each optimizer step takes batch_size rows (roots plus a child_frac share of children) in micro-batches
 sized from the VRAM budget, multiplies both losses by the per-sample rebalancing weights, clips the
@@ -6,10 +6,11 @@ gradient (a fixed norm, or "auto" measured over the warmup) and updates the EMA.
 
 Everything a run writes lives in its run directory: config.json (world id, config, parameter counts,
 VRAM budget), metrics.jsonl every `metrics_every` steps (with the window's phase: train, eval or
-ckpt), evals.jsonl every `eval_every` steps plus the full-valprobe checks at 5/25/30/50/100%,
-heartbeat.json every `heartbeat_s` seconds, film/ frames when `film` is on, and atomic checkpoints
-ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the straight run, because the batch
-source is seeked to the checkpoint's step.
+ckpt, its wall time and its loader wait share), evals.jsonl every `eval_every` steps plus the
+full-valprobe checks at 5/25/30/50/100% (which also score games10k and the pack's mateset when the run
+has them), heartbeat.json every `heartbeat_s` seconds, film/ frames when `film` is on, and atomic
+checkpoints ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the straight run, because the
+batch source is seeked to the checkpoint's step.
 """
 
 import json
@@ -27,11 +28,12 @@ import torch
 from blink import heartbeat
 from blink.model.config import AUTO, TrainConfig, config_to_dict
 from blink.model.transformer import BlinkNet, parameter_report
-from blink.train import evals, film, resume, step, telemetry, vaa, vram
+from blink.train import checksets, evals, film, resume, step, telemetry, vaa, vram
 from blink.train.atomic import write_text_atomic
 from blink.train.checkpoint import list_checkpoints, save_checkpoint
 from blink.train.clipping import GradClip
 from blink.train.ema import Ema
+from blink.train.optimizers import MuonAdamW, build_optimizer
 from blink.train.schedule import wsd_lr
 from blink.train.source import BatchSource, StepData, as_step_data
 
@@ -53,6 +55,9 @@ class RunSpec:
     lr_scale: float | None = None  # on resume: the LR scale from here on (None keeps the checkpoint's)
     init_from: Path | None = None  # start a new run from another run's checkpoint (preview cooldown)
     preview: bool = False  # a preview branch checks only its own end, against the reference's final VAA
+    # held-out sets the checks also score (blink.train.checksets); None scores nothing, as before
+    games10k: Path | None = None  # games10k.npy for games10k_top1 (blink train: BLINK_HOME/data)
+    mateset: Path | None = None  # the pack's mateset.npz for shortest_mate and mate_preserving
 
 
 @dataclass(frozen=True)
@@ -75,7 +80,7 @@ class _Run:
     spec: RunSpec
     model: BlinkNet
     ema: Ema
-    optimizer: torch.optim.Optimizer
+    optimizer: torch.optim.Optimizer | MuonAdamW
     device: torch.device
     val: telemetry.ValSet | None
     log: Callable[[str], None]
@@ -86,6 +91,7 @@ class _Run:
     # the training forward: `model` itself, or its torch.compile wrapper
     forward: torch.nn.Module | None = None
     reference: vaa.Reference | None = None
+    sets: checksets.CheckSets = field(default_factory=checksets.CheckSets)  # each loaded at the first check
     checks: dict[int, str] = field(default_factory=dict)
     film_plan: dict[int, str] = field(default_factory=dict)
     step: int = 0
@@ -98,19 +104,6 @@ class _Run:
     last_checkpoint: Path | None = None
     last_checkpoint_time: float = field(default_factory=time.monotonic)
     last_beat: float = 0.0
-
-
-def build_optimizer(model: torch.nn.Module, cfg: TrainConfig, device_type: str) -> torch.optim.AdamW:
-    """AdamW with weight decay on matrices only (ndim >= 2); fused kernels on CUDA."""
-    decay = [p for p in model.parameters() if p.ndim >= 2]
-    no_decay = [p for p in model.parameters() if p.ndim < 2]
-    groups = [
-        {"params": decay, "weight_decay": cfg.weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
-    ]
-    return torch.optim.AdamW(
-        groups, lr=cfg.peak_lr, betas=(cfg.beta1, cfg.beta2), fused=device_type == "cuda"
-    )
 
 
 def _choose_micro(cfg: TrainConfig, model: BlinkNet, device: torch.device, free: int | None, log) -> tuple:
@@ -149,8 +142,10 @@ def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -
         free = torch.cuda.mem_get_info(device)[0]
     model = BlinkNet(cfg.model).to(device)
     has_val = val is not None and len(val) > 0
-    val_set = telemetry.make_val_set(val[: cfg.val_size], device) if has_val else None
+    val_set = telemetry.make_val_set(val[: cfg.val_size], device, cfg.value_mapping) if has_val else None
     optimizer = build_optimizer(model, cfg, device.type)
+    if isinstance(optimizer, MuonAdamW):
+        log(optimizer.summary())
     ema = Ema(model, cfg.ema_max)
     micro, vram_info = _choose_micro(cfg, model, device, free, log)
     clip = GradClip(cfg.clip_norm, cfg.warmup_steps)
@@ -158,6 +153,7 @@ def _build(cfg: TrainConfig, spec: RunSpec, val, probe: vaa.Probe | None, log) -
     run.forward = _training_forward(model, cfg.compile)
     if probe is not None:
         run.checks = vaa.check_steps(cfg.steps, preview=spec.preview)
+    run.sets = checksets.for_run(spec.games10k, spec.mateset)
     if cfg.vaa_checks and cfg.vaa_reference:
         run.reference = vaa.load_reference(spec.run_dir.parent / cfg.vaa_reference)
     if cfg.film:
@@ -212,7 +208,9 @@ def _train_step(run: _Run, data: StepData, lr: float) -> tuple[torch.Tensor, ...
     for group in run.optimizer.param_groups:
         group["lr"] = lr
     run.optimizer.zero_grad(set_to_none=True)
-    out = step.accumulate(run.forward, data, run.device, run.micro, cfg.alpha, cfg.tau, cfg.lambda_v)
+    out = step.accumulate(
+        run.forward, data, run.device, run.micro, cfg.alpha, cfg.tau, cfg.lambda_v, cfg.value_mapping
+    )
     grad_norm = torch.nn.utils.clip_grad_norm_(run.model.parameters(), run.clip.limit())
     if run.clip.measuring:
         message = run.clip.observe(run.step, grad_norm.detach())  # read back once, at the warmup's end
@@ -230,7 +228,8 @@ def _write_metrics(run: _Run, window: telemetry.MetricWindow, lr: float) -> None
     run.log(
         f"step {run.step}/{run.cfg.steps}: policy {record['loss_policy']:.4f} "
         f"value {record['loss_value']:.4f} lr {lr:.2e} grad {record['grad_norm']:.3f} "
-        f"clip {record['clip_frac']:.2f} {record['samples_per_s']:.0f} samples/s [{record['phase']}]"
+        f"clip {record['clip_frac']:.2f} {record['samples_per_s']:.0f} samples/s "
+        f"(loader wait {100 * record['data_wait_frac']:.1f}%) [{record['phase']}]"
     )
     if not (np.isfinite(record["loss_policy"]) and np.isfinite(record["loss_value"])):
         raise FloatingPointError(f"non-finite loss at step {run.step}: {record}")
@@ -297,7 +296,9 @@ def _run_steps(run: _Run, source: BatchSource, end: int) -> None:
     batches = source(run.step)
     while run.step < end:
         lr = wsd_lr(run.step, cfg.peak_lr, cfg.warmup_steps, cfg.steps, cfg.cooldown_frac) * run.lr_scale
+        asked = time.perf_counter()
         item = next(batches, None)
+        window.waited(time.perf_counter() - asked)
         if item is None:
             raise RuntimeError(f"the batch source ran out of batches at step {run.step}")
         data = as_step_data(item)

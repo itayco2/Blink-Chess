@@ -17,11 +17,12 @@ from blink.play import rules
 from blink.play.agents import Agent, PolicyAgent, ValueAgent
 from blink.play.budget import DecisionRecord
 from blink.play.evaluator import Evaluator
-from blink.play.oracles import RandomLogitEvaluator
+from blink.play.oracles import LADDER_CP_PER_POINT, MaterialEvaluator, RandomLogitEvaluator
 
 RANDOM_SELECTORS = frozenset({"random", "random-net"})
 MODES = ("policy", "value")
 LOADER = "blink.model.loading"
+MATERIAL_NAME = "Material"
 
 
 class ModelUnavailable(RuntimeError):
@@ -55,6 +56,18 @@ def load_evaluator(selector: str, device: str = "cuda", seed: int = 0) -> Evalua
     except ImportError as exc:
         raise ModelUnavailable(_loader_missing_message(selector, exc)) from exc
     return load_model(selector, device=device)
+
+
+def material_agent(epsilon: float = rules.DEFAULT_EPSILON) -> ValueAgent:
+    """Ladder rung 1: MaterialEvaluator behind the same ValueAgent (rules R1-R5) as every baseline and
+    Blink's value mode. Torch-free, so `blink match --a material` never loads torch.
+
+    It ranks children by material however far ahead it is (LADDER_CP_PER_POINT, exact value). With the
+    test oracle's settings every lead past about +10 looked the same, and against random the rung let
+    pieces go until 15 of 100 dev games were drawn by insufficient material.
+    """
+    evaluator = MaterialEvaluator(cp_per_point=LADDER_CP_PER_POINT, exact=True)
+    return ValueAgent(evaluator, epsilon=epsilon, name=MATERIAL_NAME)
 
 
 def make_agent(

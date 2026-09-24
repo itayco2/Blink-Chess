@@ -1,7 +1,8 @@
 """What a checkpoint holds and how a run comes back from one.
 
-A checkpoint carries the model, EMA, optimizer, RNG states, schedule, step, world, config, the clip
-state (auto clips measure over the warmup), the LR scale in force, and which steps are kept for good.
+A checkpoint carries the model, EMA, optimizer (Muon's and AdamW's under a10), RNG states, schedule,
+step, world, config, the clip state (auto clips measure over the warmup), the LR scale in force, and
+which steps are kept for good.
 A resume keeps the checkpoint's LR scale unless it is given one, which replaces it (never multiplies):
 the supervisor repeats --lr-scale 0.5 on every restart after its NaN rollback, and that must stay 0.5.
 `restore` continues a run from its own latest checkpoint; `branch` starts a new run directory from
@@ -17,7 +18,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from blink.model.config import config_to_dict
+from blink.model.config import config_from_dict, config_to_dict
 from blink.train import film, telemetry
 from blink.train.checkpoint import latest_checkpoint, load_checkpoint
 from blink.train.world import require_same_world
@@ -86,6 +87,15 @@ def _load_into(run, state: dict[str, Any]) -> None:
         run.log(f"lr scale x{saved:g} -> x{run.lr_scale:g} from step {run.step}")
 
 
+def _saved_config(saved: dict[str, Any]) -> dict[str, Any]:
+    """The checkpoint's config with any key added since it was written at its default, which is by
+    rule the old behaviour: an older run resumed on newer code is not reported as changed."""
+    try:
+        return config_to_dict(config_from_dict(saved))
+    except (TypeError, ValueError):  # keys from newer code, or values this code refuses: compare as is
+        return saved
+
+
 def _history(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
@@ -100,8 +110,9 @@ def restore(run) -> None:
     if path is None:
         raise FileNotFoundError(f"--resume: no checkpoint in {run_dir}")
     state = load_checkpoint(path, map_location="cpu")
-    if state["config"] != config_to_dict(run.cfg):
-        changed = sorted(k for k, v in config_to_dict(run.cfg).items() if state["config"].get(k) != v)
+    saved = _saved_config(state["config"])
+    if saved != config_to_dict(run.cfg):
+        changed = sorted(k for k, v in config_to_dict(run.cfg).items() if saved.get(k) != v)
         run.log(f"warning: config differs from the checkpoint in {changed}; resume will not be bitwise")
     _load_into(run, state)
     run.kept = [int(s) for s in state.get("kept", [])]

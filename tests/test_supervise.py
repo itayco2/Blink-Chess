@@ -429,3 +429,16 @@ def test_a_locked_status_file_never_takes_the_supervision_down(tmp_path, monkeyp
     assert outcome.status == "stopped: crash, exit 3 after 3 restarts"
     assert any("could not write supervisor.json" in line for line in lines)
     assert any("could not write heartbeat.json" in line for line in lines)
+
+
+@pytest.mark.parametrize(("mode", "floor"), [("off", "2,550"), ("inductor", "3,400")])
+def test_the_supervise_benchmark_matches_the_train_configs_compile_mode(
+    tmp_path, monkeypatch, capsys, mode, floor
+):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    bench = _bench_json(tmp_path / "bench.json")
+    config = tmp_path / "c.toml"
+    config.write_text(f'[train]\ncompile = "{mode}"\n', encoding="utf-8")
+    argv = ["supervise", "--run", "long", "--dry-run", "--bench", str(bench), "--bench-size", "s"]
+    assert cli.main([*argv, "--", "train", "--config", str(config), "--run", "long"]) == 0
+    assert f"floor {floor} samples/s" in capsys.readouterr().out

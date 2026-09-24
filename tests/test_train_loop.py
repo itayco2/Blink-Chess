@@ -1,4 +1,5 @@
 import json
+import time
 
 import numpy as np
 import pytest
@@ -245,3 +246,38 @@ def test_a_new_run_rewrites_a_stale_config_a_reader_is_holding_open(tmp_path):
     with held_open(run_dir / "config.json"):
         loop.train(cfg, _spec(run_dir, max_steps=1), _repeat(records[:16]), val=records, log=lambda _: None)
     assert json.loads((run_dir / "config.json").read_text(encoding="utf-8"))["world"] == WORLD
+
+
+def _sleepy(batch: np.ndarray, seconds: float):
+    def source(start_step: int):
+        while True:
+            time.sleep(seconds)
+            yield batch
+
+    return source
+
+
+def test_metrics_record_how_long_the_loop_waited_for_its_batches(tmp_path):
+    records = fixture_records()
+    cfg = tiny_train_config(
+        steps=9, warmup_steps=2, metrics_every=3, batch_size=16, eval_every=1000, ckpt_every_steps=1000
+    )
+    for name, seconds in (("fast", 0.0), ("slow", 0.1)):
+        loop.train(cfg, _spec(tmp_path / name), _sleepy(records[:16], seconds), val=None, log=lambda _: None)
+    fast, slow = (_records_jsonl(tmp_path / name / "metrics.jsonl") for name in ("fast", "slow"))
+    assert all(0.0 <= row["data_wait_frac"] <= 1.0 for row in fast + slow)
+    assert all(row["time"] > 1_600_000_000 for row in fast + slow)
+    # A window starts when the row before it is written, so share x window = seconds waited. The sleeps
+    # bound that from below whatever the machine's load; a share alone would not be. The margin is the
+    # row's wall clock, which ticks every 15.6 ms on Windows: up to 5% of a 0.3 s window.
+    slow_waits = _waits(slow)
+    assert all(waited >= 0.8 * 0.1 * steps for waited, steps in slow_waits)
+    assert sum(w for w, _ in _waits(fast)) < sum(w for w, _ in slow_waits)
+
+
+def _waits(rows: list[dict]) -> list[tuple[float, int]]:
+    """(seconds the loop waited, steps) of each metrics window after the first."""
+    return [
+        (row["data_wait_frac"] * (row["time"] - before["time"]), row["step"] - before["step"])
+        for before, row in zip(rows, rows[1:], strict=False)
+    ]

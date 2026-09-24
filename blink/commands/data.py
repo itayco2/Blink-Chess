@@ -1,4 +1,5 @@
-"""`blink data probe|pack` (P1) and `blink data bigpack|rebalance|valprobe|mateset|verify|stats` (P2).
+"""`blink data probe|pack` (P1), `blink data bigpack|rebalance|valprobe|mateset|verify|stats` (P2) and
+`blink data ladder10m` (the P3 ladder's fixed set as the pack s10m trains on).
 
 Exit codes: 0 done; 1 done but a line raised something other than a documented parse.Rejected
 (a parser bug: see error_samples in the report), or verify found a failed check; 2 refused: a missing
@@ -302,6 +303,41 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ladder(args: argparse.Namespace) -> int:
+    from blink.data import ladder
+
+    cfg = ladder.LadderConfig(
+        pack=Path(args.pack), out=Path(args.out), positions=args.positions, overwrite=args.overwrite
+    )
+    try:
+        manifest = ladder.build(cfg, log=lambda line: print(line, flush=True))
+    except (FileExistsError, FileNotFoundError, ValueError) as exc:
+        print(f"blink data ladder10m: {exc}", file=sys.stderr)
+        return 2
+    print(ladder.summary(manifest, cfg.out))
+    return 0
+
+
+def _register_ladder(sub: argparse._SubParsersAction) -> None:
+    lad = sub.add_parser(
+        "ladder10m", help="the s10m pack: the ladder's fixed train roots and their children (plan P3, P5)"
+    )
+    lad.add_argument("--pack", default=str(default_pack()), help="finished v1 pack (default: %(default)s)")
+    lad.add_argument(
+        "--positions",
+        type=_positive,
+        default=10_000_000,
+        help="the first N train roots (default: %(default)s)",
+    )
+    lad.add_argument(
+        "--out",
+        default=str(paths.home() / "data" / "ladder10m"),
+        help="output directory (default: %(default)s)",
+    )
+    lad.add_argument("--overwrite", action="store_true", help="replace an earlier ladder pack in --out")
+    lad.set_defaults(func=_cmd_ladder)
+
+
 def _register_bigpack(sub: argparse._SubParsersAction) -> None:
     from blink.data import bigpack, grouped
 
@@ -362,6 +398,7 @@ def _register_p2(sub: argparse._SubParsersAction) -> None:
     stat.add_argument("--pack", default=str(default_pack()), help="finished pack (default: %(default)s)")
     stat.add_argument("--out", help="output path (default: <pack>/data_stats.json)")
     stat.set_defaults(func=_cmd_stats)
+    _register_ladder(sub)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:

@@ -1,0 +1,11 @@
+# S with arm a10's optimizer, for the throughput bench: Muon adds optimizer work to every step, so
+# the ablation sweep plans a10's steps and polices its throughput at this row's rate, not D's
+# (bench_size in configs/ablations/a10.toml). The sweep refuses to plan a10 until the row exists:
+# blink bench throughput --sizes s-muon --micro 1024 --compile <the recipe's train.compile>
+# Bench only s-muon: a row of the same size, micro-batch and mode replaces the old one, and D's s row
+# planned a01-a03 (the sweep pins that rate in ablations.json, but keep the measured row as it is).
+base = "s.toml"
+
+[train]
+optimizer = "muon"
+muon_adjust_lr_fn = "match_rms_adamw"

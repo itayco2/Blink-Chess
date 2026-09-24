@@ -3,7 +3,8 @@
 Recipe D trunk: token embedding (16 codes) plus a learned square embedding, L pre-RMSNorm blocks with
 QK-norm attention (F.scaled_dot_product_attention, no QKV bias, head dim 32) and a GELU FFN of width
 2d, dropout 0, then a final RMSNorm. With model.gab the GAB-lite module (blink.model.gab) turns the
-embeddings into one attention bias [B, H, 64, 64], computed once and added in every layer.
+embeddings into one attention bias [B, H, 64, 64], computed once and added in every layer. With
+model.static_bias (P5 arm a06) a learned bias [1, H, 64, 64] (blink.model.static_bias) takes that slot.
 """
 
 import math
@@ -16,6 +17,7 @@ from blink.board.encode import NUM_CODES
 from blink.model.config import ModelConfig
 from blink.model.gab import GabLite
 from blink.model.heads import AttentionPolicyHead, ValueHead
+from blink.model.static_bias import StaticBias
 
 INIT_STD = 0.02
 
@@ -58,15 +60,24 @@ class Trunk(nn.Module):
         self.token_embedding = nn.Embedding(NUM_CODES, cfg.d_model)
         self.square_embedding = nn.Parameter(torch.zeros(64, cfg.d_model))
         self.gab = GabLite(cfg.d_model, cfg.n_heads) if cfg.gab else None
+        self.static_bias = StaticBias(cfg.n_heads) if cfg.static_bias else None
         self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layers))
         self.final_norm = nn.RMSNorm(cfg.d_model)
 
     def embed(self, tokens: torch.Tensor) -> torch.Tensor:
         return self.token_embedding(tokens) + self.square_embedding
 
+    def attention_bias(self, x: torch.Tensor) -> torch.Tensor | None:
+        """The one bias every layer adds to its attention logits: GAB-lite's, the static one, or none."""
+        if self.gab is not None:
+            return self.gab(x)
+        if self.static_bias is not None:
+            return self.static_bias()
+        return None
+
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         x = self.embed(tokens)
-        bias = None if self.gab is None else self.gab(x)
+        bias = self.attention_bias(x)
         for block in self.blocks:
             x = block(x, bias)
         return self.final_norm(x)
@@ -105,9 +116,18 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
 
+def _count(module: nn.Module | None) -> int:
+    return 0 if module is None else count_parameters(module)
+
+
 def parameter_report(model: BlinkNet) -> dict[str, int]:
-    """Total, GAB-lite and non-GAB parameter counts (README Table 1 shows non-GAB / total)."""
+    """Total, GAB-lite, non-GAB and static-bias parameter counts (README Table 1 shows non-GAB / total).
+
+    non_gab is the total minus GAB-lite only, so a static-bias model (a06) counts its bias in non_gab
+    as well as under its own key.
+    """
     total = count_parameters(model)
-    gab = 0 if model.trunk.gab is None else count_parameters(model.trunk.gab)
+    gab = _count(model.trunk.gab)
     blocks = count_parameters(model.trunk.blocks)
-    return {"total": total, "gab": gab, "non_gab": total - gab, "blocks": blocks}
+    static = _count(model.trunk.static_bias)
+    return {"total": total, "gab": gab, "non_gab": total - gab, "blocks": blocks, "static_bias": static}

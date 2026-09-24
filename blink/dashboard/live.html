@@ -111,11 +111,15 @@ const RANDOM_LEGAL_TOP1 = 0.03;
 const COLORS = { accent: "#ffd54a", val: "#8ab4f8", grid: "#1f2633", muted: "#7d8795" };
 const state = { run: null, metrics: [], evals: [], offsets: { "metrics.jsonl": 0, "evals.jsonl": 0 } };
 
+// Python writes bare NaN and Infinity, which JSON.parse refuses: quote them, then read them back as
+// numbers. Only those tokens become numbers, so text fields such as "phase" stay text.
+const NON_FINITE = new Set(["NaN", "Infinity", "-Infinity"]);
+
 function parseLine(line) {
   const safe = line.replace(/(-?Infinity|NaN)/g, '"$1"');
   const raw = JSON.parse(safe);
   const out = {};
-  for (const [k, v] of Object.entries(raw)) out[k] = typeof v === "string" ? Number(v) : v;
+  for (const [k, v] of Object.entries(raw)) out[k] = typeof v === "string" && NON_FINITE.has(v) ? Number(v) : v;
   return out;
 }
 
@@ -180,6 +184,33 @@ function median(xs) {
   return s.length ? s[Math.floor(s.length / 2)] : NaN;
 }
 
+// The P4 speed WARN (a sysmem spill): train-phase samples/s more than 30% below the median of the last
+// 10 train rows that were not slow, for 5 minutes of wall time. Eval and checkpoint windows are skipped:
+// they neither start nor end a slow stretch. Slow rows never move the reference, so a long spill keeps
+// warning. blink.train.status.speed_check is the same rule for `blink status`; both are held to
+// tests/fixtures/dashboard_speed_cases.json (site/tests/dashboard.test.mjs, tests/test_status.py).
+const SPEED_DROP = 0.30, SPEED_WINDOW_S = 300, SPEED_REFERENCE_ROWS = 10;
+const QUIET_PHASES = new Set(["eval", "ckpt"]);
+
+function speedCheck(rows) {
+  const fast = [];
+  let reference = null, rate = null, since = null, last = null;
+  for (const r of rows) {
+    if (QUIET_PHASES.has(r.phase) || !Number.isFinite(r.samples_per_s) || !Number.isFinite(r.time)) continue;
+    rate = r.samples_per_s;
+    if (reference !== null && rate < (1 - SPEED_DROP) * reference) {
+      if (since === null) since = r.time;
+      last = r.time;
+      continue;
+    }
+    since = null; last = null;
+    fast.push(rate);
+    reference = median(fast.slice(-SPEED_REFERENCE_ROWS));
+  }
+  const slow_s = since === null ? 0 : last - since;
+  return { warn: slow_s >= SPEED_WINDOW_S, reference, rate, slow_s };
+}
+
 const verdicts = {
   policy(m) {
     const last = m.at(-1);
@@ -208,10 +239,13 @@ const verdicts = {
     return ["healthy", "healthy: " + fmt(last.top1 * 100, 1) + "% vs about 3% for a random legal move"];
   },
   speed(m) {
-    if (m.length < 3) return ["idle", "measuring"];
-    const recent = m.slice(-11, -1).map(r => r.samples_per_s), x = m.at(-1).samples_per_s;
-    if (x < 0.7 * median(recent)) return ["sick", "WARN: over 30% below the recent median (sysmem spill?)"];
-    return ["healthy", "healthy: steady at " + fmt(x, 0) + " samples/s, " + fmt(m.at(-1).gpu_mem_gb, 2) + " GB reserved"];
+    const check = speedCheck(m);
+    if (m.length < 3 || check.reference === null) return ["idle", "measuring"];
+    const drop = fmt(check.rate, 0) + " samples/s, over 30% below " + fmt(check.reference, 0);
+    if (check.warn) return ["sick", "WARN: " + drop + " for " + fmt(check.slow_s / 60, 1) + " min (sysmem spill?)"];
+    if (check.rate < (1 - SPEED_DROP) * check.reference) return ["watch", "watch: " + drop + " for " + fmt(check.slow_s, 0) + " s (WARN at " + SPEED_WINDOW_S + " s)"];
+    const last = m.at(-1), wait = Number.isFinite(last.data_wait_frac) ? ", loader wait " + fmt(last.data_wait_frac * 100, 1) + "%" : "";
+    return ["healthy", "healthy: steady at " + fmt(check.rate, 0) + " samples/s" + wait + ", " + fmt(last.gpu_mem_gb, 2) + " GB reserved"];
   },
   lr(m) {
     const last = m.at(-1);
@@ -259,8 +293,13 @@ async function pull(file, key) {
   const data = await getJson(url);
   if (data.reset) state[key] = [];
   state.offsets[file] = data.offset;
+  const arrived = Date.now() / 1000; // a row written before rows carried their time: when it was first seen
   for (const line of data.lines) {
-    try { state[key].push(parseLine(line)); } catch (err) { console.warn("skipped a bad line", err); }
+    try {
+      const row = parseLine(line);
+      if (!Number.isFinite(row.time)) row.time = arrived;
+      state[key].push(row);
+    } catch (err) { console.warn("skipped a bad line", err); }
   }
 }
 

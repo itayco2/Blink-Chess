@@ -2,6 +2,10 @@
 
 The dynamo exporter writes weights to a side file by default (external_data=True, PF29), which a
 static site cannot serve as one fetch, so external_data=False is passed and then checked on the file.
+Attention is traced under the math SDPA backend: traced with the fused CPU kernel, a model whose
+attention takes a bias (Recipe D's GAB-lite, a06's static bias) records a view that the math
+decomposition's output strides cannot take, and the export fails ("Cannot view a tensor with shape
+[B, 64, H, 32] ..."). ONNX gets the math form either way.
 The file is written as <name>.tmp, checked, and only then moved onto its name with os.replace, so a
 killed or failed export never leaves a partial model where `blink site serve` would find it.
 """
@@ -46,25 +50,27 @@ class ParityReport:
 def export(module, out: Path) -> Path:
     """Write `module` (tokens [B, 64] -> policy [B, 1880], value [B, 128]) to `out` and check the file."""
     import torch
+    from torch.nn.attention import SDPBackend, sdpa_kernel
 
     module = module.eval()
     example = torch.zeros((EXAMPLE_BATCH, 64), dtype=torch.long)
     batch = torch.export.Dim("batch", min=1, max=MAX_BATCH)
 
     def write(path: Path) -> None:
-        torch.onnx.export(
-            module,
-            (example,),
-            str(path),
-            dynamo=True,
-            opset_version=OPSET,
-            external_data=False,
-            input_names=[INPUT_NAME],
-            output_names=list(OUTPUT_NAMES),
-            dynamic_shapes=({0: batch},),
-            optimize=True,
-            verbose=False,
-        )
+        with sdpa_kernel(SDPBackend.MATH):
+            torch.onnx.export(
+                module,
+                (example,),
+                str(path),
+                dynamo=True,
+                opset_version=OPSET,
+                external_data=False,
+                input_names=[INPUT_NAME],
+                output_names=list(OUTPUT_NAMES),
+                dynamic_shapes=({0: batch},),
+                optimize=True,
+                verbose=False,
+            )
 
     return write_checked(out, write)
 

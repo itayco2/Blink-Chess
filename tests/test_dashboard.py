@@ -1,13 +1,20 @@
 import http.client
 import inspect
 import json
+import re
+import shutil
+import subprocess
 import threading
+from pathlib import Path
 
 import pytest
 
 from blink import cli, heartbeat
 from blink.commands import dashboard as dashboard_command
 from blink.dashboard import server
+from blink.train import status as run_status
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -138,6 +145,32 @@ def test_the_page_is_served_with_the_dark_palette_and_six_charts(live_server):
     for chart in ("policy", "value", "top1", "speed", "lr", "grad"):
         assert f'data-chart="{chart}"' in page
     assert "no-store" in headers["Cache-Control"]
+
+
+def test_the_page_and_blink_status_share_the_speed_rule_constants():
+    page = server.LIVE_HTML.read_text(encoding="utf-8")
+    found = re.search(
+        r"const SPEED_DROP = ([\d.]+), SPEED_WINDOW_S = (\d+), SPEED_REFERENCE_ROWS = (\d+);", page
+    )
+    assert found, "live.html no longer declares the speed rule's constants on one line"
+    got = (float(found[1]), float(found[2]), int(found[3]))
+    assert got == (run_status.SPEED_DROP, run_status.SPEED_WINDOW_S, run_status.SPEED_REFERENCE_ROWS)
+    assert 'const QUIET_PHASES = new Set(["eval", "ckpt"]);' in page
+    assert sorted(run_status.QUIET_PHASES) == ["ckpt", "eval"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs Node.js (the CI node job runs it too)")
+def test_the_page_s_speed_rule_passes_the_shared_cases_in_node():
+    proc = subprocess.run(
+        ["node", "--test", "site/tests/dashboard.test.mjs"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-2000:]
+    assert "# fail 0" in proc.stdout
 
 
 def test_unknown_paths_are_not_found(live_server):

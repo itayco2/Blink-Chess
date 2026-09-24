@@ -18,6 +18,7 @@ weight_decay = 0.1      # matrices only
 beta1 = 0.9
 beta2 = 0.95
 clip_norm = "auto"      # 2 x p95 of the warmup grad norms; clip 1.0 clipped 98% of the skeleton's steps
+compile = "inductor"    # P4 A/B on M, 2 seeds: 1.55x samples/s and 4-5% lower loss at step 2k (PF68)
 ema_max = 0.9999        # decay_t = min(0.9999, (1 + t) / (10 + t))
 alpha = 0.5             # soft policy target: (1 - alpha) onehot + alpha softmax((W_i - W_1) / tau)
 tau = 0.05

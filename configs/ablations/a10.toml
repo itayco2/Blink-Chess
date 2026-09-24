@@ -1,8 +1,12 @@
 # a10: Muon on the 2D hidden weights, torch.optim.Muon(..., adjust_lr_fn='match_rms_adamw'), passed
-# explicitly because the default is 'original'. Judged on VAA.
+# explicitly because the default is 'original'. Q, K and V are orthogonalised separately (Keller
+# Jordan's Muon post), not as the fused [3d, d] matrix: blink.train.optimizers.BlockwiseMuon.
+# Judged on VAA. Muon costs time per step, so a10 is planned and policed at its own bench row,
+# s-muon (configs/s-muon.toml), not D's.
 [arm]
-change = "Muon on 2D hidden weights (adjust_lr_fn match_rms_adamw)"
+change = "Muon on 2D hidden weights (adjust_lr_fn match_rms_adamw; Q, K and V orthogonalised separately)"
 judged_on = "vaa"
+bench_size = "s-muon"
 
 [train]
 optimizer = "muon"

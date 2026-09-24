@@ -19,6 +19,7 @@ import torch
 from blink.board import encode, moves, value
 from blink.board.encode import unpack
 from blink.model.losses import compute_losses
+from blink.model.value_mapping import LICHESS
 from blink.train.atomic import write_text_atomic
 from blink.train.batch import Batch, make_batch
 
@@ -55,9 +56,12 @@ class ValSet:
     legal: torch.Tensor  # bool [N, 1880]
 
 
-def make_val_set(records: np.ndarray, device: str | torch.device) -> ValSet:
+def make_val_set(records: np.ndarray, device: str | torch.device, value_mapping: str = LICHESS) -> ValSet:
+    """The fixed validation sample; its value CE and win MAE are measured against the run's own
+    value targets (train.value_mapping), the same targets the run trains on."""
     masks = np.stack([legal_mask_from_codes(codes) for codes in unpack(records["board"])])
-    return ValSet(batch=make_batch(records, device), legal=torch.from_numpy(masks).to(device))
+    batch = make_batch(records, device, value_mapping)
+    return ValSet(batch=batch, legal=torch.from_numpy(masks).to(device))
 
 
 def _forward_in_chunks(model: torch.nn.Module, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -85,7 +89,7 @@ def evaluate(model: torch.nn.Module, val: ValSet, alpha: float, tau: float) -> d
         "value_ce": loss_value.item(),
         "top1": (masked.argmax(-1) == best).float().mean().item(),
         "top1_unmasked": (policy.argmax(-1) == best).float().mean().item(),
-        "win_mae": (win - val.batch.w_best).abs().mean().item(),
+        "win_mae": (win - val.batch.w_value).abs().mean().item(),
     }
 
 
@@ -118,7 +122,9 @@ class MetricWindow:
 
     Each row carries a phase: "eval" or "ckpt" when an evaluation or a checkpoint ran inside its
     window (its samples/s is then not a training rate), else "train". Throughput stop rules read only
-    "train" rows.
+    "train" rows. It also carries its wall-clock `time` (the rules judge minutes, not rows) and
+    `data_wait_frac`, the share of the window the loop spent waiting for its next batch (P4: <= 5%).
+    Neither touches the losses: both are host clocks read around the batch source.
     """
 
     def __init__(self, device: torch.device) -> None:
@@ -129,11 +135,16 @@ class MetricWindow:
         zero = torch.zeros((), device=self.device)
         self.loss_policy, self.loss_value, self.grad_norm, self.clipped = zero, zero, zero, zero
         self.steps, self.samples, self.started = 0, 0, time.perf_counter()
+        self.wait_s = 0.0
         self.phase = "train"
 
     def mark(self, phase: str) -> None:
         if PHASES.index(phase) > PHASES.index(self.phase):
             self.phase = phase
+
+    def waited(self, seconds: float) -> None:
+        """Time the loop spent blocked on the batch source (reading, cutting, weighting a batch)."""
+        self.wait_s += seconds
 
     def add(self, loss_policy, loss_value, grad_norm, clip_norm: float, samples: int) -> None:
         self.loss_policy = self.loss_policy + loss_policy
@@ -157,6 +168,8 @@ class MetricWindow:
             "samples_per_s": self.samples / elapsed,
             "gpu_mem_gb": torch.cuda.max_memory_reserved(self.device) / 2**30 if on_cuda else 0.0,
             "phase": self.phase,
+            "data_wait_frac": min(1.0, self.wait_s / elapsed),
+            "time": time.time(),
         }
         self._reset()
         return record
