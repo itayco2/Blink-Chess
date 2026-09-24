@@ -12,7 +12,7 @@ from pathlib import Path
 
 from blink import checks
 
-COMMAND_MODULES = ("data", "train", "dashboard", "play", "evaluate", "export", "site")
+COMMAND_MODULES = ("data", "train", "dashboard", "play", "evaluate", "export", "site", "baselines", "ops")
 
 
 def configure_stdio() -> None:
