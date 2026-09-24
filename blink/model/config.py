@@ -16,6 +16,10 @@ AUTO = "auto"
 HOUR_S = 3600.0
 COMPILE_MODES = ("off", "inductor")  # the cudagraphs backend measured no faster than eager (PF64)
 VALUE_MAPPINGS = ("lichess", "deepmind")  # the value head's targets (blink.model.value_mapping); P5 a08
+OPTIMIZERS = ("adamw", "muon")  # muon: arm a10, torch.optim.Muon on the trunk's hidden matrices
+# The adjust_lr_fn values torch.optim.Muon accepts in torch 2.14 (this module is torch-free, so the
+# list lives here; tests/test_muon.py pins it to the installed torch's own check).
+MUON_ADJUST_LR_FNS = ("original", "match_rms_adamw", "spectral_unclamped")
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,9 @@ class TrainConfig:
     weight_decay: float = 0.1  # matrices only
     beta1: float = 0.9
     beta2: float = 0.95
+    optimizer: str = "adamw"  # or "muon": Muon on the trunk's hidden matrices, AdamW on the rest (a10)
+    # Muon's per-shape LR scaling. torch's default is "original"; match_rms_adamw reuses AdamW's LR and decay
+    muon_adjust_lr_fn: str = "match_rms_adamw"
     clip_norm: float | str = 1.0  # or "auto": 2 x the 95th percentile of the warmup gradient norms
     compile: str = "off"  # or "inductor": torch.compile the training forward (P4 bench)
     value_mapping: str = "lichess"  # or "deepmind": the value head's targets (P5 a08); policy keeps Lichess W
@@ -97,6 +104,7 @@ class TrainConfig:
             raise ValueError(
                 f"train.value_mapping must be one of {VALUE_MAPPINGS}, got {self.value_mapping!r}"
             )
+        self._check_optimizer()
 
     def _check_positive(self) -> None:
         positive = (
@@ -140,6 +148,15 @@ class TrainConfig:
             return
         if isinstance(clip, bool) or not isinstance(clip, int | float) or clip <= 0:
             raise ValueError(f"train.clip_norm must be a positive number or 'auto', got {clip!r}")
+
+    def _check_optimizer(self) -> None:
+        """muon_adjust_lr_fn is checked under AdamW too: a typo must not wait for the day it is used."""
+        if self.optimizer not in OPTIMIZERS:
+            raise ValueError(f"train.optimizer must be one of {OPTIMIZERS}, got {self.optimizer!r}")
+        if self.muon_adjust_lr_fn not in MUON_ADJUST_LR_FNS:
+            raise ValueError(
+                f"train.muon_adjust_lr_fn must be one of {MUON_ADJUST_LR_FNS}, got {self.muon_adjust_lr_fn!r}"
+            )
 
     @property
     def children_per_step(self) -> int:

@@ -98,7 +98,7 @@ def _compiled(model, mode: str):
 
 
 def _train_step(model, optimizer, batch, accum: int, cfg, device_type: str, clip: float, graphs: bool):
-    """One optimizer step over `accum` micro-batches, as the trainer does: bf16 autocast, clip, AdamW.
+    """One optimizer step over `accum` micro-batches, as the trainer does: bf16 autocast, clip, step.
 
     `clip` is GradClip.limit(): with clip_norm = "auto" that is infinity, as in the trainer's warmup,
     and clip_grad_norm_ does the same work for any limit. Under CUDA graphs every replay reuses the

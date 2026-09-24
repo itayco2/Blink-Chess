@@ -17,7 +17,8 @@ arms = ["a01", "a02", "a03", "a04", "a05", "a11", "a12"]
 # exists, but its guard mate_preserving must first be written to evals.jsonl for every arm AND for
 # the a01-a03 floor (rescore their final checkpoints or re-run them); until then a08 ends
 # "not judged". Arms never recorded in ablations.json are pending, so adding them back here
-# resumes the same sweep.
+# resumes the same sweep. An arm with [arm] bench_size (a10: s-muon) runs at that bench row's rate;
+# bench it first or the sweep refuses.
 held = ["a06", "a07", "a08", "a10", "a15"]
 slip_cut = ["a10", "a11", "a12"]    # dropped by the P5 slip rule (blink sweep ablations --slip)
 disable = []                  # supervise stop rules turned off for every arm (recorded)

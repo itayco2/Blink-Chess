@@ -46,6 +46,34 @@ def test_every_ablation_arm_file_only_overrides_the_recipe():
     assert sweep.load_arm(ABLATIONS / "a15.toml").combine is True
 
 
+def test_the_a10_arm_turns_the_s_recipe_into_a_valid_muon_config():
+    """a10 was held until its code existed (PF66); its overrides now pass the trainer's own check."""
+    from blink.model.config import config_from_dict, read_tables
+
+    arm = sweep.load_arm(ABLATIONS / "a10.toml")
+    assert arm.overrides == {"train": {"optimizer": "muon", "muon_adjust_lr_fn": "match_rms_adamw"}}
+    merged = sweep.merged_config(read_tables(REPO / "configs" / "s.toml"), arm, steps=10_000)
+    sweep.validate(merged)
+    cfg = config_from_dict({**merged["train"], "model": merged["model"]})
+    assert (cfg.optimizer, cfg.muon_adjust_lr_fn, cfg.weight_decay) == ("muon", "match_rms_adamw", 0.1)
+
+
+def test_a10_is_planned_at_the_s_muon_bench_row_which_is_s_with_a10s_optimizer():
+    """Muon adds optimizer work to every step, so a10's clock budget comes from a bench row of its own
+    config, not D's; configs/s-muon.toml is exactly what the sweep trains for a10, bar the step count."""
+    from blink.model.config import read_tables
+
+    arm = sweep.load_arm(ABLATIONS / "a10.toml")
+    assert arm.bench_size == "s-muon"
+    s_muon = read_tables(REPO / "configs" / "s-muon.toml")
+    merged = sweep.merged_config(
+        read_tables(REPO / "configs" / "s.toml"), arm, steps=s_muon["train"]["steps"]
+    )
+    assert s_muon == merged
+    others = [p for p in ABLATIONS.glob("a*.toml") if p.stem != "a10"]
+    assert all(sweep.load_arm(path).bench_size is None for path in others)
+
+
 def _noise(vaa=(0.500, 0.502, 0.498), top1=(0.300, 0.301, 0.299), **extra):
     results = {f"a0{i + 1}": {"vaa": v, "top1": t} for i, (v, t) in enumerate(zip(vaa, top1, strict=True))}
     for key, values in extra.items():
@@ -207,6 +235,66 @@ def test_the_slip_rule_drops_the_cut_arms_and_an_invalid_arm_does_not_stop_the_s
     assert report["arms"]["a05"]["status"].startswith("invalid: ")
     assert report["arms"]["a15"]["status"] == "not run: no arm was adopted"
     assert report["recipe"]["recipe"] == "D"
+
+
+def _steps_and_rates(runner: FakeRunner) -> dict[str, tuple[int, float | None]]:
+    return {
+        r.run: (tomllib.loads(r.config.read_text(encoding="utf-8"))["train"]["steps"], r.bench_rate)
+        for r in runner.requests
+    }
+
+
+def test_an_arm_with_its_own_bench_row_is_planned_and_policed_at_that_rate(tmp_path, monkeypatch):
+    """a10 at D's rate would get more steps than its hours hold, and the throughput stop rule
+    (15% under the bench rate for 10 minutes) could end it before its cooldown."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, ARMS, ORDER))
+    runner = FakeRunner(tmp_path / "home")
+    out = tmp_path / "ablations.json"
+    report = sweep.run_ablations(plan, out, 1000.0, runner, log=lambda _: None, arm_rates={"a10": 500.0})
+    planned = _steps_and_rates(runner)
+    assert planned["abl-a01"] == planned["abl-a05"] == (36, 1000.0)  # 0.01 h x 1,000/s / batch 1,000
+    assert planned["abl-a10"] == (18, 500.0)
+    assert (
+        report["arms"]["a10"]["samples_per_s"] == 500.0 and report["arms"]["a01"]["samples_per_s"] == 1000.0
+    )
+
+
+def test_a_combined_arm_runs_at_the_slowest_rate_among_the_winners_it_combines(tmp_path, monkeypatch):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = sweep.load_plan(_plan(tmp_path, ARMS, ORDER))
+    runner = FakeRunner(tmp_path / "home")
+    rates = {"a05": 800.0, "a10": 500.0}  # a05 is adopted, a10 is not (FAKE_VAA)
+    report = sweep.run_ablations(
+        plan, tmp_path / "ablations.json", 1000.0, runner, lambda _: None, arm_rates=rates
+    )
+    assert report["recipe"]["recipe"] == "D + a05"
+    assert _steps_and_rates(runner)["abl-a15"] == (28, 800.0)
+
+
+def test_sweep_ablations_plans_an_arm_at_its_own_bench_row_and_refuses_a_missing_one(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = _plan(tmp_path, {**ARMS, "a10": 'bench_size = "s-muon"\n[train]\nseed = 9\n'}, ORDER)
+    ok = {"micro": 1024, "oom": False, "error": None, "peak_reserved_gb": 1.0}
+    rows = [
+        {**ok, "size": size, "compile": mode, "samples_per_s": rate}
+        for size, rate in (("s", 1000.0), ("s-muon", 500.0))
+        for mode in ("off", "inductor", "cudagraphs")
+    ]
+    bench = tmp_path / "bench.json"
+    bench.write_text(json.dumps({"throughput": rows}), encoding="utf-8")
+    argv = ["sweep", "ablations", "--plan", str(plan), "--bench", str(bench), "--dry-run"]
+    assert cli.main(argv) == 0
+    lines = {line.split(":")[0]: line for line in capsys.readouterr().out.splitlines()}
+    assert "steps 36;" in lines["abl-a01"] and "steps 18;" in lines["abl-a10"]
+
+    bench.write_text(
+        json.dumps({"throughput": [row for row in rows if row["size"] == "s"]}), encoding="utf-8"
+    )
+    assert cli.main(argv) != 0
+    assert "a10" in (err := capsys.readouterr().err) and "s-muon" in err
 
 
 def _bench(rates: dict[str, float], p99: dict[str, float], budget: float = 5.5) -> dict:
