@@ -5,8 +5,14 @@ UCI_LimitStrength=true, UCI_Elo=<anchor>, Threads=1, Hash=16. Openings are playe
 the book slice, each once per colour (-repeat). No resignation and no win adjudication; the one draw
 adjudication is `-maxmoves 300` (600 engine plies). `-pgnout nodes=true` writes Blink's per-move row
 count into the PGN, and the no-search audit runs on that PGN as soon as the games finish.
+
+A dm:9M[:ema] selector runs the same UCI process under DeepMind's own name, DM-9M or DM-9M-ema, with no
+--mode (it has one, action-value), and its moves are audited with the engine filter "dm" (PF60): under a
+Blink name its games would be filed as Blink's and the "blink" audit filter would see none of its moves.
+Stockfish at a fixed node count (the E4 node ladder) is `SF19-n<nodes>`, full strength.
 """
 
+import hashlib
 import os
 import re
 import subprocess
@@ -19,7 +25,8 @@ from pathlib import Path
 import blink
 from blink import paths
 from blink.eval import books, nosearch
-from blink.play.factory import RANDOM_SELECTORS
+from blink.play.factory import RANDOM_SELECTORS, ModelUnavailable
+from blink.reference import registry
 
 BLINK_ST, BLINK_MARGIN_MS = 1.0, 500
 SF_ST, SF_MARGIN_MS = 0.1, 100
@@ -32,7 +39,10 @@ SUMMARY = re.compile(
     r"Games: (\d+), Wins: (\d+), Losses: (\d+), Draws: (\d+), Points: ([\d.]+)",
 )
 ELO = re.compile(r"^Elo: .*$", re.MULTILINE)
+PTNML = re.compile(r"Ptnml\(0-2\): \[(\d+), (\d+), (\d+), (\d+), (\d+)\]")
 NAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+NAME_TAG_MAX = 40  # a model tag longer than this keeps its head plus a hash of the whole selector
+NAME_HASH_CHARS = 7
 
 
 def tools_dir() -> Path:
@@ -56,26 +66,76 @@ class EngineSpec:
     tc: str | None = None
     timemargin_ms: int = 0
     options: tuple[tuple[str, str], ...] = ()
+    nodes: int | None = None  # a fixed node budget per move (the node ladder), instead of a clock
 
     def fastchess_args(self) -> list[str]:
         out = ["-engine", f"cmd={self.cmd}", f"name={self.name}"]
         if self.args:
             out.append(f"args={' '.join(self.args)}")
-        out.append(f"tc={self.tc}" if self.tc else f"st={self.st:g}")
-        out.append(f"timemargin={self.timemargin_ms}")
+        if self.nodes is not None:
+            out.append(f"nodes={self.nodes}")
+        if self.tc:
+            out.append(f"tc={self.tc}")
+        elif self.st is not None:
+            out.append(f"st={self.st:g}")
+        if self.tc or self.st is not None:
+            out.append(f"timemargin={self.timemargin_ms}")
         out += [f"option.{key}={value}" for key, value in self.options]
         return out
 
 
+def dm_name(selector: str) -> str:
+    """DM-9M or DM-9M-ema; a malformed dm selector is refused like a missing model, in one line."""
+    try:
+        return registry.parse(selector).name
+    except ValueError as exc:
+        raise ModelUnavailable(str(exc)) from exc
+
+
+def model_tag(model: str) -> str:
+    """The selector made name-safe. A long one keeps its first characters plus a short hash of the whole
+    selector, so two models whose tags share a head never play under one name (Ordo tallies by name)."""
+    tag = NAME_UNSAFE.sub("_", model).strip("_")
+    if len(tag) <= NAME_TAG_MAX:
+        return tag
+    digest = hashlib.sha256(model.encode("utf-8")).hexdigest()[:NAME_HASH_CHARS]
+    return f"{tag[: NAME_TAG_MAX - NAME_HASH_CHARS - 1]}-{digest}"
+
+
 def engine_name(model: str, mode: str) -> str:
-    tag = NAME_UNSAFE.sub("_", model).strip("_")[:40]
-    return f"Blink-{mode}-{tag}"
+    """The fastchess name of the engine under test: DM-9M[-ema] for a dm selector (PF60), else Blink's."""
+    if registry.is_dm(model):
+        return dm_name(model)
+    return f"Blink-{mode}-{model_tag(model)}"
 
 
-def blink_engine(model: str, mode: str, device: str = "cuda") -> EngineSpec:
-    """Blink as `python -m blink.uci`, with the interpreter that runs this harness."""
-    selector = ("--random",) if model in RANDOM_SELECTORS else (f"--model={model}",)
-    args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}")
+def check_distinct_names(selectors: Sequence[str], mode: str) -> None:
+    """Refuse two different selectors that would play under one name: Ordo would merge their games."""
+    seen: dict[str, str] = {}
+    for selector in selectors:
+        name = engine_name(selector, mode)
+        first = seen.setdefault(name, selector)
+        if first != selector:
+            raise ValueError(
+                f"{first!r} and {selector!r} would both play as {name}: give one a distinct path"
+            )
+
+
+def audit_engine(name: str) -> str:
+    """The no-search audit's player filter for an engine name: "dm" for DeepMind's, "blink" otherwise."""
+    return "dm" if name.lower().startswith("dm-") else nosearch.DEFAULT_ENGINE
+
+
+def blink_engine(model: str, mode: str, device: str = "cuda", epsilon: float | None = None) -> EngineSpec:
+    """Blink (or DM-9M, for a dm selector) as `python -m blink.uci`, with this harness's interpreter.
+
+    `epsilon` is Blink's R4 tie window (E2b's choice); without it blink-uci plays its default, 0."""
+    if registry.is_dm(model):
+        args = ("-m", "blink.uci", f"--model={model}", f"--device={device}")
+    else:
+        selector = ("--random",) if model in RANDOM_SELECTORS else (f"--model={model}",)
+        tie = () if epsilon is None else (f"--epsilon={float(epsilon)!r}",)
+        args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}", *tie)
     return EngineSpec(
         engine_name(model, mode), sys.executable, args, st=BLINK_ST, timemargin_ms=BLINK_MARGIN_MS
     )
@@ -84,6 +144,12 @@ def blink_engine(model: str, mode: str, device: str = "cuda") -> EngineSpec:
 def stockfish_anchor(elo: int, exe: Path) -> EngineSpec:
     options = (("UCI_LimitStrength", "true"), ("UCI_Elo", str(elo)), ("Threads", "1"), ("Hash", "16"))
     return EngineSpec(f"SF{elo}", str(exe), st=SF_ST, timemargin_ms=SF_MARGIN_MS, options=options)
+
+
+def stockfish_nodes(nodes: int, exe: Path) -> EngineSpec:
+    """Full-strength Stockfish 19 with a fixed node budget per move (Threads=1, Hash=16)."""
+    options = (("Threads", "1"), ("Hash", "16"))
+    return EngineSpec(f"SF19-n{nodes}", str(exe), nodes=nodes, options=options)
 
 
 def with_tc(engine: EngineSpec, tc: str) -> EngineSpec:
@@ -143,6 +209,7 @@ def parse_summary(output: str) -> dict | None:
         return None
     games, wins, losses, draws, points = found[-1]
     elo = ELO.findall(text)
+    penta = PTNML.findall(text)
     return {
         "games": int(games),
         "wins": int(wins),
@@ -150,6 +217,7 @@ def parse_summary(output: str) -> dict | None:
         "draws": int(draws),
         "points": float(points),
         "elo": elo[-1] if elo else None,
+        "penta": [int(c) for c in penta[-1]] if penta else None,
     }
 
 
@@ -160,11 +228,12 @@ def _engine_env() -> dict[str, str]:
     return {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (root, inherited) if p), "PYTHONUTF8": "1"}
 
 
-def _book_start(book: str, pairs: int) -> tuple[Path, int]:
+def _book_start(book: str, pairs: int, skip: int = 0) -> tuple[Path, int]:
+    """The book file and the first opening to play, after `skip` openings of the slice."""
     path, first, last = books.resolve(book)
-    if last is not None and first + pairs - 1 > last:
-        raise ValueError(f"{pairs} openings run past the end of the {book} slice ({first}-{last})")
-    return path, first
+    if last is not None and first + skip + pairs - 1 > last:
+        raise ValueError(f"{skip + pairs} openings run past the end of the {book} slice ({first}-{last})")
+    return path, first + skip
 
 
 def run_fastchess(command: Sequence[str], log: Path) -> int:
@@ -209,12 +278,33 @@ def prepare_gauntlet(
     anchor_spec = stockfish_anchor(anchor, stockfish_exe())
     if tc:
         blink_spec, anchor_spec = with_tc(blink_spec, tc), with_tc(anchor_spec, tc)
-    book_path, start = _book_start(book, games // 2)
+    return prepare_pair(blink_spec, anchor_spec, games, book, out_dir, concurrency, max_moves)
+
+
+def _unique(path: Path) -> Path:
+    """`path`, or path-2, path-3, ... when it exists: two runs never share a PGN."""
+    candidate, number = path, 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}-{number}{path.suffix}")
+        number += 1
+    return candidate
+
+
+def prepare_pair(
+    first: EngineSpec,
+    second: EngineSpec,
+    games: int,
+    book: str,
+    out_dir: Path,
+    concurrency: int = 5,
+    max_moves: int = MAX_MOVES,
+    skip: int = 0,
+) -> Gauntlet:
+    """Any two engines on a book slice (after `skip` of its openings), with a fresh timestamped PGN."""
+    book_path, start = _book_start(book, games // 2, skip)
     book_path, out_dir = book_path.resolve(), out_dir.resolve()
-    pgn = out_dir / f"{blink_spec.name}_vs_{anchor_spec.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn"
-    return Gauntlet(
-        blink_spec, anchor_spec, GauntletPlan(games, book_path, start, concurrency, pgn, max_moves)
-    )
+    pgn = _unique(out_dir / f"{first.name}_vs_{second.name}_{time.strftime('%Y%m%d-%H%M%S')}.pgn")
+    return Gauntlet(first, second, GauntletPlan(games, book_path, start, concurrency, pgn, max_moves))
 
 
 def execute(gauntlet: Gauntlet) -> dict:
@@ -223,7 +313,8 @@ def execute(gauntlet: Gauntlet) -> dict:
     command = gauntlet.command()
     started = time.perf_counter()
     returncode = run_fastchess(command, pgn.with_suffix(".log"))
-    audit = nosearch.audit([pgn]) if pgn.is_file() else nosearch.audit([])
+    engine = audit_engine(gauntlet.blink.name)
+    audit = nosearch.audit([pgn] if pgn.is_file() else [], engine=engine)
     nosearch.write_report(audit, pgn.with_suffix(".nosearch.json"))
     return {
         "blink": gauntlet.blink.name,
@@ -236,6 +327,25 @@ def execute(gauntlet: Gauntlet) -> dict:
         "audit": audit,
         "blink_forfeits": audit["forfeits"].get(gauntlet.blink.name, {}),
         "anchor_forfeits": audit["forfeits"].get(gauntlet.anchor.name, {}),
+    }
+
+
+def match_report(report: dict) -> dict:
+    """A fastchess report in the shape every P8 block reads: the first engine's W/D/L, score, pentanomial."""
+    summary = report.get("summary") or {}
+    games = summary.get("games", 0)
+    return {
+        "a": report["blink"],
+        "b": report["anchor"],
+        "games": games,
+        "wins": summary.get("wins", 0),
+        "draws": summary.get("draws", 0),
+        "losses": summary.get("losses", 0),
+        "score": summary.get("points", 0.0) / games if games else None,
+        "penta": summary.get("penta"),
+        "pgn": report["pgn"],
+        "returncode": report["returncode"],
+        "audit": {k: report["audit"][k] for k in ("decisions", "compliant", "forfeits", "adjudications")},
     }
 
 

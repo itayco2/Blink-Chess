@@ -94,6 +94,7 @@ def test_the_fastchess_summary_is_parsed():
         "draws": 1,
         "points": 0.5,
         "elo": "Elo: -inf +/- nan, nElo: -inf +/- nan",
+        "penta": [1, 0, 0, 0, 0],
     }
     assert fastchess.parse_summary("nothing here") is None
 
@@ -138,3 +139,20 @@ def test_fastchess_runs_in_the_output_folder_so_its_autosave_lands_there(tmp_pat
     assert seen["env"]["PYTHONPATH"].split(fastchess.os.pathsep)[0] == str(
         Path(fastchess.blink.__file__).parents[1]
     )
+
+
+def test_blink_under_fastchess_plays_with_the_epsilon_it_is_given():
+    """E2b's epsilon must reach blink-uci; without --epsilon it falls back to 0."""
+    spec = fastchess.blink_engine("ship", "value", "cuda", epsilon=1 / 256)
+    assert spec.args[-1] == "--epsilon=0.00390625"
+    assert not any(a.startswith("--epsilon") for a in fastchess.blink_engine("ship", "value").args)
+    dm = fastchess.blink_engine("dm:9M", "policy", "cuda", epsilon=1 / 256)
+    assert not any(a.startswith("--epsilon") for a in dm.args)
+
+
+def test_the_uci_engine_parses_the_epsilon_flag_exactly():
+    from blink import uci
+
+    spec = fastchess.blink_engine("ship", "value", "cpu", epsilon=1 / 128)
+    args = uci.build_parser().parse_args(list(spec.args[2:]))
+    assert args.epsilon == 1 / 128

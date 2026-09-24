@@ -92,3 +92,39 @@ def test_a_directory_is_audited_file_by_file_and_the_report_is_json(tmp_path):
     loaded = json.loads(out.read_text(encoding="utf-8"))
     assert (loaded["games"], loaded["decisions"], loaded["files"]) == (4, 114, 2)
     assert loaded["compliant"] is True
+
+
+PREFIX_NAMES = """[White "Blink-value-ship"]
+[Black "Blink-value-ship-rules-off"]
+[Result "*"]
+
+1. e4 {+0.30/1 0.020s, n=1} e5 {+0.10/1 0.020s, n=1} 2. Nf3 {+0.20/1 0.020s, n=1} *
+
+[White "DM-9M-ema"]
+[Black "DM-9M"]
+[Result "*"]
+
+1. d4 {+0.30/1 0.020s, n=20} d5 {+0.10/1 0.020s} *
+"""
+
+
+def test_an_exact_audit_never_counts_a_player_whose_name_extends_another(tmp_path):
+    """A substring filter would file Blink-value-ship-rules-off's moves under Blink-value-ship."""
+    path = tmp_path / "g.pgn"
+    path.write_text(PREFIX_NAMES, encoding="utf-8")
+    names = ["Blink-value-ship", "Blink-value-ship-rules-off", "DM-9M", "DM-9M-ema"]
+    audits = nosearch.audit_each([path], names)
+    assert {n: a["players"] for n, a in audits.items()} == {
+        "Blink-value-ship": {"Blink-value-ship": 2},
+        "Blink-value-ship-rules-off": {"Blink-value-ship-rules-off": 1},
+        "DM-9M": {"DM-9M": 1},
+        "DM-9M-ema": {"DM-9M-ema": 1},
+    }
+    assert audits["Blink-value-ship"]["games"] == 1
+    assert not audits["DM-9M"]["compliant"] and audits["DM-9M-ema"]["compliant"]
+    assert nosearch.audit([path], engine="dm-9m")["players"] == {"DM-9M-ema": 1, "DM-9M": 1}
+
+
+def test_searchless_players_are_blink_and_deepmind():
+    assert nosearch.is_searchless("Blink-value-ship") and nosearch.is_searchless("DM-9M")
+    assert not any(nosearch.is_searchless(n) for n in ("SF1800", "SF19-n256", "Material", "Random"))

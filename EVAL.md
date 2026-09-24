@@ -57,6 +57,13 @@ Match rules: per-engine time controls (Blink `st=1 timemargin=500`, Stockfish `s
 no resignation, no win adjudication, draws by rule plus one fastchess draw adjudication at 600 engine
 plies (`-maxmoves 300`). Blink time forfeits must be 0.
 
+Games fastchess does not run (every block except Stockfish's self-check, the anchor gauntlets and
+DeepMind 9M's anchor gauntlet) are played one at a time in the harness process under the same clocks:
+a Blink or DeepMind 9M move over 1.5 s, or a Stockfish move over 0.2 s at `st=0.1`, loses on time, and
+Stockfish at a fixed node count has no clock. There the time is measured around the move choice rather
+than over UCI, and each clocked player first makes one untimed warm-up move, as fastchess's `isready`
+lets an engine start before its first move.
+
 ## 4. Pre-registered predictions (low confidence)
 
 FINDINGS will report whether each held.

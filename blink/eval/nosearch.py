@@ -10,12 +10,16 @@ move by a Blink player checks:
   - nodes == 0 only when the move played gives checkmate (rule R2).
 It also counts game terminations, per-engine forfeits (time, illegal move, crash) and adjudications,
 and writes the rows-per-move histogram as JSON.
+
+`audit` checks every player whose name contains a filter (the CLI's --engine); `audit_each` checks named
+players by their exact names, in one pass, so Blink-value-ship never picks up Blink-value-ship-rules-off's
+moves and DM-9M never picks up DM-9M-ema's. The searchless players are Blink's and DeepMind's.
 """
 
 import json
 import re
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 import chess
@@ -24,6 +28,12 @@ import chess.pgn
 NODES = re.compile(r"(?:^|[\s,])n=(\d+)")
 DEFAULT_ENGINE = "blink"
 BENIGN_TERMINATIONS = {"normal", "adjudication", ""}
+SEARCHLESS_PREFIXES = ("Blink", "DM-")
+
+
+def is_searchless(name: str) -> bool:
+    """Blink's players and DeepMind's (DM-9M[-ema]): the players the no-search audit must cover."""
+    return name.startswith(SEARCHLESS_PREFIXES)
 
 
 def pgn_files(target: Path) -> list[Path]:
@@ -89,13 +99,13 @@ def _count_ending(tally: _Tally, game: chess.pgn.Game) -> None:
         tally.forfeits.setdefault(loser, Counter())[termination] += 1
 
 
-def _audit_game(tally: _Tally, game: chess.pgn.Game, source: str, engine: str) -> None:
+def _audit_game(tally: _Tally, game: chess.pgn.Game, source: str, wanted: Callable[[str], bool]) -> None:
     tally.games += 1
     _count_ending(tally, game)
     board = game.board()
     for node in game.mainline():
         player = game.headers.get("White" if board.turn == chess.WHITE else "Black", "?")
-        if node.comment.strip() != "book" and engine in player.lower():
+        if node.comment.strip() != "book" and wanted(player):
             where = {"file": source, "game": tally.games, "ply": board.ply(), "player": player}
             _check_move(tally, board, node, where)
         board.push(node.move)
@@ -103,12 +113,28 @@ def _audit_game(tally: _Tally, game: chess.pgn.Game, source: str, engine: str) -
 
 def audit(files: Sequence[Path], engine: str = DEFAULT_ENGINE) -> dict:
     """Audit every game in `files`; players whose name contains `engine` (case-insensitive) are checked."""
+    needle = engine.lower()
     tally = _Tally()
     for path in files:
         for game in _read_games(path):
-            _audit_game(tally, game, path.name, engine.lower())
+            _audit_game(tally, game, path.name, lambda player: needle in player.lower())
+    return _report(tally, len(files))
+
+
+def audit_each(files: Sequence[Path], players: Iterable[str]) -> dict[str, dict]:
+    """One report per named player, over the games it played, matching names exactly; one pass."""
+    tallies = {name: _Tally() for name in players}
+    for path in files:
+        for game in _read_games(path):
+            seated = {game.headers.get("White", "?"), game.headers.get("Black", "?")}
+            for name in sorted(seated & tallies.keys()):
+                _audit_game(tallies[name], game, path.name, lambda player, own=name: player == own)
+    return {name: _report(tally, len(files)) for name, tally in tallies.items()}
+
+
+def _report(tally: _Tally, files: int) -> dict:
     return {
-        "files": len(files),
+        "files": files,
         "games": tally.games,
         "decisions": tally.decisions,
         "compliant": not tally.violations and tally.decisions > 0,
