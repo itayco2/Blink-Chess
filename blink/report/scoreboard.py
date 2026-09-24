@@ -52,7 +52,7 @@ def _read(folder: Path, name: str, hint: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-NOSEARCH_KEYS = ("decisions", "games", "max_rows", "histogram", "violations")
+NOSEARCH_KEYS = ("decisions", "games", "max_rows", "histogram", "violations", "compliant", "missing_counts")
 
 
 def _parse(folder: Path) -> Bundle:
@@ -78,7 +78,23 @@ def load_bundle(folder: Path) -> Bundle:
     missing = [key for key in NOSEARCH_KEYS if key not in bundle.nosearch]
     if missing:
         raise ScoreboardError(f"nosearch.json lacks {missing} (rerun: uv run blink audit no-search)")
+    _check_nosearch(bundle.nosearch)
     return bundle
+
+
+def _check_nosearch(report: dict) -> None:
+    """The box says 'at most legal+1 positions each': only a clean audit may say so."""
+    problems = []
+    if report["violations"]:
+        problems.append(f"{len(report['violations']):,} violation(s)")
+    if report["compliant"] is not True:
+        problems.append("the audit is not compliant")
+    if report["missing_counts"]:
+        problems.append(f"{report['missing_counts']:,} moves without a node count")
+    if not report["decisions"]:
+        problems.append("no public moves were audited")
+    if problems:
+        raise ScoreboardError(f"nosearch.json: {'; '.join(problems)}: the no-search box cannot be published")
 
 
 def shipped_row(results: rs.Results) -> rs.StrengthRow | None:
@@ -209,8 +225,9 @@ def nosearch_box(report: dict) -> str:
         f"**No search.** Across {report['decisions']:,} public moves in {report['games']:,} games: at most "
         f"1 network call and legal+1 positions each ({violations:,} violations; largest batch "
         f"{report['max_rows']:,} rows). Rows per move: {histogram.get(0, 0):,} with 0 rows (R2 mate now), "
-        f"{one:,} with 1 (one look), {many:,} with 2 or more (one look per move, legal+1). Rebuilt from the "
-        "PGNs alone by `uv run blink audit no-search`.\n"
+        f"{one:,} with 1 (one look), {many:,} with 2 or more (one look per move, legal+1). The positions "
+        "per move are rebuilt from the PGNs alone by `uv run blink audit no-search`; the one-call limit is "
+        "enforced inside the engine by EvalBudget, which raises on a second call in one decision.\n"
     )
 
 

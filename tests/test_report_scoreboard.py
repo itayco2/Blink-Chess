@@ -285,3 +285,29 @@ def test_a_puzzle_percentage_without_its_wilson_interval_is_refused(tmp_path):
     folder = _edited_results(write_bundle(tmp_path / "r"), "DM-9M", dm_puzzles_ci=None)
     with pytest.raises(sb.ScoreboardError, match="Wilson"):
         sb.load_bundle(folder)
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (
+            {"violations": [{"rule": "rows > L+1", "rows": 9_999, "legal": 30}], "max_rows": 9_999},
+            "violation",
+        ),
+        ({"compliant": False}, "compliant"),
+        ({"missing_counts": 3}, "node count"),
+        ({"decisions": 0}, "no public moves"),
+    ],
+)
+def test_the_no_search_box_is_refused_unless_the_audit_is_clean(tmp_path, change, reason):
+    from test_report_fixtures import nosearch
+
+    with pytest.raises(sb.ScoreboardError, match=reason):
+        _block(tmp_path, nosearch_obj={**nosearch(), **change})
+
+
+def test_the_no_search_box_names_what_the_pgns_prove_and_what_the_engine_enforces(tmp_path):
+    block = _block(tmp_path)
+    assert "positions per move are rebuilt from the PGNs alone by `uv run blink audit no-search`" in block
+    assert "one-call limit is enforced inside the engine by EvalBudget" in block
+    assert "Rebuilt from the PGNs alone by" not in block
