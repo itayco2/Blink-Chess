@@ -235,3 +235,10 @@ def test_blink_film_render_reports_a_film_error_as_exit_1(tmp_path, capsys):
     args = ["film", "render", "--lang", "en", "--film", str(film_path), "--results", str(tmp_path / "none")]
     assert cli.main(args) == 1
     assert "--mode" in capsys.readouterr().err
+
+
+def test_film_commands_refuse_a_run_name_that_is_a_path(capsys):
+    from blink import cli
+
+    assert cli.main(["film", "render", "--lang", "en", "--run", "../outside", "--mode", "policy"]) == 1
+    assert "bad run name" in capsys.readouterr().err

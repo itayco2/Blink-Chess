@@ -105,8 +105,21 @@ def _register_report(sub: argparse._SubParsersAction) -> None:
 # ------------------------------------------------------------------------------------------ film
 
 
+def _checked_run(run: str) -> str:
+    from blink.film.extract import FilmError
+    from blink.train.status import valid_run_name
+
+    if not valid_run_name(run):
+        raise FilmError(f"bad run name {run!r}: letters, digits, '_', '-' and '.', never a path")
+    return run
+
+
 def _film_dir(run: str) -> Path:
-    return paths.home() / "film" / run
+    return paths.home() / "film" / _checked_run(run)
+
+
+def _run_dir(run: str) -> Path:
+    return paths.home() / "runs" / _checked_run(run)
 
 
 def _film_errors(func: Callable[[argparse.Namespace], int]) -> Callable[[argparse.Namespace], int]:
@@ -128,7 +141,7 @@ def _film_errors(func: Callable[[argparse.Namespace], int]) -> Callable[[argpars
 def cmd_film_pick(args: argparse.Namespace) -> int:
     from blink.film import extract, pick
 
-    sources = extract.frame_sources(paths.home() / "runs" / args.run)
+    sources = extract.frame_sources(_run_dir(args.run))
     candidates = pick.draw_candidates(Path(args.bands), args.candidates)
     ranked = pick.rank(candidates, sources, device=args.device)
     out = pick.write_ranking(ranked, _film_dir(args.run) / "candidates.json", args.run, len(sources))
@@ -140,7 +153,7 @@ def cmd_film_pick(args: argparse.Namespace) -> int:
 def cmd_film_extract(args: argparse.Namespace) -> int:
     from blink.film import extract
 
-    run_dir = paths.home() / "runs" / args.run
+    run_dir = _run_dir(args.run)
     position = extract.film_position(Path(args.bands), args.puzzle)
     rungs = [extract.parse_milestone(text) for text in args.milestone]
     film = extract.extract(
