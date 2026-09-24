@@ -74,7 +74,7 @@ def _readme() -> str:
 
 
 def _rendered_hooks(lang: str) -> set[str]:
-    """The hook the published film burned in, from render's sidecar film-<lang>.json (empty if not rendered here)."""
+    """The hook the published film burned in, from render's sidecar (empty if not rendered here)."""
     from blink import paths
 
     sidecar = paths.home() / "film" / FILM_RUN / f"film-{lang}.json"
