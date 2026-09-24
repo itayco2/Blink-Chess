@@ -86,6 +86,7 @@ class EvalContext:
     side_models: tuple[str, ...] = ()  # 6 GPU-h sizes and s10m for E5's side rows
     data_dir: Path | None = None  # the pack with val/test roots, valprobe.npz and mateset.npz
     selfcheck_tc: str = SELFCHECK_TC  # E0: the slow side of SF's st=0.1 self-check
+    sf_procs: int = 1  # Stockfish processes for SF19 labels (E2 regret, E9)
 
     def n(self, default: int) -> int:
         """A match length: the override when set (rounded up to whole pairs), else the plan's number."""
@@ -322,7 +323,7 @@ def e2_block(ctx: EvalContext, state: dict) -> dict:
     agents = match.blink_agents(ctx.model, ctx.device)
     label = fastchess.NAME_UNSAFE.sub("_", ctx.model).strip("_")
     inputs, limits = static_inputs(ctx, label), static_limits(ctx)
-    with SfLabeler(1_000_000, exe=fastchess.stockfish_exe()) as labeler:
+    with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:
         e2 = static.run_e2(agents["policy"].evaluator, agents, inputs, limits, labeler)
     rows = static.diagnostics_rows(e2, f"Blink-{label}")
     return {"e2": e2, "diagnostics": [r.__dict__ for r in rows], "games": 0, "pgns": []}

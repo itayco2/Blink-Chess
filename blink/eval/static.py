@@ -407,14 +407,13 @@ def regret(roots: Sequence[Root], picks: Sequence[int], labeler: SfLabeler) -> d
     """Mean win% given up against SF's best, the pick's win% from SF19 restricted to that move (cached).
 
     A pick equal to SF's best costs 0 without a search; a restricted search that scores the pick above
-    SF's own best (search noise) also counts as 0."""
-    losses = []
-    for root, pick in zip(roots, picks, strict=True):
-        if pick == root.label:
-            losses.append(0.0)
-            continue
-        move = moves.decode_move(root.board, pick)
-        losses.append(max(0.0, root.pv_win[0] - labeler.label(root.board.fen(), move).win))
+    SF's own best (search noise) also counts as 0. The searches run on the labeler's processes."""
+    pairs = list(zip(roots, picks, strict=True))
+    wanted = [(r.board.fen(), moves.decode_move(r.board, p).uci()) for r, p in pairs if p != r.label]
+    labels = iter(labeler.label_many(wanted))
+    losses = [
+        0.0 if pick == root.label else max(0.0, root.pv_win[0] - next(labels).win) for root, pick in pairs
+    ]
     return {**_mean_ci(losses), "searched": labeler.searched}
 
 

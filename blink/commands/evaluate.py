@@ -183,8 +183,8 @@ def _cmd_endgames(args: argparse.Namespace) -> int:
     exe = fastchess.stockfish_exe()
     started = time.perf_counter()
     with (
-        sflabel.SfLabeler(args.screen_nodes, exe=exe) as screen,
-        sflabel.SfLabeler(args.confirm_nodes, exe=exe) as confirm,
+        sflabel.SfLabeler(args.screen_nodes, exe=exe, procs=args.sf_procs) as screen,
+        sflabel.SfLabeler(args.confirm_nodes, exe=exe, procs=args.sf_procs) as confirm,
     ):
         result = endgames.screen(endgames.read_positions(source, args.limit), screen, confirm, want=args.want)
         searched = screen.searched + confirm.searched
@@ -274,6 +274,7 @@ def _context(args: argparse.Namespace):
         side_models=tuple(args.side_model or ()),
         data_dir=args.data,
         selfcheck_tc=args.selfcheck_tc,
+        sf_procs=args.sf_procs,
     )
 
 
@@ -328,7 +329,7 @@ def _cmd_static(args: argparse.Namespace) -> int:
     agents = match.blink_agents(args.model, args.device)
     inputs = orchestrate.static_inputs(ctx, label)
     started = time.perf_counter()
-    with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe()) as labeler:
+    with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=args.sf_procs) as labeler:
         e2 = static.run_e2(
             agents["policy"].evaluator, agents, inputs, limits, None if args.no_sf else labeler
         )
@@ -364,6 +365,7 @@ def _add_block_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--results", type=Path, default=Path("results"), help="where results.json goes")
     parser.add_argument("--protocol", type=Path, default=Path("EVAL.md"))
     parser.add_argument("--selfcheck-tc", default="120+1", help="E0: the slow side of SF's self-check")
+    parser.add_argument("--sf-procs", type=int, default=1, help="Stockfish processes for SF19 labels")
 
 
 def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubParsersAction) -> None:
@@ -379,6 +381,7 @@ def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubPa
     eg.add_argument("--screen-nodes", type=int, default=endgames.SCREEN_NODES)
     eg.add_argument("--confirm-nodes", type=int, default=endgames.CONFIRM_NODES)
     eg.add_argument("--out", type=Path, default=None, help="default BLINK_HOME/eval/endgames")
+    eg.add_argument("--sf-procs", type=int, default=1, help="Stockfish processes (one thread each)")
     eg.set_defaults(func=_cmd_endgames)
 
     sp = ev_sub.add_parser("sprt", help="an in-process SPRT between two agents (pentanomial, fishtest LLR)")

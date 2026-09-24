@@ -73,3 +73,18 @@ def test_real_stockfish_sees_a_mate_in_one_for_the_side_to_move(tmp_path):
         restricted = labeler.label(fen, "g1f1")
     assert (label.mate, label.best) == (1, "d1d8")
     assert restricted.mate is None or restricted.mate != 1
+
+
+@pytest.mark.local
+@pytest.mark.skipif(not SF.is_file(), reason="Stockfish 19 is not installed here")
+def test_label_many_spreads_the_misses_over_processes_and_caches_them(tmp_path):
+    board, fens = chess.Board(), []
+    for move in list(board.legal_moves)[:20]:
+        board.push(move)
+        fens.append(board.fen())
+        board.pop()
+    labeler = sflabel.SfLabeler(2_000, exe=SF, cache_path=tmp_path / "c.jsonl", procs=2)
+    labels = labeler.label_many([(fen, None) for fen in fens])
+    assert len(labels) == 20 and labeler.searched == 20 and len(labeler.cache) == 20
+    again = sflabel.SfLabeler(2_000, cache_path=tmp_path / "c.jsonl", procs=2)
+    assert again.label_many([(fens[0], None)]) == [labels[0]] and again.searched == 0

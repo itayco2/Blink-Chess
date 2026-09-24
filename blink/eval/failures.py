@@ -99,16 +99,17 @@ def ending(game: chess.pgn.Game) -> str:
 
 def blink_turns(game: chess.pgn.Game, side: chess.Color, labeler: SfLabeler) -> list[Turn]:
     """Stockfish's score for Blink at every position where Blink was to move (book moves skipped)."""
-    turns = []
+    spots = []
     board = game.board()
     for node in game.mainline():
         if board.turn == side and node.comment.strip() != "book":
-            label = labeler.label(board.fen())
-            turns.append(
-                Turn(board.ply(), board.fen(), label.pawns, label.mate is not None and label.mate > 0)
-            )
+            spots.append((board.ply(), board.fen()))
         board.push(node.move)
-    return turns
+    labels = labeler.label_many([(fen, None) for _, fen in spots])
+    return [
+        Turn(ply, fen, label.pawns, label.mate is not None and label.mate > 0)
+        for (ply, fen), label in zip(spots, labels, strict=True)
+    ]
 
 
 def worst_drop(turns: Sequence[Turn]) -> float:
@@ -184,6 +185,6 @@ def e9_block(ctx, state: dict) -> dict:
     pgns = [Path(p) for p in (state.get("E5") or {}).get("final_slice_pgns", [])]
     pgns = pgns or sorted((ctx.out_dir / "E5").glob("*.pgn"))
     cap = MAX_FAILURES if ctx.games is None else min(MAX_FAILURES, ctx.games)
-    with SfLabeler(1_000_000, exe=fastchess.stockfish_exe()) as labeler:
+    with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:
         result = run_failures(pgns, labeler, max_failures=cap, max_examined=ctx.positions)
     return {**result, "games": 0, "pgns": []}

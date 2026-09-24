@@ -25,6 +25,7 @@ CONFIRM_NODES = 10_000_000
 THRESHOLD_PAWNS = 5.0
 WANT = 700
 DEV_COUNT = 200
+BATCH_PER_PROC = 16
 EPD_NAME = "endgames.epd"
 
 
@@ -78,12 +79,13 @@ def _for_winner(label: SfLabel, side_to_move: chess.Color, side: chess.Color) ->
 
 
 def screen_one(line: int, fen: str, screen: SfLabeler, confirm: SfLabeler) -> Endgame | None:
-    side_to_move = chess.Board(fen).turn
     first = screen.label(fen)
-    side = winner(first, side_to_move)
-    if side is None:
-        return None
-    second = confirm.label(fen)
+    side = winner(first, chess.Board(fen).turn)
+    return None if side is None else _confirmed(line, fen, first, confirm.label(fen), side)
+
+
+def _confirmed(line: int, fen: str, first: SfLabel, second: SfLabel, side: chess.Color) -> Endgame | None:
+    side_to_move = chess.Board(fen).turn
     if winner(second, side_to_move) != side:
         return None
     return Endgame(
@@ -110,6 +112,17 @@ class ScreenResult:
         return self.kept[DEV_COUNT:WANT]
 
 
+def _batches(positions: Iterator[tuple[int, str]], size: int) -> Iterator[list[tuple[int, str]]]:
+    batch: list[tuple[int, str]] = []
+    for item in positions:
+        batch.append(item)
+        if len(batch) == size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def screen(
     positions: Iterator[tuple[int, str]],
     screen_labeler: SfLabeler,
@@ -117,19 +130,28 @@ def screen(
     want: int = WANT,
     progress: Callable[[int, int], None] | None = None,
 ) -> ScreenResult:
-    """Screen positions in order until `want` are kept (or the positions run out)."""
+    """Screen positions in order until `want` are kept (or the positions run out), a batch at a time so
+    the labelers can search on several processes; a position after the `want`-th keep is not counted."""
     kept: list[Endgame] = []
     screened = passed = 0
-    for line, fen in positions:
-        screened += 1
-        passed += winner(screen_labeler.label(fen), chess.Board(fen).turn) is not None
-        found = screen_one(line, fen, screen_labeler, confirm_labeler)
-        if found is not None:
-            kept.append(found)
-        if progress is not None:
-            progress(screened, len(kept))
-        if len(kept) >= want:
-            break
+    for batch in _batches(positions, BATCH_PER_PROC * max(screen_labeler.procs, confirm_labeler.procs)):
+        firsts = screen_labeler.label_many([(fen, None) for _, fen in batch])
+        sides = [winner(label, chess.Board(fen).turn) for label, (_, fen) in zip(firsts, batch, strict=True)]
+        seconds = iter(
+            confirm_labeler.label_many(
+                [(fen, None) for (_, fen), side in zip(batch, sides, strict=True) if side is not None]
+            )
+        )
+        for (line, fen), first, side in zip(batch, firsts, sides, strict=True):
+            screened += 1
+            if side is not None:
+                passed += 1
+                found = _confirmed(line, fen, first, next(seconds), side)
+                kept += [found] if found is not None else []
+            if progress is not None:
+                progress(screened, len(kept))
+            if len(kept) >= want:
+                return ScreenResult(tuple(kept), screened, passed)
     return ScreenResult(tuple(kept), screened, passed)
 
 

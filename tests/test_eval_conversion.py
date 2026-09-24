@@ -186,3 +186,11 @@ def test_when_zero_converts_best_no_check_is_played(tmp_path):
         lambda eps: converted(0.9 if eps == 0 else 0.1), lambda eps: pytest.fail("no check"), tmp_path
     )
     assert decision["epsilon"] == 0.0 and decision["no_regression"] is None
+
+
+def test_the_batched_screen_keeps_a_position_won_for_black(tmp_path):
+    black_wins = chess.Board("3r2k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1").fen()
+    first = fake_labeler(tmp_path, "s", {black_wins: -8.0})
+    second = fake_labeler(tmp_path, "c", {black_wins: -7.0})
+    result = endgames.screen(iter([(3, black_wins)]), first, second)
+    assert [(e.line, e.winner) for e in result.kept] == [(3, "black")]
