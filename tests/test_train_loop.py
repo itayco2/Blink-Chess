@@ -267,6 +267,16 @@ def test_metrics_record_how_long_the_loop_waited_for_its_batches(tmp_path):
     fast, slow = (_records_jsonl(tmp_path / name / "metrics.jsonl") for name in ("fast", "slow"))
     assert all(0.0 <= row["data_wait_frac"] <= 1.0 for row in fast + slow)
     assert all(row["time"] > 1_600_000_000 for row in fast + slow)
-    later = slice(1, None)  # step 1's window also holds the model's first call
-    assert min(r["data_wait_frac"] for r in slow[later]) > 0.2
-    assert max(r["data_wait_frac"] for r in slow[later]) > max(r["data_wait_frac"] for r in fast[later])
+    # A window starts when the row before it is written, so share x window = seconds waited. The sleeps
+    # bound that from below whatever the machine's load; a share alone would not be.
+    slow_waits = _waits(slow)
+    assert all(waited >= 0.95 * 0.1 * steps for waited, steps in slow_waits)
+    assert sum(w for w, _ in _waits(fast)) < sum(w for w, _ in slow_waits)
+
+
+def _waits(rows: list[dict]) -> list[tuple[float, int]]:
+    """(seconds the loop waited, steps) of each metrics window after the first."""
+    return [
+        (row["data_wait_frac"] * (row["time"] - before["time"]), row["step"] - before["step"])
+        for before, row in zip(rows, rows[1:], strict=False)
+    ]
