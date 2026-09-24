@@ -7,7 +7,7 @@
     "protocol": "uci",
     "ponder": false,
     "uci_ponder": false,
-    "engine_options": {"model": "ship", "mode": "policy", "device": "cpu", "log": "D:/blink/lichess/decisions-casual/{process}.jsonl"},
+    "engine_options": {"model": "ship", "mode": "policy", "device": "cpu", "threads": 1, "priority": "below_normal", "log": "D:/blink/lichess/decisions-casual/{process}.jsonl"},
     "polyglot": {"enabled": false},
     "draw_or_resign": {
       "resign_enabled": false,

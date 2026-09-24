@@ -77,7 +77,7 @@ token (lichess-bot reads it from `LICHESS_BOT_TOKEN`, which only `start-bot.ps1`
 | file | template | what it is |
 |---|---|---|
 | `D:\blink-bot\config.yml` | [config.template.yml](config.template.yml) | the rated bot (G7): torch CUDA fp32, the shipped model, sha and mode, run from the frozen engine install `D:\blink-bot\engine` (section 7) |
-| `D:\blink-bot\config.casual.yml` | [config.casual.yml](config.casual.yml) | the G5 casual smoke: the preview model on CPU, only `itayco2`, run from the dev venv `C:\dev\blink-chess\.venv` |
+| `D:\blink-bot\config.casual.yml` | [config.casual.yml](config.casual.yml) | the G5 casual smoke: the preview model on CPU (1 thread, below-normal priority), only `itayco2`, run from the dev venv `C:\dev\blink-chess\.venv` |
 
 Both switch off every lookup lichess-bot could make for the engine (polyglot book, every
 `online_moves` source, `lichess_bot_tbs`, the tablebase resign and draw options, pondering), remove
@@ -120,6 +120,10 @@ exits 2 on any other hash, so an overwritten `ship` file stops the bot at liches
 engine check instead of putting an unevaluated model on the rated account.
 
 ## 6. Casual smoke (gate G5, during P7, CPU)
+
+The smoke runs while the long training run is live, so its engine keeps to the plan's P7 budget
+for side processes: `blink-uci --threads=1 --priority=below_normal` (torch on one thread, the process
+at BELOW_NORMAL priority), set in `config.casual.yml` and required by `check-config`.
 
 1. **(agent)** generates and checks `config.casual.yml` (section 5).
 2. Itay: `D:\blink-bot\start-bot.ps1 -Config D:\blink-bot\config.casual.yml`

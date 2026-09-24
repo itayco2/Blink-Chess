@@ -19,6 +19,9 @@ flags, so at concurrency 2 two engines run at once, and each needs a file of its
 selects and exits 2 unless the sha256 matches. The rated Lichess bot starts every game's engine with
 it, so an overwritten `ship` file stops the bot (lichess-bot's startup engine check fails) instead of
 playing an unevaluated model.
+
+`--threads N` and `--priority below_normal` keep the engine to the plan's P7 side-process budget
+(1 thread at BELOW_NORMAL while the long run trains), which the G5 casual smoke needs.
 """
 
 import argparse
@@ -46,6 +49,8 @@ WARMUP_DECISIONS = 5  # timed decisions after one cold call; their max stands in
 WIN_FLOOR = 1e-6
 PROCESS_FIELD = "{process}"  # in --log: this process's UTC start time and PID
 FULL_SHA = re.compile(r"^[0-9a-f]{64}$")
+PRIORITIES = ("normal", "below_normal")
+POSIX_BELOW_NORMAL = 10  # the nice value that stands in for Windows' BELOW_NORMAL_PRIORITY_CLASS
 
 
 def log_path(raw: Path, pid: int, now: float) -> Path:
@@ -172,6 +177,30 @@ class UciEngine:
         self.send(f"bestmove {decision.move.uci()}")
 
 
+def limit_cpu(threads: int | None, priority: str = "normal") -> None:
+    """The P7 side-process budget: torch on `threads` threads, at below-normal CPU priority if asked."""
+    if priority == "below_normal":
+        import psutil
+
+        below = psutil.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else POSIX_BELOW_NORMAL
+        psutil.Process().nice(below)
+    if threads is None:
+        return
+    try:
+        import torch
+    except ImportError:  # the torch-free random harness has no torch thread pools to cap
+        return
+    torch.set_num_threads(threads)
+    torch.set_num_interop_threads(1)  # before any torch work: this is a fresh engine process
+
+
+def _at_least_one(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {text}")
+    return value
+
+
 def _full_sha(text: str) -> str:
     if not FULL_SHA.match(text):
         raise argparse.ArgumentTypeError(f"must be a full lowercase sha256 (64 hex digits), got {text!r}")
@@ -222,11 +251,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sha", type=_full_sha, help="refuse to start unless the --model weights file has this sha256"
     )
+    parser.add_argument("--threads", type=_at_least_one, help="torch CPU threads (default: torch's own)")
+    parser.add_argument(
+        "--priority", choices=PRIORITIES, default="normal", help="this process's CPU priority"
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     args = build_parser().parse_args(argv)
+    limit_cpu(args.threads, args.priority)
     stdin = stdin if stdin is not None else sys.stdin
     stdout = stdout if stdout is not None else sys.stdout
     selector = "random" if args.random else args.model

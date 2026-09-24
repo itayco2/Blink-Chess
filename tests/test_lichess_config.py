@@ -553,3 +553,15 @@ def test_the_rated_engine_is_started_with_the_recorded_sha(tmp_path):
             broken["engine"]["engine_options"]["sha"] = value
         found = botconfig.problems(broken, "rated", frozenset())
         assert any(p.startswith("engine.engine_options.sha") for p in found), found
+
+
+def test_the_casual_smoke_engine_keeps_to_one_thread_at_below_normal_priority(tmp_path):
+    """Plan P7: side processes during the long run get 1 thread at BELOW_NORMAL, the G5 engine included."""
+    casual = generate(tmp_path)["casual"]
+    options = casual["engine"]["engine_options"]
+    assert (options["threads"], options["priority"]) == (1, "below_normal")
+    for key, value in (("threads", 4), ("priority", "normal")):
+        broken = copy.deepcopy(casual)
+        broken["engine"]["engine_options"][key] = value
+        found = botconfig.problems(broken, "casual", frozenset())
+        assert any(p.startswith(f"engine.engine_options.{key}") for p in found), found

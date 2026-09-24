@@ -116,6 +116,8 @@ CASUAL_RULES = {
     **COMMON_RULES,
     ("engine", "dir"): ENGINE_DIRS["casual"],
     ("engine", "engine_options", "device"): "cpu",
+    ("engine", "engine_options", "threads"): 1,  # plan P7: side processes get 1 thread at BELOW_NORMAL
+    ("engine", "engine_options", "priority"): "below_normal",
     ("challenge", "allow_list"): ["itayco2"],
     ("challenge", "concurrency"): 1,
     ("challenge", "games_reserved_for_humans"): 0,
