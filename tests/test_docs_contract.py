@@ -16,7 +16,6 @@ from blink.report import scoreboard as sb
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = REPO_ROOT / "results"
 README = REPO_ROOT / "README.md"
-HOW_IT_WORKS = REPO_ROOT / "HOW-IT-WORKS.md"
 PREFLIGHT = REPO_ROOT / "PREFLIGHT.md"
 POST_DRAFT = REPO_ROOT / "post-draft.md"  # gitignored: Itay's LinkedIn draft, local only
 BOT_BIO = REPO_ROOT / "deploy" / "lichess" / "bio.txt"  # the bot bio draft Itay pastes at G12
@@ -48,15 +47,24 @@ REQUIRED_HEADINGS = (
     "## Credits and licences",
 )
 
-# Numbers HOW-IT-WORKS may state that are fixed by the contract or by arithmetic, not measured.
+# Public prose the MEASURED scan reads: README.md outside its generated scoreboard block (the block is
+# checked byte-exact against results/*.json on its own), and every other public document with prose.
+MEASURED_DOCS = ("README.md", "HOW-IT-WORKS.md", "FINDINGS.md", "PROGRESS.md")
+
+# Numbers the public prose may state that are fixed by the contract or by arithmetic, not measured.
 NOT_MEASURED = {
     "1880": "the move vocabulary",
     "128": "value bins",
     "64": "board squares",
     "16": "square codes, and the ply-16 blocklist cut",
     "409,710,113": "lines in the Lichess eval DB (the data, not a result)",
+    "409.7M": "the same database size, in millions",
+    "10K": "the name of DeepMind's 10K-puzzle set",
+    "2.14": "the torch version",
     "7.54": "ln 1880, the loss of a network that knows nothing",
+    "7.539": "ln 1880 to three decimals",
     "4.85": "ln 128",
+    "4.852": "ln 128 to three decimals",
     "1320": "the lowest Stockfish UCI_Elo anchor",
     "3000": "the rating a new Lichess BOT starts at",
     "3070": "the GPU's name",
@@ -107,18 +115,42 @@ def test_the_first_200_words_hold_the_headline_links_and_caveat():
     assert sb.ELO_CAVEAT in head
 
 
-def test_every_number_in_how_it_works_is_in_results():
-    """The MEASURED pattern: each HOW-IT-WORKS number is in results/*.json or is a named contract constant."""
+def _strays(doc: Path, results_dir: Path) -> list[str]:
+    """Numbers in a public document's prose that neither results/*.json nor NOT_MEASURED explains."""
+    prose = sb.prose_outside_block(doc.read_text(encoding="utf-8"))
+    return sb.stray_numbers(prose, sb.measured_values(results_dir), NOT_MEASURED)
+
+
+@pytest.mark.parametrize("name", MEASURED_DOCS)
+def test_every_number_in_the_public_prose_is_in_results(name):
+    """The MEASURED pattern: each number in README (outside the block), HOW-IT-WORKS, FINDINGS and PROGRESS
+    is in results/*.json or is a named contract constant."""
     _strict()
-    if not HOW_IT_WORKS.is_file():
-        pytest.skip("HOW-IT-WORKS.md is not written yet (P12)")
-    measured = sb.measured_values(RESULTS_DIR)
-    stray = [
-        number
-        for number in sb.numbers_in(HOW_IT_WORKS.read_text(encoding="utf-8"))
-        if number not in NOT_MEASURED and not sb.is_measured(number, measured)
+    doc = REPO_ROOT / name
+    if not doc.is_file():
+        pytest.skip(f"{name} is not written yet")
+    assert _strays(doc, RESULTS_DIR) == []
+
+
+def test_the_measured_scan_reads_the_readme_story_and_skips_only_the_generated_block(tmp_path):
+    from test_report_fixtures import FIXTURE_DIR
+
+    readme = tmp_path / "README.md"
+    lines = [
+        "# Hook",
+        "",
+        "It solved 80.1% of the 10K puzzles, and lost by -35 Elo at 63-67% accuracy.",
+        "",
+        sb.START,
+        "| 1851 +/- 36 (4,101 games) |",
+        sb.END,
+        "",
+        "## What this does not prove",
+        "",
+        "+/-113.",
     ]
-    assert stray == []
+    readme.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert _strays(readme, FIXTURE_DIR) == ["-35", "63", "67%", "113"]
 
 
 def test_required_headings_appear_in_order():

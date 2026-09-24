@@ -12,6 +12,7 @@ paper-reported column, and the text is ASCII (+/- rather than a plus-minus sign)
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -387,20 +388,43 @@ def check_readme(path: Path, block: str) -> list[str]:
 # ------------------------------------------------------------------------------------------ numbers in prose
 
 _CODE = re.compile(r"```.*?```|`[^`\n]*`|<!--.*?-->|\]\([^)]*\)|https?://\S+", re.DOTALL)
-_NUMBER = re.compile(r"(?<![\w.,/:#-])(\d[\d,]*(?:\.\d+)?)(%|[MBK]\b)?")
+_BLOCK = re.compile(re.escape(START) + r".*?" + re.escape(END), re.DOTALL)
+_DATE = re.compile(r"\b\d{4}([-/])\d{2}\1\d{2}\b")  # a snapshot date is a label, not a measurement
+_PLUS_MINUS = re.compile(r"\+/-|±")
+_BETWEEN_DIGITS = re.compile(r"(?<=\d)([-/])(?=\.?\d)")  # 75-85%, 1800-2200, 50/60: both ends count
+# A number not glued to a word, a path or a hyphenated name (top-1, ply-16, P3-P6), with an optional
+# minus sign that is not itself glued to one, and a leading-dot decimal (.031).
+_NUMBER = re.compile(r"(?<![\w.,/:#-])(-?)(\d[\d,]*(?:\.\d+)?|\.\d+)(%|[MBK]\b)?")
 _SCALE = {"M": 1e6, "B": 1e9, "K": 1e3}
-SMALL_COUNT = 12  # integers up to this are counts and section numbers, not measurements
+SMALL_COUNT = 12  # non-negative integers up to this are counts and section numbers, not measurements
+
+
+def _prose(text: str) -> str:
+    text = _DATE.sub(" ", _CODE.sub(" ", text))
+    return _BETWEEN_DIGITS.sub(r" \1 ", _PLUS_MINUS.sub(" +/- ", text))
 
 
 def numbers_in(text: str) -> list[str]:
-    """Number tokens a reader sees in prose (code, links and comments removed), small counts left out."""
+    """Number tokens a reader sees in prose (code, links, comments and dates removed), small counts left
+    out: signed numbers, both ends of a range, the N of +/-N and leading-dot decimals included."""
     found = []
-    for match in _NUMBER.finditer(_CODE.sub(" ", text)):
-        digits = match.group(1).rstrip(",")
-        if "," not in digits and "." not in digits and int(digits) <= SMALL_COUNT and not match.group(2):
+    for match in _NUMBER.finditer(_prose(text)):
+        sign, digits, suffix = match.group(1), match.group(2).rstrip(","), match.group(3) or ""
+        small = "," not in digits and "." not in digits and int(digits) <= SMALL_COUNT
+        if small and not sign and not suffix:
             continue
-        found.append(digits + (match.group(2) or ""))
+        found.append(sign + digits + suffix)
     return found
+
+
+def prose_outside_block(text: str) -> str:
+    """A README without its generated scoreboard block (the block is checked byte-exact on its own)."""
+    return _BLOCK.sub("\n", text)
+
+
+def stray_numbers(text: str, values: list[float], allowed: Mapping[str, str]) -> list[str]:
+    """Numbers in `text` that no results/*.json value states and no named contract constant explains."""
+    return [n for n in numbers_in(text) if n not in allowed and not is_measured(n, values)]
 
 
 def _numeric_leaves(value) -> list[float]:

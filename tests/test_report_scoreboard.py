@@ -311,3 +311,37 @@ def test_the_no_search_box_names_what_the_pgns_prove_and_what_the_engine_enforce
     assert "positions per move are rebuilt from the PGNs alone by `uv run blink audit no-search`" in block
     assert "one-call limit is enforced inside the engine by EvalBudget" in block
     assert "Rebuilt from the PGNs alone by" not in block
+
+
+def test_numbers_in_catches_signed_numbers_both_ends_of_ranges_plus_minus_and_leading_dots():
+    text = (
+        "Value mode beat policy by -35 Elo; puzzles landed at 75-85% and ratings 1800-2200; ECE fell to "
+        ".031; +/-100 error; 50/60 positions."
+    )
+    assert sb.numbers_in(text) == ["-35", "75", "85%", "1800", "2200", ".031", "100", "50", "60"]
+
+
+def test_numbers_in_skips_hyphenated_names_phases_dates_and_versions():
+    text = "top-1 on ply-16 cuts, P3-P6 runs, Blink-M, D13-D14, snapshot 2026-10-11 (2026/10/11), v0.16.8"
+    assert sb.numbers_in(text) == []
+
+
+def test_a_signed_or_leading_dot_number_is_measured_only_as_written():
+    values = [-35.0, 0.031]
+    assert sb.is_measured("-35", values) and not sb.is_measured("35", values)
+    assert sb.is_measured(".031", values) and sb.is_measured("3.1%", values)
+    assert not sb.is_measured("-36", values)
+
+
+def test_prose_outside_the_block_drops_only_the_generated_scoreboard():
+    text = f"# T\n\nStory with 573.4M positions.\n\n{sb.START}\n| 1850 +/- 35 |\n{sb.END}\n\nAfter: 81.0%.\n"
+    prose = sb.prose_outside_block(text)
+    assert "1850" not in prose and "573.4M" in prose and "81.0%" in prose
+    assert sb.prose_outside_block("no markers, 42 moves") == "no markers, 42 moves"
+
+
+def test_stray_numbers_are_those_neither_measured_nor_named(tmp_path):
+    folder = write_bundle(tmp_path / "results")
+    values = sb.measured_values(folder)
+    text = "It solved 80.1% of puzzles (not 81.0%) on the 1880-move vocabulary, beating it by -35 Elo."
+    assert sb.stray_numbers(text, values, {"1880": "the move vocabulary"}) == ["81.0%", "-35"]
