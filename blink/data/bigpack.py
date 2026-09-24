@@ -159,8 +159,8 @@ class BucketWriter:
         counts = np.bincount(bucket_ids, minlength=len(self.paths))
         starts = np.concatenate([[0], np.cumsum(counts)])
         ordered = records[order]
-        for bucket in np.flatnonzero(counts):
-            self.add(int(bucket), ordered[starts[bucket] : starts[bucket + 1]])
+        for bucket in np.flatnonzero(counts):  # a copy, so RAM holds only buffered bytes, not whole frames
+            self.add(int(bucket), ordered[starts[bucket] : starts[bucket + 1]].copy())
 
     def _flush(self, index: int) -> None:
         data = b"".join(chunk.tobytes() for chunk in self.pending[index])
