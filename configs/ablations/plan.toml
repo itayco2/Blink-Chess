@@ -1,0 +1,15 @@
+# P5 recipe ablations on S (d256, L8, H8). Each arm file overrides the recipe; nothing else.
+# Arms run in this order through `blink supervise`, each for `hours` of wall-clock after compile,
+# including its own 20% WSD cooldown, and are judged only after it. a09 (tau 0.02), a13 (lambda_v 2)
+# and a14 (sigma 1.5 bins) are cut from scope: FINDINGS lists them as "not tested".
+# blink sweep ablations --plan configs/ablations/plan.toml   (resumable; BLINK_HOME/eval/ablations.json)
+
+[plan]
+recipe = "configs/s.toml"    # Recipe D at size S (area P4 writes it)
+data = "v1"                   # BLINK_HOME/data/v1 (a relative path is under BLINK_HOME/data)
+hours = 1.5
+size = "s"                    # the bench.json throughput row that turns hours into steps
+sigma_arms = ["a01", "a02", "a03"]
+arms = ["a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a10", "a11", "a12", "a15"]
+slip_cut = ["a10", "a11", "a12"]    # dropped by the P5 slip rule (blink sweep ablations --slip)
+disable = []                  # supervise stop rules turned off for every arm (recorded)

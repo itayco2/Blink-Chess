@@ -1,0 +1,8 @@
+# a07: no rebalancing weights. Judged on games10k top-1: val is the eval-DB distribution by
+# construction, so only the game-position set can show what rebalancing buys.
+[arm]
+change = "no rebalancing"
+judged_on = "games10k_top1"
+
+[train]
+rebalance = false

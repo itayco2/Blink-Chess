@@ -1,0 +1,6 @@
+# a15: every adopted arm combined. Its overrides are decided when it starts, from the adopt rule
+# over a04-a12; the recipe becomes D plus them only if a15 >= D - 1 sigma, else it stays D.
+[arm]
+change = "combined winners"
+judged_on = "vaa"
+combine = true

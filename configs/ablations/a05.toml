@@ -1,0 +1,7 @@
+# a05: hard policy labels (alpha = 0). Judged on VAA and top-1.
+[arm]
+change = "hard labels (alpha = 0)"
+judged_on = "vaa"
+
+[train]
+alpha = 0.0

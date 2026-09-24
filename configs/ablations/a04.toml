@@ -1,0 +1,7 @@
+# a04: no children; the value loss sees roots only. Judged on VAA.
+[arm]
+change = "no children"
+judged_on = "vaa"
+
+[train]
+child_frac = 0.0

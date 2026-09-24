@@ -1,0 +1,8 @@
+# a06: a static learned 64x64 attention bias instead of GAB-lite. Judged on VAA.
+[arm]
+change = "static 64x64 bias instead of GAB-lite"
+judged_on = "vaa"
+
+[model]
+gab = false
+static_bias = true

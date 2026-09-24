@@ -1,0 +1,6 @@
+# a01: Recipe D, seed 1. a01-a03 set the noise floor sigma.
+[arm]
+change = "Recipe D, seed 1"
+
+[train]
+seed = 1

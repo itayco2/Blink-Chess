@@ -1,0 +1,9 @@
+# a10: Muon on the 2D hidden weights, torch.optim.Muon(..., adjust_lr_fn='match_rms_adamw'), passed
+# explicitly because the default is 'original'. Judged on VAA.
+[arm]
+change = "Muon on 2D hidden weights (adjust_lr_fn match_rms_adamw)"
+judged_on = "vaa"
+
+[train]
+optimizer = "muon"
+muon_adjust_lr_fn = "match_rms_adamw"

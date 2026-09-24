@@ -1,0 +1,9 @@
+# a08: the DeepMind value mapping (no cp clamp, every mate = 1.0). Judged on VAA; its
+# mate-preserving rate on the mateset must not fall more than 2 pt.
+[arm]
+change = "DeepMind value mapping (no clamp, every mate = 1.0)"
+judged_on = "vaa"
+guard = "mate_preserving"
+
+[train]
+value_mapping = "deepmind"

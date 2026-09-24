@@ -1,0 +1,20 @@
+# P6 size sweep at equal GPU-hours, then N*. blink sweep sizes; blink sweep choose.
+
+[sizes]
+sizes = ["s", "m", "m12"]
+conditional = ["l"]           # runs only if its measured rate passes the epoch floor
+hours = 6.0
+recipe = "configs/recipe.toml"    # frozen at the end of P5 (arm-style overrides)
+data = "v1"
+disable = []
+
+[choose]
+epoch_floor = 1658.0          # samples/s: 401M roots / 0.7 root share in T_long = 96 h
+t_long_hours = 96.0
+train_roots = 401000000
+root_frac = 0.7
+default = "m"
+p99_ms_max = 100.0
+p99_rows = 219
+p99_concurrency = [5, 2]      # fastchess plays 5 at once, the bot 2
+sigma_factor = 2.0
