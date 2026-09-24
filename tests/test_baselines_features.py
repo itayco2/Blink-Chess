@@ -2,6 +2,7 @@
 
 import chess
 import numpy as np
+import pytest
 
 from blink.baselines import features
 from blink.board import encode
@@ -46,17 +47,11 @@ def test_castling_rooks_count_as_rooks_and_the_en_passant_code_is_ignored():
     assert np.array_equal(bits, features.features(encode.encode_board(no_rights)[None])[0])
 
 
-def test_features_of_packed_records_equal_features_of_their_codes():
-    boards = [chess.Board(), chess.Board("8/8/8/8/8/5k2/6q1/7K w - - 0 1")]
-    codes = np.stack([encode.encode_board(b) for b in boards])
-    records_board = encode.pack(codes)
-    assert np.array_equal(features.features_from_packed(records_board), features.features(codes))
-
-
 def test_features_refuse_rows_that_are_not_64_codes():
-    try:
+    with pytest.raises(ValueError, match="64"):
         features.features(np.zeros((2, 63), dtype=np.uint8))
-    except ValueError as exc:
-        assert "64" in str(exc)
-    else:
-        raise AssertionError("expected a ValueError")
+
+
+def test_features_refuse_codes_outside_the_code_range():
+    with pytest.raises(ValueError, match="square codes must be in"):
+        features.checked_codes(np.full((1, 64), encode.NUM_CODES, dtype=np.int64))

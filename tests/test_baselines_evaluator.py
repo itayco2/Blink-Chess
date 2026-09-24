@@ -86,3 +86,21 @@ def test_the_torch_features_equal_the_numpy_features():
     assert np.array_equal(got, expected)
     packed = torch.from_numpy(encode.pack(codes))
     assert np.array_equal(models.unpack_torch(packed).numpy(), codes.astype(np.int64))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        np.zeros((2, 63), dtype=np.uint8),
+        np.full((1, 64), -1, dtype=np.int64),
+        np.full((1, 64), encode.NUM_CODES, dtype=np.int64),
+    ],
+)
+def test_the_baseline_evaluator_refuses_exactly_what_the_reference_features_refuse(bad):
+    from blink.baselines import features
+
+    with pytest.raises(ValueError) as reference:
+        features.features(bad)
+    with pytest.raises(ValueError) as played:
+        evaluator.BaselineEvaluator(models.build("linear")).evaluate(bad)
+    assert str(played.value) == str(reference.value)

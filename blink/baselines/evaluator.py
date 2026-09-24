@@ -4,6 +4,10 @@ The value head is a two-hot distribution over the 128 bins whose mean is exactly
 (clipped to the outer bin centres), and the policy logits are all zeros, so a baseline can only play
 value mode ("one look per move"). Every baseline, material included, plays through the same
 blink.play.agents.ValueAgent as Blink, with the same rules R1-R5 and the same EvalBudget.
+
+The forward pass is torch (the model builds its bits with models.features_torch); the numpy
+blink.baselines.features is the reference those bits are tested against, and its checked_codes is
+the input check here.
 """
 
 from pathlib import Path
@@ -12,9 +16,8 @@ import numpy as np
 import torch
 
 from blink import paths
-from blink.baselines import models
+from blink.baselines import features, models
 from blink.board import moves, value
-from blink.board.encode import NUM_CODES
 from blink.play.agents import ValueAgent
 from blink.play.evaluator import Evaluation
 from blink.play.oracles import MaterialEvaluator
@@ -44,12 +47,7 @@ class BaselineEvaluator:
 
     @torch.inference_mode()
     def win_probability(self, codes: np.ndarray) -> np.ndarray:
-        codes = np.asarray(codes)
-        if codes.ndim != 2 or codes.shape[1] != 64:
-            raise ValueError(f"codes must be [N, 64], got {codes.shape}")
-        if codes.size and (codes.min() < 0 or codes.max() >= NUM_CODES):
-            raise ValueError(f"square codes must be in 0..{NUM_CODES - 1}")
-        tokens = torch.from_numpy(codes.astype(np.int64)).to(self.device)
+        tokens = torch.from_numpy(features.checked_codes(codes)).to(self.device)
         return torch.sigmoid(models.logits_from_codes(self.model, tokens).float()).cpu().numpy()
 
     def evaluate(self, codes: np.ndarray) -> Evaluation:
