@@ -33,6 +33,7 @@ FROZEN_TAG = "eval-v1-frozen"
 SELFCHECK_ANCHOR = 1800
 SELFCHECK_TC = "120+1"
 SELFCHECK_BAND = 0.07
+DM_EXPECTED = (88.9, 1.0)  # DM-9M `params` on the 10K puzzles, % (arXiv v2 Table 1), pre-registered
 # A loaded machine bends st=0.1: in a CPU-busy smoke, SF19 forfeited 4 of 24 E5 games on time.
 BUSY_CPU_PCT = 25.0
 CPU_SAMPLE_S = 3.0
@@ -277,25 +278,59 @@ def shipped_mode(ctx: EvalContext, state: dict) -> str:
 # ------------------------------------------------------------------------------ E0, E1, E2, E3
 
 
-def e0_block(ctx: EvalContext, state: dict) -> dict:
-    """DM-9M on DeepMind's puzzles, and SF st=0.1 against itself at the calibration time control."""
-    from blink.eval import fastchess, puzzles
+def dm_puzzle_check(done: dict, expected: tuple[float, float] = DM_EXPECTED) -> dict:
+    """E0 (2): DM-9M `params` against its pre-registered expectation; a miss calls for the G6 audit."""
+    low, high = expected[0] - expected[1], expected[0] + expected[1]
+    pct = 100 * done["accuracy"]
+    return {
+        "pct": pct,
+        "expected": list(expected),
+        "in_band": low <= pct <= high,
+        "g6_needed": not low <= pct <= high,
+    }
+
+
+def selfcheck_verdict(report: dict) -> dict:
+    """E0 (3): SF at st=0.1 scores 50% +- 7 against itself at the slow control, with no forfeit at all."""
+    forfeits = (report.get("audit") or {}).get("forfeits") or {}
+    within = report["score"] is not None and abs(report["score"] - 0.5) <= SELFCHECK_BAND
+    return {
+        "band": SELFCHECK_BAND,
+        "within_band": within,
+        "sf_forfeits": forfeits,
+        "passed": within and not forfeits,
+    }
+
+
+def _dm_puzzles(ctx: EvalContext) -> dict:
+    from blink.eval import puzzles
     from blink.play.factory import ModelUnavailable
     from blink.reference import registry
 
-    out: dict = {"port_logits": "checked by test_the_dm_port_matches_saved_jax_logits (reference area)"}
-    try:
-        agent = registry.load_agent("dm:9M", device=ctx.device)
-        out["dm_puzzles"] = puzzles.run_puzzle_set(
-            puzzles.resolve_set("dm10k"),
-            agent,
-            registry.MODE,
-            ctx.out_dir / "E0",
-            ctx.positions,
-            "dm10k_dm_9M",
+    out: dict = {}
+    for selector in ("dm:9M", "dm:9M:ema"):
+        try:
+            agent = registry.load_agent(selector, device=ctx.device)
+        except (ModelUnavailable, ImportError) as exc:
+            out[selector] = {"skipped": str(exc)}
+            continue
+        label = f"dm10k_{selector.replace(':', '_')}"
+        done = puzzles.run_puzzle_set(
+            puzzles.resolve_set("dm10k"), agent, registry.MODE, ctx.out_dir / "E0", ctx.positions, label
         )
-    except (ModelUnavailable, FileNotFoundError, ImportError) as exc:
-        out["dm_puzzles"] = {"skipped": str(exc)}
+        out[selector] = {**done, **(dm_puzzle_check(done) if selector == "dm:9M" else {})}
+    return out
+
+
+def e0_block(ctx: EvalContext, state: dict) -> dict:
+    """DM-9M (params, and params_ema when converted) on DeepMind's puzzles, and SF st=0.1 against itself
+    at the calibration time control."""
+    from blink.eval import fastchess
+
+    out: dict = {"port_logits": "checked by test_the_dm_port_matches_saved_jax_logits (reference area)"}
+    puzzles_by_selector = _dm_puzzles(ctx)
+    out["dm_puzzles"] = puzzles_by_selector.get("dm:9M", {})
+    out["dm_puzzles_ema"] = puzzles_by_selector.get("dm:9M:ema", {})
     exe = fastchess.stockfish_exe()
     quick = fastchess.stockfish_anchor(SELFCHECK_ANCHOR, exe)
     slow = fastchess.with_tc(fastchess.stockfish_anchor(SELFCHECK_ANCHOR, exe), ctx.selfcheck_tc)
@@ -303,8 +338,7 @@ def e0_block(ctx: EvalContext, state: dict) -> dict:
     games = ctx.n(BLOCKS["E0"].games)
     pair = fastchess.prepare_pair(quick, slow, games, "dev", ctx.out_dir / "E0", ctx.concurrency)
     report = fastchess.match_report(fastchess.execute(pair))
-    passed = report["score"] is not None and abs(report["score"] - 0.5) <= SELFCHECK_BAND
-    out["sf_selfcheck"] = {**report, "slow_tc": ctx.selfcheck_tc, "band": SELFCHECK_BAND, "passed": passed}
+    out["sf_selfcheck"] = {**report, "slow_tc": ctx.selfcheck_tc, **selfcheck_verdict(report)}
     return {**out, "games": report["games"], "pgns": [report["pgn"]]}
 
 

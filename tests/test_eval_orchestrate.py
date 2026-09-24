@@ -267,3 +267,19 @@ def test_time_based_blocks_refuse_to_start_on_a_busy_cpu_unless_allowed(tmp_path
         ctx(tmp_path), recorder(calls), only=["E3"], runs_root=tmp_path, load=lambda: 99.0
     )
     assert state["E3"]["cpu_pct_at_start"] is None  # E3 has no clock: no probe, no refusal
+
+
+def test_dm_9m_puzzles_outside_88_9_plus_or_minus_1_call_for_the_g6_audit():
+    assert orchestrate.dm_puzzle_check({"accuracy": 0.889})["in_band"]
+    missed = orchestrate.dm_puzzle_check({"accuracy": 0.861})
+    assert missed["g6_needed"] and missed["pct"] == pytest.approx(86.1)
+
+
+def test_the_sf_self_check_fails_on_any_forfeit_even_at_50_percent():
+    clean = orchestrate.selfcheck_verdict({"score": 0.52, "audit": {"forfeits": {}}})
+    assert clean["passed"]
+    forfeited = orchestrate.selfcheck_verdict(
+        {"score": 0.5, "audit": {"forfeits": {"SF1800": {"time forfeit": 1}}}}
+    )
+    assert forfeited["within_band"] and not forfeited["passed"]
+    assert not orchestrate.selfcheck_verdict({"score": 0.60, "audit": {"forfeits": {}}})["passed"]
