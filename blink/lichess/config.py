@@ -57,7 +57,9 @@ FULL_SHA = re.compile(r"^[0-9a-f]{64}$")  # a rated config records all of it
 TOKEN = re.compile(r"(lip|lio)_[A-Za-z0-9]{16,}")
 
 LICHESS_URL = "https://lichess.org/"
-ENGINE_DIRS = {"rated": "C:/dev/blink-chess/.venv/Scripts", "casual": "C:/dev/blink-chess/.venv/Scripts"}
+# The rated engine runs from a non-editable install of the shipped tag (RUNBOOK section 7), so work in
+# the dev checkout cannot change it mid-rating; the casual smoke runs the preview from the dev venv.
+ENGINE_DIRS = {"rated": "D:/blink-bot/engine/Scripts", "casual": "C:/dev/blink-chess/.venv/Scripts"}
 ENGINE_KEYS = frozenset(
     {
         "dir",
@@ -327,6 +329,11 @@ def _ship_problems(config: Mapping, shipped: Shipped | None, weights_sha: str | 
     for key in ("model", "mode"):
         if stamp.get(key) != options.get(key):
             found.append(f"blink.{key} {stamp.get(key)!r} is not the engine's {key} {options.get(key)!r}")
+    if options.get("sha") != sha:
+        found.append(
+            f"engine.engine_options.sha must be blink.sha {sha!r}, so each engine refuses other weights; "
+            f"found {options.get('sha')!r}"
+        )
     if shipped is not None and shipped.mode != mode:
         found.append(f"the engine runs mode {mode!r} but the shipped mode is {shipped.mode!r}")
     if shipped is not None and sha and not sha_match(shipped.sha, sha):
@@ -406,7 +413,8 @@ def render(template: Mapping, kind: str, model: str, mode: str, sha: str | None)
     """A new config: the template with the engine pointed at `model` in `mode`, and its provenance."""
     config = copy.deepcopy(dict(template))
     engine = dict(config.get("engine") or {})
-    engine["engine_options"] = {**(engine.get("engine_options") or {}), "model": model, "mode": mode}
+    pin = {"sha": sha} if kind == "rated" else {}  # blink-uci --sha: each engine checks its weights
+    engine["engine_options"] = {**(engine.get("engine_options") or {}), "model": model, "mode": mode, **pin}
     stamp = {"kind": kind, "model": model, "mode": mode, "template": TEMPLATES[kind], "note": NOTE}
     return {**config, "engine": engine, PROVENANCE: {**stamp, "sha": sha} if kind == "rated" else stamp}
 

@@ -76,8 +76,8 @@ token (lichess-bot reads it from `LICHESS_BOT_TOKEN`, which only `start-bot.ps1`
 
 | file | template | what it is |
 |---|---|---|
-| `D:\blink-bot\config.yml` | [config.template.yml](config.template.yml) | the rated bot (G7): torch CUDA fp32, the shipped model, sha and mode |
-| `D:\blink-bot\config.casual.yml` | [config.casual.yml](config.casual.yml) | the G5 casual smoke: the preview model on CPU, only `itayco2` |
+| `D:\blink-bot\config.yml` | [config.template.yml](config.template.yml) | the rated bot (G7): torch CUDA fp32, the shipped model, sha and mode, run from the frozen engine install `D:\blink-bot\engine` (section 7) |
+| `D:\blink-bot\config.casual.yml` | [config.casual.yml](config.casual.yml) | the G5 casual smoke: the preview model on CPU, only `itayco2`, run from the dev venv `C:\dev\blink-chess\.venv` |
 
 Both switch off every lookup lichess-bot could make for the engine (polyglot book, every
 `online_moves` source, `lichess_bot_tbs`, the tablebase resign and draw options, pondering), remove
@@ -114,6 +114,11 @@ config that points at anything but the evaluated model fails. `--results none` s
 results.json comparison, on purpose, and says so. `--sha <sha>` makes the generator refuse a weights
 file with a different hash.
 
+The rated config also passes the sha to every engine (`engine_options.sha`, which lichess-bot hands
+to blink-uci as `--sha=<sha>`). Each blink-uci hashes its weights file before the UCI handshake and
+exits 2 on any other hash, so an overwritten `ship` file stops the bot at lichess-bot's startup
+engine check instead of putting an unevaluated model on the rated account.
+
 ## 6. Casual smoke (gate G5, during P7, CPU)
 
 1. **(agent)** generates and checks `config.casual.yml` (section 5).
@@ -125,15 +130,37 @@ file with a different hash.
 
 ## 7. Rated launch (gate G7, after E8 and after training)
 
-1. **(agent)** generates and checks `config.yml` (section 5): rated blitz only; matchmaking bases
+**Deviation from the plan (P9 setup):** the plan puts the bot's engine in
+`C:\dev\blink-chess\.venv\Scripts`. That venv is an editable install of the dev checkout, and every
+`uv run` re-syncs it, so the P10-P12 merges and branch checkouts during rating accrual would change
+or break the engine that lichess-bot starts for every game. The rated bot therefore runs from a
+separate, non-editable install of the shipped tag, `D:\blink-bot\engine`, and `check-config` pins
+that folder; the G5 casual smoke keeps the plan's folder. Blink is still evaluated exactly as it
+ships: the same tag, sha, runtime, mode and rules.
+
+1. **(agent)** freezes the engine from the shipped tag (the uv cache already holds torch, so nothing
+   new is downloaded; set the variable in this shell only, never with `setx`):
+
+   ```powershell
+   git -C C:\dev\blink-chess worktree add C:\dev\blink-wt\ship-<tag> <tag>
+   $env:UV_PROJECT_ENVIRONMENT = 'D:\blink-bot\engine'
+   uv sync --project C:\dev\blink-wt\ship-<tag> --frozen --no-editable --no-default-groups --group train
+   Remove-Item Env:\UV_PROJECT_ENVIRONMENT
+   git -C C:\dev\blink-chess worktree remove C:\dev\blink-wt\ship-<tag>
+   'uci', 'quit' | D:\blink-bot\engine\Scripts\blink-uci.exe --model ship --sha <shipped sha256>   # uciok, exit 0
+   ```
+
+   The cold-start gate (cold start plus the first move under 10 s) is measured with `--sha`, since
+   every engine now hashes its weights first (about 300 MB/s on this PC under load).
+2. **(agent)** generates and checks `config.yml` (section 5): rated blitz only; matchmaking bases
    [180, 300] and increments [0, 2, 3], `challenge_timeout: 2`, `opponent_rating_difference: 300`,
    `challenge_filter: fine`; under `challenge:` `concurrency: 2` with `games_reserved_for_humans: 1`
    (so one bot game at a time), `preference: human`, `bullet_requires_increment: true`,
    `max_simultaneous_games_per_user: 1`; resign and draw offers off; PGNs in `D:\blink\lichess\pgn`.
-2. Itay registers and starts the watcher task (section 8) before the bot's first rated game; the
+3. Itay registers and starts the watcher task (section 8) before the bot's first rated game; the
    agent confirms its heartbeat in `D:\blink\lichess\watch.json`.
-3. Itay: `D:\blink-bot\start-bot.ps1`
-4. Optional auto-start: a Task Scheduler task that runs `start-bot.ps1` "only when user is logged
+4. Itay: `D:\blink-bot\start-bot.ps1`
+5. Optional auto-start: a Task Scheduler task that runs `start-bot.ps1` "only when user is logged
    on", with an at-logon trigger only and no restart on failure, so a pause is never undone. Task
    Scheduler stops a task after 72 hours by default, which would end the bot inside the 7-day
    window, so the time limit is switched off:
@@ -157,8 +184,9 @@ The bot runs for days and comes back at every logon, so the rule cannot depend o
 being alive (plan section 4: every long job's stop rules are enforced without an agent).
 `blink lichess watch` enforces it from a Task Scheduler task of its own:
 
-1. Copy [watch-bot.template.ps1](watch-bot.template.ps1) to `D:\blink-bot\watch-bot.ps1`. It never
-   reads the token and is never started from `start-bot.ps1`.
+1. Copy [watch-bot.template.ps1](watch-bot.template.ps1) to `D:\blink-bot\watch-bot.ps1`. It runs
+   the watcher from the frozen engine install (section 7), so dev work cannot change it either. It
+   never reads the token and is never started from `start-bot.ps1`.
 2. Itay registers the task once, at G7, beside the bot's. Unlike the bot's task it restarts on
    failure, because the watcher can only pause the bot, never start it:
 

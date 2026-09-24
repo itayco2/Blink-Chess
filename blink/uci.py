@@ -14,11 +14,18 @@ Castling is always printed as the king's two-square move (e1g1).
 `--log` appends one JSON line per decision. `{process}` in its path becomes this process's UTC start
 time and PID (`20261008T120000Z-4242`): lichess-bot starts one blink-uci per game with the same static
 flags, so at concurrency 2 two engines run at once, and each needs a file of its own.
+
+`--sha` pins the weights: before the UCI handshake the engine hashes the weights file its --model
+selects and exits 2 unless the sha256 matches. The rated Lichess bot starts every game's engine with
+it, so an overwritten `ship` file stops the bot (lichess-bot's startup engine check fails) instead of
+playing an unevaluated model.
 """
 
 import argparse
+import hashlib
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -38,6 +45,7 @@ AUTHOR = "Itay Cohen"
 WARMUP_DECISIONS = 5  # timed decisions after one cold call; their max stands in for the p99 (R5)
 WIN_FLOOR = 1e-6
 PROCESS_FIELD = "{process}"  # in --log: this process's UTC start time and PID
+FULL_SHA = re.compile(r"^[0-9a-f]{64}$")
 
 
 def log_path(raw: Path, pid: int, now: float) -> Path:
@@ -164,6 +172,36 @@ class UciEngine:
         self.send(f"bestmove {decision.move.uci()}")
 
 
+def _full_sha(text: str) -> str:
+    if not FULL_SHA.match(text):
+        raise argparse.ArgumentTypeError(f"must be a full lowercase sha256 (64 hex digits), got {text!r}")
+    return text
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def pinned_weights_problem(selector: str, expected: str) -> str | None:
+    """Why the engine must not start under `--sha expected`, or None when its weights hash to it."""
+    if selector in factory.RANDOM_SELECTORS or registry.is_dm(selector):
+        return f"--sha pins a Blink weights file, and {selector!r} is not one"
+    from blink.model.loading import resolve_selector  # torch: loaded here only when a model is pinned
+
+    try:
+        path, _ = resolve_selector(selector)
+    except (ValueError, FileNotFoundError) as exc:
+        return str(exc)
+    if not path.is_file():
+        return f"no weights file at {path}"
+    actual = _file_sha256(path)
+    return None if actual == expected else f"{path} has sha256 {actual}, not the pinned {expected}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="blink-uci", description="Blink as a UCI engine (no search).")
     parser.add_argument(
@@ -181,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
         "process's UTC start time and PID",
     )
     parser.add_argument("--name", default=None, help="the name sent in `id name`")
+    parser.add_argument(
+        "--sha", type=_full_sha, help="refuse to start unless the --model weights file has this sha256"
+    )
     return parser
 
 
@@ -194,6 +235,9 @@ def main(argv: Sequence[str] | None = None, stdin: TextIO | None = None, stdout:
         (registry.check_available if is_deepmind else factory.check_available)(selector)
     except factory.ModelUnavailable as exc:
         print(f"blink-uci: {exc}", file=sys.stderr)
+        return 2
+    if args.sha and (problem := pinned_weights_problem(selector, args.sha)):
+        print(f"blink-uci: refusing to start: {problem}", file=sys.stderr)
         return 2
     sink = factory.JsonlSink(log_path(args.log, os.getpid(), time.time())) if args.log else None
 

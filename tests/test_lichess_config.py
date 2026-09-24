@@ -61,11 +61,12 @@ def all_configs(tmp_path: Path) -> list[dict]:
     return [load_template(), load_template(CASUAL_TEMPLATE), generated["rated"], generated["casual"]]
 
 
-def test_the_bot_engine_is_a_console_script_the_project_installs():
-    engine = load_template()["engine"]
+@pytest.mark.parametrize("template", [TEMPLATE, CASUAL_TEMPLATE])
+def test_the_bot_engine_is_a_console_script_the_project_installs(template):
+    engine = load_template(template)["engine"]
     script = PurePosixPath(engine["name"])
     assert script.suffix == ".exe"
-    assert PurePosixPath(engine["dir"]).parts[-2:] == (".venv", "Scripts")
+    assert PurePosixPath(engine["dir"]).name == "Scripts"  # a venv's console scripts
     target = console_scripts().get(script.stem)
     assert target is not None, f"pyproject.toml [project.scripts] has no {script.stem!r}"
     module_name, _, function_name = target.partition(":")
@@ -523,3 +524,32 @@ def test_the_reviewers_tampered_rated_config_is_refused_by_the_command(tmp_path,
     path.write_text(json.dumps(config), encoding="utf-8")
     found = check(path, weights).problems
     assert sum(p.startswith(("url", "engine.interpreter")) for p in found) == 3, found
+
+
+# ---------------------------------------------------------------- the rated engine is frozen and pinned
+# lichess-bot starts a new blink-uci for every game for days. The rated one runs from a non-editable
+# install of the shipped tag (D:/blink-bot/engine), so merges, checkouts and `uv run` syncs in the dev
+# checkout cannot change it, and each engine refuses weights whose sha256 is not the recorded one.
+
+
+def test_the_rated_engine_runs_from_the_frozen_install_and_the_casual_from_the_dev_venv(tmp_path):
+    configs = generate(tmp_path)
+    assert (
+        load_template()["engine"]["dir"] == configs["rated"]["engine"]["dir"] == "D:/blink-bot/engine/Scripts"
+    )
+    casual_dir = load_template(CASUAL_TEMPLATE)["engine"]["dir"]
+    assert casual_dir == configs["casual"]["engine"]["dir"] == "C:/dev/blink-chess/.venv/Scripts"
+
+
+def test_the_rated_engine_is_started_with_the_recorded_sha(tmp_path):
+    rated = generate(tmp_path)["rated"]
+    assert rated["engine"]["engine_options"]["sha"] == rated["blink"]["sha"] == SHA
+    assert "sha" not in generate(tmp_path)["casual"]["engine"]["engine_options"]  # the preview is exempt
+    for value in ("0" * 64, None):
+        broken = copy.deepcopy(rated)
+        if value is None:
+            del broken["engine"]["engine_options"]["sha"]
+        else:
+            broken["engine"]["engine_options"]["sha"] = value
+        found = botconfig.problems(broken, "rated", frozenset())
+        assert any(p.startswith("engine.engine_options.sha") for p in found), found

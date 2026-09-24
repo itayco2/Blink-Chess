@@ -1,7 +1,7 @@
 {
   "url": "https://lichess.org/",
   "engine": {
-    "dir": "C:/dev/blink-chess/.venv/Scripts",
+    "dir": "D:/blink-bot/engine/Scripts",
     "name": "blink-uci.exe",
     "working_dir": "",
     "protocol": "uci",
