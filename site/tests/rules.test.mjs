@@ -144,3 +144,14 @@ test("losing, one look takes the threefold repetition (R3)", async () => {
   assert.equal(look.move.uci, "f6g8");
   assert.equal(look.draw, "threefold repetition");
 });
+
+test("the page explains every rule that changed Blink's move, and says nothing otherwise", () => {
+  const move = { san: "Qxf7#" };
+  assert.equal(rules.describe({ rule: null, win: 0.9, move }), "");
+  assert.match(rules.describe({ rule: "R2", win: 1, move }), /Qxf7# .*rule R2, no network call/);
+  const losing = rules.describe({ rule: "R3", win: 0.2, move, draw: "threefold repetition" });
+  assert.match(losing, /^Losing \(20%\).*draw by threefold repetition with Qxf7#/);
+  assert.match(rules.describe({ rule: "R3", win: 0.8, move, avoided: 2 }), /^Winning \(80%\).*passed over 2 moves/);
+  assert.match(rules.describe({ rule: "R3", win: 0.8, move, avoided: 1 }), /passed over 1 move that/);
+  assert.match(rules.describe({ rule: "R3", win: 0.8, move, avoided: 0 }), /every legal move draws by rule/);
+});

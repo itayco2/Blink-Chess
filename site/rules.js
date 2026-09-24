@@ -115,3 +115,23 @@ export async function decide(vocab, game, ChessClass, evaluate, k) {
     legalCount: kids.length,
   });
 }
+
+// What the page says when a rule changed Blink's move (R2 or R3), or "" when the policy's first choice
+// was played. `look` is what decide() returned.
+export function describe(look) {
+  const percent = `${(look.win * 100).toFixed(0)}%`;
+  if (look.rule === "R2") {
+    return `Mate in one: ${look.move.san} is played without looking (rule R2, no network call).`;
+  }
+  if (look.rule !== "R3") {
+    return "";
+  }
+  if (look.win < 0.5) {
+    return `Losing (${percent}), so Blink took a draw by ${look.draw} with ${look.move.san} (rule R3).`;
+  }
+  if (!look.avoided) {
+    return `Winning (${percent}), but every legal move draws by rule: ${look.move.san} (rule R3).`;
+  }
+  const moves = look.avoided === 1 ? "move" : "moves";
+  return `Winning (${percent}), so Blink passed over ${look.avoided} ${moves} that draw by rule and played ${look.move.san} (rule R3).`;
+}
