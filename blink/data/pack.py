@@ -29,6 +29,8 @@ FORMAT = "blink-pack-v1"
 MANIFEST = "manifest.json"
 TIMING = "timing.json"
 ERROR_SAMPLES = 3
+# 50M roots are 3.4 GB; the full DB (409.7M roots, ~28 GB) needs the P2 bucketed pack instead.
+MAX_RECORDS_IN_RAM = 50_000_000
 REPLACE_RETRIES = 5
 
 
@@ -42,6 +44,7 @@ class PackConfig:
     seed: int = DEFAULT_SEED
     blocklist: Path | None = None
     overwrite: bool = False
+    max_records: int = MAX_RECORDS_IN_RAM
 
 
 class ParsedLines(NamedTuple):
@@ -111,13 +114,24 @@ def load_blocklist(path: Path | None) -> tuple[np.ndarray, dict | None]:
     return unique, {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(), "entries": len(unique)}
 
 
+def _check_cap(held: int, cap: int, frames_read: int) -> None:
+    if held > cap:
+        raise MemoryError(
+            f"over {cap:,} records after {frames_read} frames: this in-RAM pack is for the skeleton; "
+            "pass --frames, or pack the full DB with the P2 bucketed pack"
+        )
+
+
 def collect(cfg: PackConfig) -> Collected:
     reader = zst.FrameReader(cfg.source, cfg.frames)
     chunks, rejects, errors, samples = [], Counter(), Counter(), []
     lines = decode_s = parse_s = compressed = decompressed = 0
     start = time.perf_counter()
+    held = 0
     for out in frames.run_frames(reader, parse_lines, cfg.workers):
         parsed: ParsedLines = out.result
+        held += len(parsed.records)
+        _check_cap(held, cfg.max_records, reader.frames_read)
         chunks.append(parsed.records)
         rejects.update(parsed.rejects)
         errors.update(parsed.errors)

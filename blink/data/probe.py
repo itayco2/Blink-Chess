@@ -49,8 +49,8 @@ class ProbeCounts:
     lines: int = 0
     parsed: int = 0
     checked: int = 0  # lines re-checked with python-chess
-    legal: int = 0  # ... whose decoded best move is legal
-    canonical: int = 0  # ... whose decoded best move equals python-chess's parse_uci of the raw move
+    legal: int = 0  # checked lines whose decoded best move is legal
+    canonical: int = 0  # checked lines whose best move equals python-chess's parse_uci of the raw move
     castling: int = 0  # parsed best moves that castle
     mate: int = 0
     shallow_nonmate: int = 0

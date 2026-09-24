@@ -1,7 +1,8 @@
 """`blink data probe` and `blink data pack`.
 
 Exit codes: 0 done; 1 done but a line raised something other than a documented parse.Rejected
-(a parser bug: see error_samples in the report); 2 refused before starting (bad source, existing pack).
+(a parser bug: see error_samples in the report); 2 refused: a missing source, an existing pack
+without --overwrite, or more records than the in-RAM pack holds.
 """
 
 import argparse
@@ -89,7 +90,7 @@ def _cmd_pack(args: argparse.Namespace) -> int:
     )
     try:
         manifest = pack.pack(cfg)
-    except FileExistsError as exc:
+    except (FileExistsError, MemoryError) as exc:
         print(f"blink data pack: {exc}", file=sys.stderr)
         return 2
     timing = pack.read_timing(cfg.out)

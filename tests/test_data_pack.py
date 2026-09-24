@@ -158,3 +158,11 @@ def test_overwrite_removes_the_old_manifest_before_writing_any_shard(tmp_path, s
     with pytest.raises(OSError, match="disk full"):
         _pack(source, out, overwrite=True)
     assert not (out / "manifest.json").exists()
+
+
+def test_the_in_ram_pack_stops_early_past_its_record_cap(tmp_path, source):
+    """Run on the full 22 GB DB, this pack would hold ~28 GB in RAM; it must refuse instead of thrashing."""
+    cfg = pack.PackConfig(source=source, out=tmp_path / "out", shards=2, max_records=50)
+    with pytest.raises(MemoryError, match="bucketed"):
+        pack.pack(cfg)
+    assert not list((tmp_path / "out").glob("*.bin"))
