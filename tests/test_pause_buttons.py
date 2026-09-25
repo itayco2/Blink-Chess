@@ -25,16 +25,19 @@ PAUSE, RESUME, STATUS = "Pause Blink.cmd", "Resume Blink.cmd", "Blink Status.cmd
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _press(button: str, home: Path, bin_dir: Path | None = None, wait_s: int = 5):
-    """The button in cmd.exe; Blink Status's python is this interpreter, run from this checkout."""
+def _press(button: str, home: Path, bin_dir: Path | None = None, wait_s: int = 5, repo: Path = REPO_ROOT):
+    """The button in cmd.exe, pressed from a folder outside any checkout (as from the Desktop); Blink
+    Status's python is this interpreter and its checkout (BLINK_REPO) this one."""
     env = {**os.environ, "BLINK_HOME": str(home), "BLINK_PAUSE_WAIT_S": str(wait_s)}
-    env["BLINK_PYTHON"] = sys.executable
+    env |= {"BLINK_PYTHON": sys.executable, "BLINK_REPO": str(repo)}
     if bin_dir is not None:
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    desktop = Path(home) / "Desktop"
+    desktop.mkdir(parents=True, exist_ok=True)
     return subprocess.run(
         ["cmd.exe", "/d", "/c", str(buttons.BUTTONS_DIR / button)],
         env=env,
-        cwd=REPO_ROOT,
+        cwd=desktop,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -129,6 +132,7 @@ def test_the_status_button_is_plain_ascii_and_only_reads(tmp_path):
     status = (buttons.BUTTONS_DIR / STATUS).read_text(encoding="ascii")
     assert r'set "BLINK_HOME=D:\blink"' in status
     assert r'set "BLINK_PYTHON=C:\dev\blink-chess\.venv\Scripts\python.exe"' in status
+    assert r'set "BLINK_REPO=C:\dev\blink-run"' in status and 'pushd "%BLINK_REPO%"' in status
     assert '"%BLINK_PYTHON%" -m blink.cli status --live' in status
     assert "--query-gpu=utilization.gpu,temperature.gpu,power.draw --format=csv,noheader" in status
     assert '"%BLINK_PYTHON%" -m blink.cli eval strength --show --last 1' in status
@@ -276,6 +280,24 @@ def test_status_shows_the_live_run_the_gpu_the_pause_flag_and_the_last_strength_
     assert "37 %, 61, 180.50 W" in out
     assert "The pause flag is up" in out
     assert "100,000" in out and "DM-9M" in out and done.returncode == 0
+
+
+@on_windows
+def test_status_pressed_from_the_desktop_runs_the_blink_of_its_checkout(tmp_path):
+    """From the Desktop the venv's own path finds C:/dev/blink-chess, whose blink may lack `status --live`
+    and `eval strength`: the button runs Blink from BLINK_REPO, the checkout the flagship trains in."""
+    done = _press(STATUS, tmp_path, _fake_gpu_line(tmp_path))
+    out = done.stdout + done.stderr
+    assert "no live run" in out and "no strength checks yet" in out, out
+    assert "error:" not in out and done.returncode == 0
+
+
+@on_windows
+def test_status_says_so_and_runs_no_blink_when_its_checkout_is_missing(tmp_path):
+    done = _press(STATUS, tmp_path, _fake_gpu_line(tmp_path), repo=tmp_path / "no-such-checkout")
+    out = done.stdout + done.stderr
+    assert "no-such-checkout was not found" in out and "no live run" not in out, out
+    assert "The pause flag is down" in out and done.returncode == 0  # the rest still reads
 
 
 @on_windows
