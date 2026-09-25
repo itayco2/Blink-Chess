@@ -22,30 +22,9 @@ from blink.play import agents, factory, rules
 from blink.reference import gauntlet as dm_gauntlet
 from blink.reference import registry
 
-MATERIAL = "material"
-LEARNED_BASELINES = ("linear", "mlp")
-BASELINE_PREFIX = "baseline:"
 SIDES_HELP = "random | material | linear | mlp | baseline:<path> | random-net | dm:<size> | a model selector"
-
-
-def is_baseline(side: str) -> bool:
-    return side == MATERIAL or side in LEARNED_BASELINES or side.startswith(BASELINE_PREFIX)
-
-
-def baseline_side(side: str, device: str, epsilon: float, seed: int) -> agents.ValueAgent:
-    """material, linear, mlp or baseline:<path>, in value mode with the match's epsilon (rule R4).
-
-    A baseline's policy is flat, so its R4 ties are drawn by (seed, game, position), as MaterialAgent's
-    were. Always taking the lowest vocab index, material shuffled its king while random repeated the
-    position: 15 of 20 dev games drawn by threefold repetition, material 7 to 15 points up.
-    """
-    if side == MATERIAL:
-        agent = factory.material_agent()
-    else:
-        from blink.baselines.evaluator import baseline_agent  # torch, only when a learned rung plays
-
-        agent = baseline_agent(side.removeprefix(BASELINE_PREFIX), device=device)
-    return replace(agent, epsilon=epsilon, tie_seed=seed)
+is_baseline = factory.is_baseline  # the one baseline constructor, shared with E6 (blink.eval.ladder)
+baseline_side = factory.baseline_side
 
 
 def side_agent(side: str, mode: str, device: str, seed: int, epsilon: float) -> agents.Agent:
@@ -151,6 +130,8 @@ def _cmd_gauntlet(args: argparse.Namespace) -> int:
         (registry.check_available if is_deepmind else factory.check_available)(args.model)
     # DeepMind's engine plays under its own name and has its own moves audited (plan E7).
     runner = dm_gauntlet if is_deepmind else fastchess
+    # Blink plays E2b's epsilon, as E5 does: one engine name, one configuration.
+    epsilon = args.epsilon if args.epsilon is not None else match.read_epsilon(args.results_dir)
     ok = True
     for anchor in args.anchor or [1320]:
         gauntlet = runner.prepare_gauntlet(
@@ -164,6 +145,7 @@ def _cmd_gauntlet(args: argparse.Namespace) -> int:
             concurrency=args.concurrency,
             max_moves=args.max_moves,
             tc=args.tc,
+            epsilon=epsilon,
         )
         if args.dry_run:
             print(subprocess.list2cmdline(gauntlet.command()))
@@ -222,6 +204,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     g.add_argument("--concurrency", type=int, default=5)
     g.add_argument("--max-moves", type=int, default=fastchess.MAX_MOVES)
     g.add_argument("--tc", default=None, help="a cutechess time control for both engines instead of st")
+    g.add_argument(
+        "--epsilon",
+        type=float,
+        default=None,
+        help="Blink's R4 tie window (default: E2b's choice in <results-dir>/epsilon.json, 0 before E2b)",
+    )
+    g.add_argument("--results-dir", type=Path, default=Path("results"), help="where E2b wrote epsilon.json")
     g.add_argument(
         "--out", type=Path, default=None, help="folder for PGNs (default BLINK_HOME/games/gauntlet)"
     )

@@ -7,8 +7,9 @@ clocks and the anchors). After each block its report goes to <out>/<block>.json 
 adjudications of every engine in its PGNs and the no-search audit of every searchless player in them
 (Blink-*, DM-*, each by its exact name; the full audits go to <out>/<block>.nosearch.json). The plan's
 done-when gates the run can fail are listed as gate_failures, and `blink eval` then exits non-zero. At the
-end results/results.json is written through blink.report.results_schema (Ordo over the final-slice PGNs
-for the Elo column, E2 for the diagnostics).
+end blink.eval.publish writes results/results.json (Ordo over the final-slice PGNs for the Elo column,
+E2 and E6's rungs for the diagnostics, each Blink row's size, training and play costs) and
+results/nosearch.json (one audit of every searchless player over every PGN the blocks wrote).
 
 Where the games are played: the fastchess blocks are the ones against clocked UCI_Elo anchors (E0's SF
 self-check, E5 and DM-9M's E7 gauntlet), at concurrency 5 as in the plan. Every other match runs in process
@@ -20,6 +21,11 @@ A `games` override makes every match that long (and every SPRT cap), for smoke r
 
 Blink plays every block after E2b with the epsilon E2b chose (results/epsilon.json), in process and under
 fastchess alike (blink-uci gets it as --epsilon); a block refuses to start if that file changed mid-run.
+
+The weights are pinned the same way: the model's weights file is hashed once when the run starts, every
+block report records that sha256, a block refuses to start if the file no longer hashes to it, and each
+fastchess engine starts blink-uci with --sha, so it refuses other weights. results.json names a shipped
+model only with that pinned sha, and only if the file still matches it at the end.
 """
 
 import datetime
@@ -35,6 +41,13 @@ import chess.pgn
 import numpy as np
 
 from blink import paths
+from blink.eval.publish import (
+    FINAL_SLICE_LIST,
+    build_results,
+    final_slice_pgns,
+    public_audit,
+    write_pgn_list,
+)
 
 BLOCK_ORDER = ("E0", "E1", "E2", "E2b", "E3", "E4", "E4b", "E5", "E6", "E7", "E8", "E9")
 FROZEN_TAG = "eval-v1-frozen"
@@ -47,7 +60,6 @@ BUSY_CPU_PCT = 25.0
 # A smoke run's few games can leave Ordo's error simulations crawling (40 games: 20 simulations > 100 s).
 SMOKE_ORDO_SIMULATIONS = 100
 SMOKE_ORDO_TIMEOUT_S = 120
-FINAL_SLICE_LIST = "final_slice_pgns.txt"  # next to results.json: the exact PGNs its Elo was fitted on
 CPU_SAMPLE_S = 3.0
 # The blocks after E2b whose Blink plays with the epsilon E2b chose (in process or under fastchess).
 EPSILON_BLOCKS = frozenset({"E3", "E4", "E4b", "E5", "E6", "E7", "E8"})
@@ -95,6 +107,10 @@ class MachineBusy(RuntimeError):
 
 class EpsilonChanged(RuntimeError):
     """results/epsilon.json changed after earlier blocks of this run played with another value."""
+
+
+class WeightsChanged(RuntimeError):
+    """The model's weights file changed after earlier blocks of this run played it."""
 
 
 @dataclass(frozen=True)
@@ -151,7 +167,29 @@ def _smoke_games(spec: BlockSpec, games: int) -> int:
 
 
 def sha256_file(path: Path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def weights_file(selector: str) -> Path | None:
+    """The weights file a selector loads; None for random and DeepMind selectors, a missing file, or no
+    model loader (torch)."""
+    try:
+        from blink.model.loading import resolve_selector
+
+        path, _ = resolve_selector(selector)
+    except (ImportError, ValueError, FileNotFoundError):
+        return None
+    return Path(path) if Path(path).is_file() else None
+
+
+def weights_sha(selector: str) -> str | None:
+    """The sha256 of the weights file the selector names, or None when there is no file to hash."""
+    path = weights_file(selector)
+    return sha256_file(path) if path is not None else None
 
 
 def frozen_protocol(repo: Path, relative: str = "EVAL.md", tag: str = FROZEN_TAG) -> bytes | None:
@@ -225,6 +263,19 @@ def guard_epsilon(block_id: str, results_dir: Path, played: float | None) -> flo
             f"of this run played with {played!r}: not started"
         )
     return now
+
+
+def guard_weights(block_id: str, selector: str, pinned: str | None) -> None:
+    """Refuse the block when the weights file no longer hashes to the sha pinned at the run's start: one
+    Blink name must be one weights file across the multi-day run (say ship/blink.pt was replaced)."""
+    if pinned is None:
+        return
+    now = weights_sha(selector)
+    if now != pinned:
+        raise WeightsChanged(
+            f"{block_id}: the weights of {selector} now hash to {now or 'nothing'}, but earlier blocks of "
+            f"this run played {pinned}: not started"
+        )
 
 
 # ------------------------------------------------------------------------------ forfeits and adjudications
@@ -350,10 +401,13 @@ def run_blocks(
         raise ValueError(f"unknown blocks {unknown}; the blocks are {', '.join(BLOCK_ORDER)}")
     protocol = check_protocol(ctx.protocol)
     log(game_table(ids, ctx.games))
-    state: dict = {"protocol": protocol, "started": _now()}
+    pinned = weights_sha(ctx.model)
+    log(f"weights of {ctx.model}: sha256 {pinned}" if pinned else f"{ctx.model}: no weights file to pin")
+    state: dict = {"protocol": protocol, "started": _now(), "weights_sha": pinned}
     for block_id in ids:
         busy = guard_time_based(block_id, runs_root, ctx.allow_busy_cpu, load)
         epsilon = guard_epsilon(block_id, ctx.results_dir, state.get("epsilon"))
+        guard_weights(block_id, ctx.model, pinned)
         log(f"{block_id}: {BLOCKS[block_id].title}")
         report = runners[block_id](ctx, state)
         pgns = [Path(p) for p in report.get("pgns", [])]
@@ -367,6 +421,7 @@ def run_blocks(
             "nosearch": {player: _audit_summary(audit) for player, audit in audits.items()},
             "cpu_pct_at_start": busy,
             "epsilon": epsilon,
+            "weights_sha": pinned,
         }
         state[block_id] = report
         if epsilon is not None:
@@ -475,16 +530,31 @@ def _pack_file(data_dir: Path, split: str) -> Path | None:
     return None
 
 
-def static_inputs(ctx: EvalContext, label: str):
-    """E2's inputs: the pack's val and test roots and mateset, games10k, and any puzzle CSVs on disk."""
-    from blink.eval import static
+def _scored_at(csv_path: Path, json_path: Path, mode: str, epsilon: float | None) -> bool:
+    """A `blink eval puzzles` CSV E2 may use: policy mode always, value mode only at E2's epsilon."""
+    if not csv_path.is_file():
+        return False
+    if mode != "value" or epsilon is None:
+        return True
+    recorded = (
+        json.loads(json_path.read_text(encoding="utf-8")).get("epsilon") if json_path.is_file() else None
+    )
+    return recorded == epsilon
+
+
+def static_inputs(ctx: EvalContext, label: str, epsilon: float | None = None):
+    """E2's inputs: the pack's val and test roots and mateset, games10k, and the puzzle CSVs on disk
+    (a value-mode CSV only when it was scored at `epsilon`, the epsilon E2's value agent plays)."""
+    from blink.eval import puzzles, static
 
     data = ctx.data_dir or paths.home() / "data" / "v1"
     test_iid = _pack_file(data, "test_iid")
     if test_iid is None:
         raise FileNotFoundError(f"no test_iid roots in {data}")
     home = paths.home()
-    csvs = [(m, home / "eval" / "puzzles" / f"puzzles_dm10k_{label}_{m}.csv") for m in ("policy", "value")]
+    folder = home / "eval" / "puzzles"
+    found = {m: puzzles.output_paths(folder, f"dm10k_{label}", m) for m in ("policy", "value")}
+    csvs = [(m, paths_[0]) for m, paths_ in found.items() if _scored_at(*paths_, m, epsilon)]
     optional = [data / "mateset.npz", home / "data" / "games10k.npy", home / "eval" / "lichess_bands.csv"]
     mateset, games10k, bands = (p if p.is_file() else None for p in optional)
     return static.StaticInputs(
@@ -493,7 +563,7 @@ def static_inputs(ctx: EvalContext, label: str):
         test_grouped=_pack_file(data, "test_grouped"),
         games10k=games10k,
         mateset=mateset,
-        dm_puzzles=tuple((m, p) for m, p in csvs if p.is_file()),
+        dm_puzzles=tuple(csvs),
         lichess_bands=bands,
     )
 
@@ -508,16 +578,25 @@ def static_limits(ctx: EvalContext):
 
 
 def e2_block(ctx: EvalContext, state: dict) -> dict:
+    """E2 runs before E2b chooses epsilon: its value-mode puzzle numbers record the epsilon they used
+    (value_epsilon), and results.json leaves them out if the shipped epsilon turns out different."""
     from blink.eval import fastchess, match, static
     from blink.eval.sflabel import SfLabeler
 
-    agents = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)
-    label = fastchess.NAME_UNSAFE.sub("_", ctx.model).strip("_")
-    inputs, limits = static_inputs(ctx, label), static_limits(ctx)
+    epsilon = match.read_epsilon(ctx.results_dir)
+    agents = match.blink_agents(ctx.model, ctx.device, epsilon=epsilon)
+    label = fastchess.model_tag(ctx.model)
+    inputs, limits = static_inputs(ctx, label, epsilon), static_limits(ctx)
     with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:
         e2 = static.run_e2(agents["policy"].evaluator, agents, inputs, limits, labeler)
     rows = static.diagnostics_rows(e2, f"Blink-{label}")
-    return {"e2": e2, "diagnostics": [r.__dict__ for r in rows], "games": 0, "pgns": []}
+    return {
+        "e2": e2,
+        "diagnostics": [r.__dict__ for r in rows],
+        "value_epsilon": epsilon,
+        "games": 0,
+        "pgns": [],
+    }
 
 
 def _film_row(ctx: EvalContext, path: Path, val: list, probe: dict | None) -> dict:
@@ -540,6 +619,15 @@ def _film_row(ctx: EvalContext, path: Path, val: list, probe: dict | None) -> di
     return row
 
 
+def load_valprobe(ctx: EvalContext) -> dict | None:
+    """The pack's valprobe.npz arrays (E1's frames and E6's rungs score VAA on it), or None without one."""
+    path = (ctx.data_dir or paths.home() / "data" / "v1") / "valprobe.npz"
+    if not path.is_file():
+        return None
+    with np.load(path) as arrays:
+        return {k: arrays[k] for k in arrays.files}
+
+
 def e1_block(ctx: EvalContext, state: dict) -> dict:
     """The 21 film frames, static only: val policy top-1, valprobe VAA and puzzles in both modes."""
     from blink.eval import ladder, static
@@ -548,10 +636,7 @@ def e1_block(ctx: EvalContext, state: dict) -> dict:
         return {"skipped": "no --film-run given", "games": 0, "pgns": []}
     data = ctx.data_dir or paths.home() / "data" / "v1"
     val = static.roots_from_records(static.read_roots(_pack_file(data, "val"), ctx.positions or 50_000))
-    probe = None
-    if (data / "valprobe.npz").is_file():
-        with np.load(data / "valprobe.npz") as arrays:
-            probe = {k: arrays[k] for k in arrays.files}
+    probe = load_valprobe(ctx)
     frames = [_film_row(ctx, p, val, probe) for p in ladder.film_frames(ladder.film_run_dir(ctx.film_run))]
     film = _write_json(ctx.out_dir / "film.json", {"run": ctx.film_run, "frames": frames})
     return {"frames": frames, "film_json": str(film), "games": 0, "pgns": []}
@@ -565,9 +650,9 @@ def e3_block(ctx: EvalContext, state: dict) -> dict:
     config = sprt.SprtConfig(cap_games=ctx.n(sprt.MODE_SPRT.cap_games))
     pairs = config.cap_games // 2
     openings = books.openings_for("dev", 2 * pairs)
-    forward_pgn, reverse_pgn = (
-        ctx.out_dir / "E3" / "value_vs_policy.pgn",
-        ctx.out_dir / "E3" / "policy_vs_value.pgn",
+    forward_pgn, reverse_pgn = (  # fresh files: a re-run into the same --out never appends
+        match.unique_path(ctx.out_dir / "E3" / "value_vs_policy.pgn"),
+        match.unique_path(ctx.out_dir / "E3" / "policy_vs_value.pgn"),
     )
     choice = sprt.run_mode_choice(
         match.pair_player(agents["value"], agents["policy"], openings[:pairs], forward_pgn),
@@ -599,125 +684,6 @@ def default_runners() -> dict[str, Runner]:
     }
 
 
-# ------------------------------------------------------------------------------ results/results.json
-
-
-def row_kind(agent: str) -> str:
-    if agent.startswith("Blink"):
-        return "blink"
-    if agent.startswith("DM-"):
-        return "reference"
-    if agent[:2] == "SF" and agent[2:].isdigit():
-        return "anchor"
-    return "ladder"
-
-
-def final_slice_pgns(state: dict) -> list[str]:
-    """The games Ordo rates: E5's anchors and side rows, the E6 ladder and E7 (all on the final slice)."""
-    e5, e6, e7 = (state.get(b) or {} for b in ("E5", "E6", "E7"))
-    return [*e5.get("final_slice_pgns", []), *e6.get("pgns", []), *e7.get("final_slice_pgns", [])]
-
-
-def _blink_puzzles(agent: str) -> dict:
-    """What `blink eval puzzles --model <m>` wrote for a Blink-<mode>-<model> agent, if it ran."""
-    _, mode, tag = agent.split("-", 2)
-    path = paths.home() / "eval" / "puzzles" / f"puzzles_dm10k_{tag}_{mode}.json"
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-
-
-def _puzzle_fields(agent: str, state: dict) -> dict:
-    """DeepMind's 10K puzzles for a row: DM-9M from E0, a Blink agent from `blink eval puzzles`."""
-    kind = row_kind(agent)
-    if kind == "reference":
-        done = (state.get("E0") or {}).get("dm_puzzles") or {}
-    elif kind == "blink" and agent.count("-") >= 2:
-        done = _blink_puzzles(agent)
-    else:
-        return {}
-    if "accuracy" not in done:
-        return {}
-    low, high = done["wilson95"]
-    return {"dm_puzzles_pct": 100 * done["accuracy"], "dm_puzzles_ci": (100 * low, 100 * high)}
-
-
-def reproduce_command(listing: Path) -> str:
-    return f"uv run blink rate --pgn-list {Path(listing).as_posix()} --anchors configs/anchors.csv"
-
-
-def strength_rows(fit, state: dict, shipped: str | None, reproduce: str) -> tuple:
-    from blink.report.results_schema import StrengthRow
-
-    rows = []
-    crossover = ((state.get("E4") or {}).get("crossover") or {}).get("nodes")
-    for agent in sorted(fit.tally):
-        kind = row_kind(agent)
-        fitted = next((r for r in fit.rows if r.player == agent and not r.is_anchor), None)
-        fields = (
-            {"elo": fitted.rating, "elo_ci95": fitted.error, "elo_games": fitted.played} if fitted else {}
-        )
-        rows.append(
-            StrengthRow(
-                agent=agent,
-                kind=kind,
-                reproduce=reproduce,
-                sf_nodes_equiv=crossover if agent == shipped else None,
-                **fields,
-                **_puzzle_fields(agent, state),
-            )
-        )
-    return tuple(rows)
-
-
-def diagnostics_rows(state: dict, shipped_mode_name: str | None) -> tuple:
-    """E2's rows; the shipped mode's also carries E8's rules-on conversion and its game count."""
-    from blink.report.results_schema import DiagnosticsRow
-
-    rules_on = (state.get("E8") or {}).get("rules_on") or {}
-    conversion = {"conversion_pct": rules_on.get("pct"), "conversion_n": rules_on.get("n")}
-    rows = []
-    for row in (state.get("E2") or {}).get("diagnostics", []):
-        ci = row.get("puzzle_rating_ci")
-        extra = conversion if row["mode"] == shipped_mode_name else {}
-        rows.append(DiagnosticsRow(**{**row, "puzzle_rating_ci": tuple(ci) if ci else None, **extra}))
-    return tuple(rows)
-
-
-def weights_sha(selector: str) -> str:
-    """The sha256 of the weights file the selector names, or a note saying why there is none."""
-    try:
-        from blink.model.loading import resolve_selector
-
-        path, _ = resolve_selector(selector)
-    except (ImportError, ValueError, FileNotFoundError) as exc:
-        return f"unknown: {exc}"
-    return sha256_file(path) if Path(path).is_file() else f"unknown: no file at {path}"
-
-
-def build_results(state: dict, ctx: EvalContext, fit, listing: Path | None = None) -> object:
-    from blink.eval.fastchess import engine_name
-    from blink.report.results_schema import Results, Shipped
-
-    mode = (state.get("E3") or {}).get("mode") or ctx.mode
-    shipped_name = engine_name(ctx.model, mode) if mode else None
-    shipped = Shipped(shipped_name, mode, weights_sha(ctx.model)) if mode else None
-    reproduce = reproduce_command(listing or ctx.results_dir / FINAL_SLICE_LIST)
-    return Results(
-        strength=strength_rows(fit, state, shipped_name, reproduce) if fit is not None else (),
-        diagnostics=diagnostics_rows(state, mode),
-        shipped=shipped,
-        eval_md_sha=state["protocol"]["sha256"],
-        generated_at=_now(),
-    )
-
-
-def write_pgn_list(pgns: Sequence[Path], path: Path) -> Path:
-    """The PGNs Ordo rated, one path per line: `blink rate --pgn-list <this file>` refits exactly them."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("".join(f"{p}\n" for p in pgns))
-    return path
-
-
 def _fit(pgns: Sequence[Path], ctx: EvalContext, ordo: Callable) -> tuple[object, str | None]:
     """Ordo over the final-slice PGNs; when Ordo refuses the pool, the tally alone (no Elo) and why."""
     from blink.eval import rating
@@ -744,7 +710,8 @@ def run_all(
     ordo: Callable | None = None,
     load: Callable[[], float] = cpu_load,
 ) -> dict:
-    """The blocks, then Ordo over the final-slice PGNs, then results/results.json (schema v1)."""
+    """The blocks, then Ordo over the final-slice PGNs, then results/results.json (schema v1) and
+    results/nosearch.json (blink.eval.publish); what either leaves out is listed in `notes`."""
     from blink.eval import rating
     from blink.report.results_schema import to_json
 
@@ -752,7 +719,9 @@ def run_all(
     pgns = [Path(p) for p in final_slice_pgns(state) if Path(p).is_file()]
     fit, ordo_error = _fit(pgns, ctx, ordo or rating.run_ordo)
     listing = write_pgn_list(pgns, ctx.results_dir / FINAL_SLICE_LIST)
-    results = build_results(state, ctx, fit, listing)
+    audits = public_audit(ctx, state)
+    notes: list[str] = []
+    results = build_results(state, ctx, fit, listing, notes, audits)
     path = ctx.results_dir / "results.json"
     with open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(to_json(results) + "\n")
@@ -764,7 +733,10 @@ def run_all(
         "forfeits": {block: state[block]["forfeits"] for block in BLOCK_ORDER if block in state},
         "gate_failures": state["gate_failures"],
         "games": {block: state[block].get("games", 0) for block in BLOCK_ORDER if block in state},
+        "notes": notes,
     }
     _write_json(ctx.out_dir / "summary.json", summary)
+    for note in notes:
+        log(f"results.json: {note}")
     log(f"results: {path}")
     return {"state": state, **summary}

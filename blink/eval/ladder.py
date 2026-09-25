@@ -9,7 +9,10 @@ log2(nodes) between the bracketing rungs; it fills "about level with SF19 at N n
 the ladder reports a bound (above the top rung or below the bottom one).
 E4b: 6 of the run's film checkpoints, evenly spaced from first to last, 200 games each against SF19 at
 the crossover node count (dev slice): how the learning curve looks in games.
-E6: random, material, linear, MLP, s10m and SF19 UCI_Elo 1320, every pair 200 games (final slice).
+E6: random, material, linear, MLP, s10m and SF19 UCI_Elo 1320, every pair 200 games (final slice). E6 also
+scores each rung's VAA on the valprobe and writes it as a diagnostics row named as the rung plays
+(Random, Material, Linear, MLP, Blink-<mode>-run_s10m): the film's ladder milestones compare a run's
+EMA VAA with these thresholds. Random's is the exact expectation of a uniformly random legal move.
 Every match is played by a `play` callable, so each block runs with any game budget and any backend.
 """
 
@@ -205,22 +208,64 @@ def e4b_block(ctx, state: dict) -> dict:
 
 
 def _ladder_agent(name: str, ctx, state: dict):
+    """One E6 rung, built as `blink match` builds that side (blink.play.factory.baseline_side): rung k
+    draws its random choices and R4 ties with seed k, and every rung plays the block's epsilon."""
     from blink.eval import fastchess, match
     from blink.eval.anchors import anchor_control
     from blink.eval.orchestrate import shipped_mode
-    from blink.play import agents
+    from blink.play import agents, factory
 
+    seed = LADDER_PLAYERS.index(name) if name in LADDER_PLAYERS else 0
     if name == "random":
-        return agents.RandomAgent()
-    if name in ("material", "linear", "mlp"):
-        from blink.baselines.evaluator import baseline_agent  # torch: only the baseline rungs need it
-
-        return baseline_agent(name, device=ctx.device)  # the P3 rungs, one agent wrapper and its rules
+        return agents.RandomAgent(seed=seed)
+    if factory.is_baseline(name):  # the P3 rungs; torch only for the learned ones
+        return factory.baseline_side(name, ctx.device, match.read_epsilon(ctx.results_dir), seed)
     if name.startswith("SF"):  # an anchor: st=0.1, or the self-check fallback's control like E5's anchors
         return match.stockfish_agent(
             fastchess.stockfish_exe(), elo=int(name[2:]), tc=anchor_control(ctx, state)
         )
     return match.blink_agents(name, ctx.device, results_dir=ctx.results_dir)[shipped_mode(ctx, state)]
+
+
+def random_vaa(probe: dict, limit: int | None = None) -> float | None:
+    """A uniformly random legal move's expected VAA: each root's share of best children, averaged."""
+    offsets, best = probe["child_offset"], probe["child_is_best"]
+    n = len(offsets) - 1 if limit is None else min(limit, len(offsets) - 1)
+    shares = [float(np.mean(best[lo:hi])) for lo, hi in zip(offsets[:n], offsets[1 : n + 1], strict=True)]
+    return float(np.mean(shares)) if shares else None
+
+
+def rung_diagnostics(agents: dict, probe: dict | None, limit: int | None = None) -> list[dict]:
+    """Each rung's VAA on the valprobe, as a DiagnosticsRow dict named as the rung plays (value mode:
+    VAA is value-mode agreement). A Stockfish anchor has no network and gets no row."""
+    from blink.eval import static
+    from blink.play.agents import RandomAgent
+
+    if probe is None:
+        return []
+    rows = []
+    for agent in agents.values():
+        if isinstance(agent, RandomAgent):
+            vaa = random_vaa(probe, limit)
+        elif getattr(agent, "evaluator", None) is not None:
+            vaa = static.mate_rates(agent.evaluator, probe, None, limit)["value"]["shortest"]["value"]
+        else:
+            continue
+        rows.append({"agent": agent.name, "mode": "value", "vaa": vaa})
+    return rows
+
+
+def _rung_scores(agents: dict, ctx) -> tuple[list[dict], dict]:
+    """(rung diagnostics, why there are none): a scoring failure is reported, never the games lost."""
+    from blink.eval.orchestrate import load_valprobe
+
+    try:
+        probe = load_valprobe(ctx)
+        if probe is None:
+            return [], {"diagnostics_skipped": "no valprobe.npz: no rung VAA for the film"}
+        return rung_diagnostics(agents, probe, ctx.positions), {}
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        return [], {"diagnostics_skipped": f"rung VAA not scored: {exc}"}
 
 
 def e6_block(ctx, state: dict) -> dict:
@@ -239,7 +284,8 @@ def e6_block(ctx, state: dict) -> dict:
     players = [p for p in LADDER_PLAYERS if p in agents]
     try:
         result = run_round_robin(play, players, ctx.n(LADDER_GAMES))
+        diagnostics, skipped = _rung_scores(agents, ctx)
     finally:
         for agent in agents.values():
             getattr(agent, "close", lambda: None)()
-    return {**result, "missing": missing}
+    return {**result, "missing": missing, "diagnostics": diagnostics, **skipped}

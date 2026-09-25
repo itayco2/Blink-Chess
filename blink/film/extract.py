@@ -311,10 +311,12 @@ def parse_milestone(text: str) -> tuple[str, str]:
 
 
 def _rung(results, label: str, agent: str) -> dict:
-    ladder = {row.agent for row in results.strength if row.kind == "ladder"}
+    # E6's rungs: the baselines are ladder rows, s10m is rated as a Blink row (Blink-<mode>-run_s10m)
+    ladder = {row.agent for row in results.strength if row.kind in ("ladder", "blink")}
     if agent not in ladder:
         raise FilmError(
-            f"milestone {label!r}: {agent!r} is not a ladder row in results.json ({sorted(ladder)})"
+            f"milestone {label!r}: {agent!r} is not a ladder row (or a Blink rung) in results.json "
+            f"({sorted(ladder)})"
         )
     diagnostics = {(row.agent, row.mode): row for row in results.diagnostics}
     for mode, metric, key in RUNG_METRICS:

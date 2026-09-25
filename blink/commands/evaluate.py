@@ -43,25 +43,31 @@ def _missing(path: Path, what: str) -> bool:
     return True
 
 
-def _puzzle_agents(args: argparse.Namespace) -> list[tuple[str, Agent]]:
+def _puzzle_agents(args: argparse.Namespace, epsilon: float) -> list[tuple[str, Agent]]:
     """(mode, agent) pairs to score; a DeepMind selector has its one mode, action-value."""
     if registry.is_dm(args.model):
         return [(registry.MODE, registry.load_agent(args.model, device=args.device))]
     evaluator = factory.load_evaluator(args.model, device=args.device)
     modes = factory.MODES if args.mode == "both" else (args.mode,)
-    return [(mode, factory.make_agent(mode, evaluator, epsilon=args.epsilon)) for mode in modes]
+    return [(mode, factory.make_agent(mode, evaluator, epsilon=epsilon)) for mode in modes]
 
 
 def _cmd_puzzles(args: argparse.Namespace) -> int:
     source = puzzles.resolve_set(args.set)
     if _missing(source, "puzzle set"):
         return 2
-    label = f"{_set_label(args.set)}_{fastchess.NAME_UNSAFE.sub('_', args.model).strip('_')}"
+    # The engine name's tag, so results.json finds these files (blink.eval.publish._blink_puzzles).
+    label = f"{_set_label(args.set)}_{fastchess.model_tag(args.model)}"
     out_dir = args.out or paths.home() / "eval" / "puzzles"
+    # The published value-mode score is the shipped configuration's: E2b's epsilon unless told otherwise.
+    epsilon = args.epsilon if args.epsilon is not None else match.read_epsilon(args.results_dir)
     illegal = 0
-    for mode, agent in _puzzle_agents(args):
+    for mode, agent in _puzzle_agents(args, epsilon):
         started = time.perf_counter()
-        summary = puzzles.run_puzzle_set(source, agent, mode, out_dir, limit=args.limit, label=label)
+        tie = epsilon if mode == "value" else None
+        summary = puzzles.run_puzzle_set(
+            source, agent, mode, out_dir, limit=args.limit, label=label, epsilon=tie
+        )
         seconds = time.perf_counter() - started
         _print_puzzles(summary, f"{agent.name} ({args.model})")
         per_puzzle_ms = 1000 * seconds / max(summary["n"], 1)
@@ -148,7 +154,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     pz.add_argument("--mode", choices=MODES_OR_BOTH, default="both", help="ignored for dm: selectors")
     pz.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
-    pz.add_argument("--epsilon", type=float, default=rules.DEFAULT_EPSILON)
+    pz.add_argument(
+        "--epsilon",
+        type=float,
+        default=None,
+        help="value mode's R4 tie window (default: E2b's choice in <results-dir>/epsilon.json, 0 before E2b)",
+    )
+    pz.add_argument("--results-dir", type=Path, default=Path("results"), help="where E2b wrote epsilon.json")
     pz.add_argument("--out", type=Path, default=None, help="folder (default BLINK_HOME/eval/puzzles)")
     pz.set_defaults(func=factory.friendly(_cmd_puzzles))
 
@@ -397,12 +409,13 @@ def _cmd_static(args: argparse.Namespace) -> int:
     from blink.eval import orchestrate, static
 
     ctx = _context(args)
-    label = fastchess.NAME_UNSAFE.sub("_", args.model).strip("_")
+    label = fastchess.model_tag(args.model)
     limits = static.StaticLimits(
         args.roots, args.value_roots, args.val_roots, args.games10k, args.mateset, args.band_puzzles
     )
-    agents = match.blink_agents(args.model, args.device, results_dir=args.results)
-    inputs = orchestrate.static_inputs(ctx, label)
+    epsilon = match.read_epsilon(args.results)
+    agents = match.blink_agents(args.model, args.device, epsilon=epsilon)
+    inputs = orchestrate.static_inputs(ctx, label, epsilon)
     started = time.perf_counter()
     with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=args.sf_procs) as labeler:
         e2 = static.run_e2(
@@ -412,7 +425,13 @@ def _cmd_static(args: argparse.Namespace) -> int:
     out = ctx.out_dir / "E2.json"
     orchestrate._write_json(
         out,
-        {"model": args.model, "inputs": inputs.__dict__, "e2": e2, "diagnostics": [r.__dict__ for r in rows]},
+        {
+            "model": args.model,
+            "inputs": inputs.__dict__,
+            "e2": e2,
+            "diagnostics": [r.__dict__ for r in rows],
+            "value_epsilon": epsilon,
+        },
     )
     for row in rows:
         print({k: v for k, v in row.__dict__.items() if v not in (None, {})})

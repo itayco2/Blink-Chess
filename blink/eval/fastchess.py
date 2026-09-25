@@ -126,16 +126,20 @@ def audit_engine(name: str) -> str:
     return "dm" if name.lower().startswith("dm-") else nosearch.DEFAULT_ENGINE
 
 
-def blink_engine(model: str, mode: str, device: str = "cuda", epsilon: float | None = None) -> EngineSpec:
+def blink_engine(
+    model: str, mode: str, device: str = "cuda", epsilon: float | None = None, sha: str | None = None
+) -> EngineSpec:
     """Blink (or DM-9M, for a dm selector) as `python -m blink.uci`, with this harness's interpreter.
 
-    `epsilon` is Blink's R4 tie window (E2b's choice); without it blink-uci plays its default, 0."""
+    `epsilon` is Blink's R4 tie window (E2b's choice); without it blink-uci plays its default, 0.
+    `sha` pins Blink's weights: blink-uci exits before the handshake if its file hashes to anything else."""
     if registry.is_dm(model):
         args = ("-m", "blink.uci", f"--model={model}", f"--device={device}")
     else:
         selector = ("--random",) if model in RANDOM_SELECTORS else (f"--model={model}",)
         tie = () if epsilon is None else (f"--epsilon={float(epsilon)!r}",)
-        args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}", *tie)
+        pin = () if sha is None else (f"--sha={sha}",)
+        args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}", *tie, *pin)
     return EngineSpec(
         engine_name(model, mode), sys.executable, args, st=BLINK_ST, timemargin_ms=BLINK_MARGIN_MS
     )
@@ -272,9 +276,12 @@ def prepare_gauntlet(
     concurrency: int = 5,
     max_moves: int = MAX_MOVES,
     tc: str | None = None,
+    epsilon: float | None = None,
 ) -> Gauntlet:
-    """Blink against one SF19 anchor: engines, book slice and a fresh timestamped PGN under out_dir."""
-    blink_spec = blink_engine(model, mode, device)
+    """Blink against one SF19 anchor: engines, book slice and a fresh timestamped PGN under out_dir.
+
+    `epsilon` is Blink's R4 tie window, as anchors.fastchess_player passes it for E5 (E2b's choice)."""
+    blink_spec = blink_engine(model, mode, device, epsilon=epsilon)
     anchor_spec = stockfish_anchor(anchor, stockfish_exe())
     if tc:
         blink_spec, anchor_spec = with_tc(blink_spec, tc), with_tc(anchor_spec, tc)

@@ -132,14 +132,17 @@ def fastchess_player(ctx, selector: str, mode: str, subdir: str, anchor_tc: str 
     at st=0.1 or at `anchor_tc` (the self-check fallback); Blink keeps st=1 either way.
 
     Blink gets E2b's epsilon (results/epsilon.json) on its command line: the same value the in-process
-    blocks read, so every game filed under one Blink name is played by one configuration. The locator's
-    dev-slice games go to <subdir>-locator, so <subdir> holds final-slice games only."""
+    blocks read, so every game filed under one Blink name is played by one configuration. It also gets
+    --sha, the weights file's sha256 when the player was built, so a replaced file stops the match.
+    The locator's dev-slice games go to <subdir>-locator, so <subdir> holds final-slice games only."""
     from blink.eval import fastchess, match
+    from blink.eval.orchestrate import weights_sha
 
     epsilon = match.read_epsilon(ctx.results_dir)
+    sha = weights_sha(selector)  # every engine start refuses other weights (None: nothing to pin)
 
     def play(anchor: Anchor, games: int, book: str, skip: int) -> Report:
-        first = fastchess.blink_engine(selector, mode, ctx.device, epsilon=epsilon)
+        first = fastchess.blink_engine(selector, mode, ctx.device, epsilon=epsilon, sha=sha)
         second = fastchess.stockfish_anchor(anchor.rating, fastchess.stockfish_exe())
         if anchor_tc:
             second = fastchess.with_tc(second, anchor_tc)

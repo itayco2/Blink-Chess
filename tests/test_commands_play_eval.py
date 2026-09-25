@@ -13,6 +13,7 @@ import pytest
 from blink import cli
 from blink.board import encode, moves
 from blink.data.record import ROOT_DTYPE
+from blink.eval import fastchess
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "fastchess_blink_vs_sf.pgn"
 
@@ -120,6 +121,22 @@ def test_blink_gauntlet_dry_run_prints_the_fastchess_command(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "st=1" in printed and "st=0.1" in printed and "option.UCI_Elo=1320" in printed
     assert "-maxmoves 300" in printed
+
+
+def test_blink_gauntlet_plays_blink_with_the_epsilon_e2b_chose(tmp_path, capsys, monkeypatch):
+    """E5's engine (anchors.fastchess_player) plays with results/epsilon.json; so does `blink gauntlet`."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "epsilon.json").write_text(json.dumps({"epsilon": 1 / 256}), encoding="utf-8")
+    args = ["gauntlet", "--model", "random", "--mode", "value", "--games", "2", "--dry-run", "--out", "g"]
+    assert cli.main(args) == 0
+    assert f"--epsilon={1 / 256!r}" in capsys.readouterr().out
+    assert cli.main([*args, "--epsilon", "0"]) == 0
+    assert "--epsilon=0.0" in capsys.readouterr().out
+    spec = fastchess.prepare_gauntlet(
+        "random", "value", "cpu", 1320, 2, "dev", tmp_path, epsilon=1 / 128
+    ).blink
+    assert spec == fastchess.blink_engine("random", "value", "cpu", epsilon=1 / 128)
 
 
 def test_a_missing_model_loader_is_one_clear_line_not_a_traceback(monkeypatch, capsys, tmp_path):

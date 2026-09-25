@@ -263,7 +263,8 @@ def e2b_block(ctx, state: dict) -> dict:
     pgns: list[str] = []
 
     def convert(eps: float) -> ConversionResult:
-        pgn = ctx.out_dir / "E2b" / f"conversion_eps{eps:.6f}.pgn"
+        # a fresh file per run: a block re-run into the same --out never appends to an earlier run's games
+        pgn = match.unique_path(ctx.out_dir / "E2b" / f"conversion_eps{eps:.6f}.pgn")
         pgns.append(str(pgn))
         with _stockfish() as stockfish:
             return play_conversion(agent[eps], stockfish, dev, pgn)
@@ -290,11 +291,10 @@ def e8_block(ctx, state: dict) -> dict:
     mode = shipped_mode(ctx, state)
     rules_on = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)[mode]
     rules_off = RulesOffAgent(rules_on.evaluator, mode, name=f"{rules_on.name}-rules-off")
-    out = {}
+    out, pgns = {}, []
     for label, agent in (("rules_on", rules_on), ("rules_off", rules_off)):
+        pgn = match.unique_path(ctx.out_dir / "E8" / f"{label}.pgn")  # never append to an earlier run's
         with _stockfish() as stockfish:
-            out[label] = play_conversion(
-                agent, stockfish, final, ctx.out_dir / "E8" / f"{label}.pgn"
-            ).as_dict()
-    pgns = [str(ctx.out_dir / "E8" / f"{label}.pgn") for label in out]
+            out[label] = play_conversion(agent, stockfish, final, pgn).as_dict()
+        pgns.append(str(pgn))
     return {"mode": mode, **out, "games": sum(r["n"] for r in out.values()), "pgns": pgns}

@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import os
+from pathlib import Path
 
 import chess
 import pytest
@@ -247,3 +248,73 @@ def test_e2b_and_e8_refuse_endgame_sets_that_share_a_position(tmp_path, monkeypa
     for name in ("dev", "final"):
         with pytest.raises(ValueError, match="1 position"):
             conversion._endgame_set(ctx, name, 500)
+
+
+# ------------------------------------------------------------------------------ a re-run never appends
+
+
+def _games_in(path) -> int:
+    return path.read_text(encoding="utf-8").count("[Event ")
+
+
+def _rerun_context(tmp_path, monkeypatch):
+    import contextlib
+    from types import SimpleNamespace
+
+    from blink.eval import match
+
+    blink = agents.ValueAgent(MaterialEvaluator(), name="Blink-value-x")
+    monkeypatch.setattr(conversion, "_endgame_set", lambda ctx, name, count: [endgame(MATE_IN_ONE_WHITE)])
+    monkeypatch.setattr(match, "blink_agents", lambda *a, **k: {"value": blink, "policy": blink})
+    monkeypatch.setattr(conversion, "_stockfish", lambda: contextlib.nullcontext(agents.RandomAgent()))
+    return SimpleNamespace(
+        model="x", device="cpu", out_dir=tmp_path / "out", results_dir=tmp_path, positions=None, mode="value"
+    )
+
+
+def test_e8_run_twice_into_one_folder_keeps_each_runs_games_apart(tmp_path, monkeypatch):
+    """earlier_report lets a block run alone into the same --out; its PGNs must not pool two runs."""
+    ctx = _rerun_context(tmp_path, monkeypatch)
+    first = conversion.e8_block(ctx, {"E3": {"mode": "value"}})
+    second = conversion.e8_block(ctx, {"E3": {"mode": "value"}})
+    assert set(first["pgns"]).isdisjoint(second["pgns"])
+    for report in (first, second):
+        assert [_games_in(Path(p)) for p in report["pgns"]] == [1, 1]
+
+
+def test_e2b_run_twice_into_one_folder_keeps_each_runs_games_apart(tmp_path, monkeypatch):
+    ctx = _rerun_context(tmp_path, monkeypatch)
+
+    def select(convert, check, results_dir):
+        return {"conversion": {"0.0": convert(0.0).as_dict()}, "no_regression": None}
+
+    monkeypatch.setattr(conversion, "run_epsilon_selection", select)
+    first = conversion.e2b_block(ctx, {})
+    second = conversion.e2b_block(ctx, {})
+    assert set(first["pgns"]).isdisjoint(second["pgns"])
+    assert [_games_in(Path(p)) for p in second["pgns"]] == [1]
+
+
+def test_e3_run_twice_into_one_folder_keeps_each_runs_games_apart(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from blink.eval import books, orchestrate, sprt
+
+    ctx = _rerun_context(tmp_path, monkeypatch)
+    opening = books.Opening(1, chess.STARTING_FEN, ())
+    monkeypatch.setattr(books, "openings_for", lambda book, pairs, skip=0: [opening] * pairs)
+
+    def choose(forward, reverse, config):
+        forward(0)
+        reverse(0)
+        side = SimpleNamespace(games=2)
+        return SimpleNamespace(forward=side, reverse=side, mode="value", as_dict=lambda: {})
+
+    monkeypatch.setattr(sprt, "run_mode_choice", choose)
+    context = orchestrate.EvalContext(
+        model="x", device="cpu", out_dir=ctx.out_dir, results_dir=tmp_path, games=2, protocol=tmp_path
+    )
+    first = orchestrate.e3_block(context, {})
+    second = orchestrate.e3_block(context, {})
+    assert set(first["pgns"]).isdisjoint(second["pgns"])
+    assert [_games_in(Path(p)) for p in second["pgns"]] == [2, 2]

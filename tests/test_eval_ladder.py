@@ -200,3 +200,75 @@ def test_a_smoke_ladder_with_no_extra_games_flags_nothing_it_did_not_promise():
         lambda nodes, games, skip: report("B", "SF", games, scores[nodes]), rung_games=2, bracket_games=2
     )
     assert result["games"] == 14 and result["short_bracket"] == []
+
+
+def test_e6s_rungs_are_the_sides_blink_match_builds(tmp_path):
+    """P3's fix: a flat-policy rung draws its R4 ties with its seed. Without it every tie went to the lowest
+    vocab index and material drew 13 of 20 games against random by repetition. E6 builds the same sides
+    `blink match` does: rung k gets seed k, and every rung plays the block's epsilon."""
+    import json
+
+    from blink.commands import play as play_command
+    from blink.eval import orchestrate
+
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "epsilon.json").write_text(json.dumps({"epsilon": 1 / 256}), encoding="utf-8")
+    ctx = orchestrate.EvalContext(model="random", device="cpu", out_dir=tmp_path / "out", results_dir=results)
+    for name in ("random", "material"):
+        seed = ladder.LADDER_PLAYERS.index(name)
+        built = ladder._ladder_agent(name, ctx, {})
+        assert built == play_command.side_agent(name, "value", "cpu", seed, 1 / 256)
+    material = ladder._ladder_agent("material", ctx, {})
+    assert material.tie_seed == ladder.LADDER_PLAYERS.index("material") and material.epsilon == 1 / 256
+
+
+def test_e6_writes_each_rungs_valprobe_vaa_named_as_the_rung_plays(tmp_path, monkeypatch):
+    """The film's ladder milestones compare a run's EMA VAA with each rung's; E6 measures the rungs'
+    on the valprobe and names each row as the rung plays, so results.json can resolve them."""
+    import numpy as np
+    from test_eval_static import record
+
+    from blink.data import valprobe
+    from blink.eval import orchestrate, static
+    from blink.play import factory
+
+    roots = np.array(
+        [record("4k3/8/8/3q4/8/8/8/3QK3 w - - 0 1", "d1d5", cp=900), record(START, "e2e4", cp=30)]
+    )
+    arrays = valprobe.probe_arrays(roots)
+    data = tmp_path / "data"
+    data.mkdir()
+    np.savez(data / "valprobe.npz", **arrays)
+    monkeypatch.setattr(ladder, "LADDER_PLAYERS", ("random", "material", "SF1320"))
+    monkeypatch.setattr(ladder, "run_round_robin", lambda play, players, games: {"games": 0, "pgns": []})
+    monkeypatch.setattr(ladder, "_ladder_agent", _rung_or_anchor(ladder._ladder_agent))
+    context = orchestrate.EvalContext(
+        model="random", device="cpu", out_dir=tmp_path / "out", results_dir=tmp_path, data_dir=data
+    )
+    rows = {row["agent"]: row for row in ladder.e6_block(context, {})["diagnostics"]}
+    assert set(rows) == {"Random", "Material"}  # the anchor has no network to score
+    offsets, best = arrays["child_offset"], arrays["child_is_best"]
+    shares = [best[lo:hi].mean() for lo, hi in zip(offsets[:-1], offsets[1:], strict=True)]
+    assert rows["Random"] == {"agent": "Random", "mode": "value", "vaa": pytest.approx(np.mean(shares))}
+    material = static.mate_rates(factory.material_agent().evaluator, arrays, None)["value"]["shortest"][
+        "value"
+    ]
+    assert rows["Material"]["vaa"] == pytest.approx(material) and material >= 0.5  # it takes the queen
+
+
+START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+
+def _rung_or_anchor(build):
+    """The real rung constructor, with a stand-in for the Stockfish anchor (no engine on CI)."""
+    from types import SimpleNamespace
+
+    def make(name, ctx, state):
+        return (
+            SimpleNamespace(name=name, close=lambda: None)
+            if name.startswith("SF")
+            else build(name, ctx, state)
+        )
+
+    return make

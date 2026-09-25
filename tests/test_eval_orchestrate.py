@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from blink.eval import orchestrate, rating
+from blink.eval import orchestrate, publish, rating
 from blink.report import results_schema
 
 PLAN_TOTAL = 28_600
@@ -177,7 +177,17 @@ def fake_fit(pgns, anchors, workdir, **options):
     )
 
 
-def run_all(tmp_path):
+def pin_weights(tmp_path, monkeypatch, content=b"blink weights"):
+    """A weights file for the selector under test (the loader's resolver needs torch; this one does not)."""
+    weights = tmp_path / "weights.pt"
+    weights.write_bytes(content)
+    monkeypatch.setattr(orchestrate, "weights_file", lambda selector: weights)
+    return weights
+
+
+def run_all(tmp_path, monkeypatch=None):
+    if monkeypatch is not None:
+        pin_weights(tmp_path, monkeypatch)
     pgn = tmp_path / "final.pgn"
     pgn.write_text(PGN, encoding="utf-8")
     extra = {
@@ -198,8 +208,8 @@ def run_all(tmp_path):
     )
 
 
-def test_run_all_writes_results_json_through_the_schema(tmp_path):
-    out = run_all(tmp_path)
+def test_run_all_writes_results_json_through_the_schema(tmp_path, monkeypatch):
+    out = run_all(tmp_path, monkeypatch)
     results = results_schema.from_json((tmp_path / "results" / "results.json").read_text(encoding="utf-8"))
     rows = {r.agent: r for r in results.strength}
     blink = rows["Blink-value-run_x"]
@@ -292,10 +302,10 @@ def test_a_blink_row_takes_its_puzzle_score_from_blink_eval_puzzles(tmp_path, mo
     folder.mkdir(parents=True)
     done = {"accuracy": 0.8, "wilson95": [0.79, 0.81]}
     (folder / "puzzles_dm10k_ship_value.json").write_text(json.dumps(done), encoding="utf-8")
-    fields = orchestrate._puzzle_fields("Blink-value-ship", {})
+    fields = publish._puzzle_fields("Blink-value-ship", {})
     assert fields["dm_puzzles_pct"] == pytest.approx(80.0)
     assert fields["dm_puzzles_ci"] == pytest.approx((79.0, 81.0))
-    assert orchestrate._puzzle_fields("Blink-policy-ship", {}) == {}
+    assert publish._puzzle_fields("Blink-policy-ship", {}) == {}
 
 
 def test_a_refused_ordo_pool_still_writes_results_json_without_elo(tmp_path):
@@ -413,3 +423,147 @@ def test_run_all_writes_the_exact_pgn_list_it_rated_and_the_reproduce_command_ra
     results = results_schema.from_json((tmp_path / "results" / "results.json").read_text(encoding="utf-8"))
     commands = {row.reproduce for row in results.strength}
     assert commands == {f"uv run blink rate --pgn-list {listing.as_posix()} --anchors configs/anchors.csv"}
+
+
+# ---------------------------------------------------------------- `blink eval puzzles` -> results.json
+
+PUZZLE_CSV = (
+    "PuzzleId,Rating,PGN,Moves\ns1,650,1. e4 e5 2. Bc4 Nc6 3. Qh5,g8f6 h5f7\ns2,1700,1. e4 e5,g1f3 b8c6\n"
+)
+
+
+def puzzle_home(tmp_path, monkeypatch, epsilon=1 / 256):
+    """BLINK_HOME with DeepMind's puzzle file, and a results folder holding E2b's epsilon, as cwd."""
+    from blink.play import factory
+    from blink.play.oracles import RandomLogitEvaluator
+
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "downloads").mkdir()
+    (tmp_path / "downloads" / "puzzles.csv").write_text(PUZZLE_CSV, encoding="utf-8")
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "epsilon.json").write_text(json.dumps({"epsilon": epsilon}), encoding="utf-8")
+    monkeypatch.setattr(
+        factory, "load_evaluator", lambda selector, device="cuda", seed=0: RandomLogitEvaluator()
+    )
+
+
+@pytest.mark.parametrize(
+    "selector", ["release:v1.0", "D:/blink/runs/m/film/frame_1000.pt", "run:" + "x" * 60]
+)
+def test_blink_eval_puzzles_writes_what_results_json_looks_up_for_any_selector(
+    tmp_path, monkeypatch, selector
+):
+    """A dot in the selector once cut the mode off the file name (both modes wrote one file), and a
+    selector over 40 characters never matched the engine name's hashed tag."""
+    from blink import cli
+    from blink.eval import fastchess
+
+    puzzle_home(tmp_path, monkeypatch)
+    assert cli.main(["eval", "puzzles", "--model", selector, "--device", "cpu", "--limit", "2"]) == 0
+    written = sorted(p.name for p in (tmp_path / "eval" / "puzzles").iterdir())
+    assert len(written) == 4, written  # a CSV and a JSON per mode, none overwriting another
+    for mode in ("policy", "value"):
+        fields = publish._puzzle_fields(fastchess.engine_name(selector, mode), {}, epsilon=1 / 256)
+        assert fields["dm_puzzles_ci"] is not None, (mode, written)
+
+
+def test_value_mode_puzzles_are_scored_and_published_at_the_epsilon_e2b_chose(tmp_path, monkeypatch):
+    from blink import cli
+    from blink.eval import fastchess
+
+    puzzle_home(tmp_path, monkeypatch)
+    assert cli.main(["eval", "puzzles", "--model", "ship", "--device", "cpu", "--limit", "2"]) == 0
+    done = json.loads((tmp_path / "eval" / "puzzles" / "puzzles_dm10k_ship_value.json").read_text("utf-8"))
+    assert done["epsilon"] == 1 / 256  # the default is E2b's choice, recorded with the score
+    agent = fastchess.engine_name("ship", "value")
+    assert publish._puzzle_fields(agent, {}, epsilon=1 / 256)
+    assert publish._puzzle_fields(agent, {}, epsilon=1 / 128) == {}  # scored at another epsilon
+    policy = fastchess.engine_name("ship", "policy")
+    assert publish._puzzle_fields(policy, {}, epsilon=1 / 128)  # policy mode has no tie window
+
+
+def test_e2s_value_puzzle_numbers_are_left_out_when_scored_at_another_epsilon():
+    band = {"band_pct": {"<1000": 50.0}, "band_n": {"<1000": 10}}
+    rating = {"puzzle_rating_equiv": 1500.0, "puzzle_rating_ci": [1400.0, 1600.0]}
+    rows = [
+        {"agent": "Blink-ship", "mode": "policy", "top1": 0.5, **band, **rating},
+        {"agent": "Blink-ship", "mode": "value", "vaa": 0.6, **band, **rating},
+    ]
+    state = {"E2": {"diagnostics": rows, "value_epsilon": 0.0}}
+    notes = []
+    out = {r.mode: r for r in publish.diagnostics_rows(state, "value", epsilon=1 / 256, notes=notes)}
+    assert (
+        out["value"].vaa == 0.6 and out["value"].band_pct == {} and out["value"].puzzle_rating_equiv is None
+    )
+    assert out["policy"].band_pct == {"<1000": 50.0}  # policy mode has no tie window
+    assert any("epsilon" in note for note in notes)
+    same = {r.mode: r for r in publish.diagnostics_rows(state, "value", epsilon=0.0)}
+    assert same["value"].band_pct == {"<1000": 50.0}
+
+
+# ------------------------------------------------------------------------------ the weights are pinned
+
+
+def test_the_weights_are_pinned_at_the_start_and_a_block_refuses_weights_that_changed(tmp_path, monkeypatch):
+    import hashlib
+
+    weights = pin_weights(tmp_path, monkeypatch, b"one")
+    runners = recorder([])
+    state = orchestrate.run_blocks(ctx(tmp_path), runners, only=["E2", "E3"], runs_root=tmp_path, load=IDLE)
+    pinned = hashlib.sha256(b"one").hexdigest()
+    assert state["weights_sha"] == state["E2"]["weights_sha"] == state["E3"]["weights_sha"] == pinned
+
+    def e3_swaps_the_weights(context, state):
+        weights.write_bytes(b"two")  # say the EMA-or-raw decision replaced ship/blink.pt mid-run
+        return {"games": 2, "pgns": []}
+
+    with pytest.raises(orchestrate.WeightsChanged, match="E4"):
+        orchestrate.run_blocks(
+            ctx(tmp_path),
+            {**runners, "E3": e3_swaps_the_weights},
+            only=["E3", "E4"],
+            runs_root=tmp_path,
+            log=lambda s: None,
+            load=IDLE,
+        )
+
+
+def test_shipped_records_the_pinned_sha_and_the_epsilon_the_rated_games_used(tmp_path, monkeypatch):
+    import hashlib
+
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "epsilon.json").write_text(json.dumps({"epsilon": 1 / 256}), encoding="utf-8")
+    run_all(tmp_path, monkeypatch)
+    results = results_schema.from_json((tmp_path / "results" / "results.json").read_text(encoding="utf-8"))
+    assert results.shipped.sha == hashlib.sha256(b"blink weights").hexdigest()
+    assert (results.shipped.mode, results.shipped.epsilon) == ("value", 1 / 256)
+
+
+def test_no_shipped_model_is_written_when_its_weights_cannot_be_hashed(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrate, "weights_file", lambda selector: None)
+    out = run_all(tmp_path)
+    results = results_schema.from_json((tmp_path / "results" / "results.json").read_text(encoding="utf-8"))
+    assert results.shipped is None  # never 'unknown: ...' in place of a sha the bot would pin
+    assert any("sha" in note for note in out["notes"])
+
+
+def test_fastchess_starts_blink_uci_pinned_to_the_weights_it_hashed(tmp_path, monkeypatch):
+    import hashlib
+
+    from blink.eval import anchors, fastchess
+
+    weights = pin_weights(tmp_path, monkeypatch)
+    sha = hashlib.sha256(weights.read_bytes()).hexdigest()
+    assert f"--sha={sha}" in fastchess.blink_engine("ship", "value", "cpu", sha=sha).args
+    assert not any(
+        a.startswith("--sha") for a in fastchess.blink_engine("dm:9M", "value", "cpu", sha=sha).args
+    )
+    seen = []
+    monkeypatch.setattr(fastchess, "prepare_pair", lambda first, *a, **k: seen.append(first) or first)
+    monkeypatch.setattr(fastchess, "execute", lambda gauntlet: gauntlet)
+    monkeypatch.setattr(fastchess, "match_report", lambda report: report)
+    monkeypatch.setattr(fastchess, "stockfish_exe", lambda: Path("sf.exe"))
+    context = ctx(tmp_path, device="cpu")
+    anchors.fastchess_player(context, "ship", "value", "E5")(anchors.Anchor("SF1320", 1320), 2, "final", 0)
+    assert f"--sha={sha}" in seen[0].args

@@ -13,11 +13,15 @@ and writes the rows-per-move histogram as JSON.
 
 `audit` checks every player whose name contains a filter (the CLI's --engine); `audit_each` checks named
 players by their exact names, in one pass, so Blink-value-ship never picks up Blink-value-ship-rules-off's
-moves and DM-9M never picks up DM-9M-ema's. The searchless players are Blink's and DeepMind's.
+moves and DM-9M never picks up DM-9M-ema's. `audit_public` does both at once for `blink eval all`: one
+audit of every named player together (results/nosearch.json, the README's no-search box) and one report
+per player. The searchless players are Blink's and DeepMind's. Each report also gives the rows per move
+(median and max) and the median move time, read from the same comments (`0.021s`).
 """
 
 import json
 import re
+import statistics
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
@@ -26,6 +30,7 @@ import chess
 import chess.pgn
 
 NODES = re.compile(r"(?:^|[\s,])n=(\d+)")
+SECONDS = re.compile(r"(?:^|\s)(\d+(?:\.\d+)?)s(?=[\s,]|$)")  # the move's time, as fastchess writes it
 DEFAULT_ENGINE = "blink"
 BENIGN_TERMINATIONS = {"normal", "adjudication", ""}
 SEARCHLESS_PREFIXES = ("Blink", "DM-")
@@ -63,6 +68,7 @@ class _Tally:
         self.forfeits: dict[str, Counter] = {}
         self.adjudications = 0
         self.violations: list[dict] = []
+        self.move_ms: list[float] = []
 
     def violation(self, where: dict, rule: str, rows: int | None, legal: int) -> None:
         self.violations.append({**where, "rows": rows, "legal": legal, "rule": rule})
@@ -71,6 +77,9 @@ class _Tally:
 def _check_move(tally: _Tally, board: chess.Board, node: chess.pgn.ChildNode, where: dict) -> None:
     legal = board.legal_moves.count()
     found = NODES.search(node.comment)
+    seconds = SECONDS.search(node.comment)
+    if seconds is not None:
+        tally.move_ms.append(1000 * float(seconds.group(1)))
     tally.decisions += 1
     tally.players[where["player"]] += 1
     tally.max_legal = max(tally.max_legal, legal)
@@ -132,6 +141,23 @@ def audit_each(files: Sequence[Path], players: Iterable[str]) -> dict[str, dict]
     return {name: _report(tally, len(files)) for name, tally in tallies.items()}
 
 
+def audit_public(files: Sequence[Path], players: Iterable[str]) -> tuple[dict, dict[str, dict]]:
+    """One pass over every game a named player sat in: the audit of all of them together, by exact
+    name (what the no-search box states), and one report per player (their rows and time per move)."""
+    names = set(players)
+    together = _Tally()
+    each = {name: _Tally() for name in names}
+    for path in files:
+        for game in _read_games(path):
+            seated = {game.headers.get("White", "?"), game.headers.get("Black", "?")} & names
+            if not seated:
+                continue
+            _audit_game(together, game, path.name, lambda player: player in names)
+            for name in sorted(seated):
+                _audit_game(each[name], game, path.name, lambda player, own=name: player == own)
+    return _report(together, len(files)), {name: _report(t, len(files)) for name, t in each.items()}
+
+
 def _report(tally: _Tally, files: int) -> dict:
     return {
         "files": files,
@@ -144,6 +170,9 @@ def _report(tally: _Tally, files: int) -> dict:
         "value_mode_full_batches": tally.full_batches,
         "max_rows": tally.max_rows,
         "max_legal": tally.max_legal,
+        "evals_per_move_median": statistics.median(tally.histogram.elements()) if tally.histogram else None,
+        "evals_per_move_max": tally.max_rows if tally.histogram else None,
+        "ms_per_move_p50": statistics.median(tally.move_ms) if tally.move_ms else None,
         "players": dict(tally.players),
         "terminations": dict(tally.terminations),
         "forfeits": {player: dict(counts) for player, counts in tally.forfeits.items()},

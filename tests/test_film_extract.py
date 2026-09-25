@@ -269,6 +269,24 @@ def _ladder_results(tmp_path):
     return write_bundle(tmp_path / "results", results_obj=results(diagnostics=diagnostics_rows() + rungs))
 
 
+def test_a_blink_rung_such_as_s10m_resolves_like_a_baseline(tmp_path):
+    """E6's s10m rung is rated as a Blink row (Blink-value-run_s10m), not a ladder row."""
+    from test_report_fixtures import diagnostics_rows, results, strength_rows, write_bundle
+
+    from blink.report import results_schema as rs
+
+    s10m = rs.StrengthRow(
+        "Blink-value-run_s10m", "blink", "uv run blink rate", elo=1500.0, elo_ci95=40.0, elo_games=200
+    )
+    rungs = (rs.DiagnosticsRow("Blink-value-run_s10m", "value", vaa=0.31),)
+    folder = write_bundle(
+        tmp_path / "results",
+        results_obj=results(strength=(*strength_rows(), s10m), diagnostics=diagnostics_rows() + rungs),
+    )
+    found = extract.ladder_rungs(folder, [("passed s10m", "Blink-value-run_s10m")])
+    assert [(r["agent"], r["threshold"]) for r in found] == [("Blink-value-run_s10m", 0.31)]
+
+
 def _evals(run, rows):
     (run / "evals.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 

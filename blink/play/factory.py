@@ -11,6 +11,7 @@ import importlib.util
 import json
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from blink.play import rules
@@ -23,6 +24,9 @@ RANDOM_SELECTORS = frozenset({"random", "random-net"})
 MODES = ("policy", "value")
 LOADER = "blink.model.loading"
 MATERIAL_NAME = "Material"
+MATERIAL = "material"
+LEARNED_BASELINES = ("linear", "mlp")
+BASELINE_PREFIX = "baseline:"
 
 
 class ModelUnavailable(RuntimeError):
@@ -68,6 +72,27 @@ def material_agent(epsilon: float = rules.DEFAULT_EPSILON) -> ValueAgent:
     """
     evaluator = MaterialEvaluator(cp_per_point=LADDER_CP_PER_POINT, exact=True)
     return ValueAgent(evaluator, epsilon=epsilon, name=MATERIAL_NAME)
+
+
+def is_baseline(side: str) -> bool:
+    return side == MATERIAL or side in LEARNED_BASELINES or side.startswith(BASELINE_PREFIX)
+
+
+def baseline_side(side: str, device: str, epsilon: float, seed: int) -> ValueAgent:
+    """material, linear, mlp or baseline:<path>, in value mode with the match's epsilon (rule R4).
+
+    The one constructor behind `blink match` and E6's rungs. A baseline's policy is flat, so its R4 ties
+    are drawn by (seed, game, position), as MaterialAgent's were. Always taking the lowest vocab index,
+    material shuffled its king while random repeated the position: 15 of 20 dev games drawn by threefold
+    repetition, material 7 to 15 points up. The learned rungs import torch only when one plays.
+    """
+    if side == MATERIAL:
+        agent = material_agent()
+    else:
+        from blink.baselines.evaluator import baseline_agent  # torch, only when a learned rung plays
+
+        agent = baseline_agent(side.removeprefix(BASELINE_PREFIX), device=device)
+    return replace(agent, epsilon=epsilon, tie_seed=seed)
 
 
 def make_agent(

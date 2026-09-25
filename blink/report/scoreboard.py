@@ -58,7 +58,7 @@ NOSEARCH_KEYS = ("decisions", "games", "max_rows", "histogram", "violations", "c
 
 def _parse(folder: Path) -> Bundle:
     results = rs.from_json(_read(folder, "results.json", "written by the evaluation suite, P8"))
-    nosearch = json.loads(_read(folder, "nosearch.json", "run: uv run blink audit no-search"))
+    nosearch = json.loads(_read(folder, "nosearch.json", "written by blink eval all, over every public PGN"))
     _read(folder, "compute.json", "run: uv run blink report compute")
     compute = compute_mod.read_compute(Path(folder) / "compute.json")
     lichess_path = Path(folder) / "lichess.json"
@@ -78,7 +78,7 @@ def load_bundle(folder: Path) -> Bundle:
         raise ScoreboardError(f"{folder}: a results file does not match its schema: {exc}") from exc
     missing = [key for key in NOSEARCH_KEYS if key not in bundle.nosearch]
     if missing:
-        raise ScoreboardError(f"nosearch.json lacks {missing} (rerun: uv run blink audit no-search)")
+        raise ScoreboardError(f"nosearch.json lacks {missing} (rerun: uv run blink eval all)")
     _check_nosearch(bundle.nosearch)
     return bundle
 
@@ -198,10 +198,12 @@ def _gpu_cell(compute: dict) -> str:
 
 
 def headline(bundle: Bundle) -> str:
+    """The shipped row's Elo is reproduced by the command results.json stores with it (the evaluation
+    writes `blink rate --pgn-list <the final-slice PGNs>`), never a typed one."""
     row = shipped_row(bundle.results)
     rows = [
         ["Elo vs Stockfish 19 UCI_Elo anchors, 95% CI (games)", elo_cell(row),
-         "`uv run blink rate --model ship`", ELO_CAVEAT],
+         f"`{row.reproduce}`" if row else DASH, ELO_CAVEAT],
         ["Lichess BOT blitz (rating, RD, games, share vs humans, date)", lichess_cell(bundle.lichess, True),
          "`results/lichess.json` (snapshot at G12)",
          "strength against humans: the pool is mostly bots, it started at 3000, and it is not comparable "

@@ -176,10 +176,25 @@ def _summary(results: list[dict], mode: str, source: Path) -> dict:
     }
 
 
+def output_paths(out_dir: Path, label: str, mode: str) -> tuple[Path, Path]:
+    """puzzles_<label>_<mode>.csv and .json, built by name: with_suffix would cut a label at its last dot
+    (release:v1.0, frame_1000.pt), so both modes would write one file."""
+    stem = f"puzzles_{label}_{mode}"
+    return Path(out_dir) / f"{stem}.csv", Path(out_dir) / f"{stem}.json"
+
+
 def run_puzzle_set(
-    source: Path, agent: Agent, mode: str, out_dir: Path, limit: int | None = None, label: str = "set"
+    source: Path,
+    agent: Agent,
+    mode: str,
+    out_dir: Path,
+    limit: int | None = None,
+    label: str = "set",
+    epsilon: float | None = None,
 ) -> dict:
-    """Score `agent` on the puzzles in `source`; write puzzles_<label>_<mode>.csv and .json to out_dir."""
+    """Score `agent` on the puzzles in `source`; write puzzles_<label>_<mode>.csv and .json to out_dir.
+
+    `epsilon` (value mode: the agent's R4 tie window) is recorded with the score."""
     results = []
     for row in read_puzzles(source, limit):
         engine = AgentEngine(agent, game=row["PuzzleId"])
@@ -195,11 +210,13 @@ def run_puzzle_set(
             }
         )
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = out_dir / f"puzzles_{label}_{mode}"
-    with open(stem.with_suffix(".csv"), "w", encoding="utf-8", newline="") as handle:
+    csv_path, json_path = output_paths(out_dir, label, mode)
+    with open(csv_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["puzzle_id", "rating", "band", "correct", "illegal"])
         writer.writeheader()
         writer.writerows(results)
     summary = _summary(results, mode, source)
-    stem.with_suffix(".json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if epsilon is not None:
+        summary["epsilon"] = epsilon
+    json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
