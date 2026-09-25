@@ -6,11 +6,14 @@ real child process through a real pause and resume.
 """
 
 import json
+import subprocess
 import sys
 import threading
 import time
 import timeit
 from pathlib import Path
+
+import pytest
 
 from blink import cli, heartbeat
 from blink.train import status, supervise, sweep, userpause
@@ -60,10 +63,11 @@ class Spawner:
     """subprocess.Popen for a Supervisor: child i runs scripts[i] (the last script repeats)."""
 
     def __init__(self, clock: FakeClock, *scripts):
-        self.clock, self.scripts, self.calls = clock, scripts, []
+        self.clock, self.scripts, self.calls, self.envs = clock, scripts, [], []
 
     def __call__(self, argv, env=None):
         self.calls.append((self.clock.now, list(argv)))
+        self.envs.append(dict(env or {}))
         return FakeProc(list(argv), self.scripts[min(len(self.calls), len(self.scripts)) - 1])
 
 
@@ -79,7 +83,11 @@ CFG = supervise.SuperviseConfig(
 T0 = 1_000_000_000.0  # the fake clock starts far below real time: real beats never look older
 
 
-def _supervisor(tmp_path, clock, spawner, cfg=CFG, argv=("trainer", "--run", "r")):
+def _no_gpu_look():
+    raise AssertionError("a run with no VRAM record never asks nvidia-smi")
+
+
+def _supervisor(tmp_path, clock, spawner, cfg=CFG, argv=("trainer", "--run", "r"), gpu_free=_no_gpu_look):
     run_dir = tmp_path / "runs" / "r"
     run_dir.mkdir(parents=True, exist_ok=True)
     flag = tmp_path / userpause.FLAG_NAME
@@ -92,6 +100,7 @@ def _supervisor(tmp_path, clock, spawner, cfg=CFG, argv=("trainer", "--run", "r"
         clock=clock.time,
         sleep=clock.sleep,
         spawn=spawner,
+        gpu_free=gpu_free,
     )
     return sup, run_dir, flag
 
@@ -144,6 +153,52 @@ def test_the_per_step_flag_check_costs_a_clock_read_not_a_disk_look(tmp_path):
     calls = 100_000
     per_call = timeit.timeit(watch.requested, number=calls) / calls
     assert per_call < 10e-6, f"{per_call * 1e6:.2f} us per step"
+
+
+def test_only_a_supervisor_that_resumes_a_user_pause_lets_its_child_stop_for_one():
+    assert userpause.resumer_present({userpause.RESUMER_ENV: "1"}) is True
+    assert userpause.resumer_present({}) is False
+    assert userpause.resumer_present({userpause.RESUMER_ENV: "0"}) is False
+
+
+def _vram_record(run_dir: Path, vram: dict) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    record = {"run": run_dir.name, "vram": vram}
+    (run_dir / "config.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_a_resume_needs_the_free_vram_the_run_measured_less_the_slack(tmp_path):
+    """abl-a01..a05 measured 6.95 GB free at micro-batch 1024 (budget 6.15 GB, peak 5.85 GB): 1 GB less
+    still leaves micro-batch 512, above P5's throughput floor, while a game holds several GB."""
+    run_dir = tmp_path / "abl-a01"
+    assert userpause.resume_need_gb(run_dir) is None  # no config.json yet: nothing measured
+    _vram_record(run_dir, {"free_gb": 6.947265625, "budget_gb": 6.147265625, "micro_batch": 1024})
+    assert userpause.resume_need_gb(run_dir) == pytest.approx(6.947265625 - userpause.RESUME_SLACK_GB)
+    assert userpause.RESUME_SLACK_GB == 1.0
+    _vram_record(run_dir, {"micro_batch": 1024})  # a CPU run records no free VRAM
+    assert userpause.resume_need_gb(run_dir) is None
+    (run_dir / "config.json").write_text("{torn", encoding="utf-8")
+    assert userpause.resume_need_gb(run_dir) is None
+
+
+def test_free_gpu_memory_comes_from_nvidia_smi_and_is_none_when_it_cannot_be_read():
+    calls = []
+
+    def answers(stdout: str, code: int = 0):
+        def run(argv, **kwargs):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, code, stdout=stdout, stderr="")
+
+        return run
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError("nvidia-smi")
+
+    assert userpause.gpu_free_gb(answers("1895\n")) == pytest.approx(1895 / 1024)
+    assert calls[0][0] == "nvidia-smi" and "--query-gpu=memory.free" in calls[0]
+    assert userpause.gpu_free_gb(answers("", 9)) is None
+    assert userpause.gpu_free_gb(answers("[N/A]\n")) is None
+    assert userpause.gpu_free_gb(missing) is None
 
 
 def test_waiting_while_flagged_beats_and_returns_the_seconds_waited(tmp_path):
@@ -207,6 +262,67 @@ def test_a_flag_up_when_supervise_starts_holds_the_child_until_it_goes(tmp_path)
     outcome = sup.run(deadline_s=100.0)
     assert [t for t, _ in spawner.calls] == [T0 + 200] and "--resume" not in spawner.calls[0][1]
     assert outcome.status.startswith("stopped: wall_clock, 100 s") and clock.now == T0 + 300
+
+
+def test_after_the_flag_goes_the_restart_waits_until_the_gpu_has_what_the_run_needs(tmp_path):
+    """Resume pressed with a game still open (or only minimized): a restart now would measure a busy GPU
+    and drop the micro-batch below the throughput floor, or spill, and either stop is final for an arm.
+    So the child stays held, still paused and off the deadline, until the game lets go."""
+    clock, free = FakeClock(T0), [1.5]
+    seen = {}
+
+    def pauses(proc):
+        if not flag.exists():
+            return None
+        (run_dir / "ckpt_000000100.pt").write_bytes(b"checkpoint")
+        return supervise.EXIT_USER_PAUSE
+
+    def look():
+        seen.update(
+            beat=heartbeat.read(run_dir / "heartbeat.json"),
+            record=_record(run_dir),
+            code=status.exit_code(status.run_status(run_dir)),
+        )
+
+    def game_quits():
+        free[0] = 7.0
+
+    spawner = Spawner(clock, pauses)
+    sup, run_dir, flag = _supervisor(tmp_path, clock, spawner, gpu_free=lambda: free[0])
+    _vram_record(run_dir, {"free_gb": 6.95, "budget_gb": 6.15, "micro_batch": 1024})
+    spawner.scripts = (pauses, lambda proc: 0 if clock.now >= T0 + 450 else _beating(clock, run_dir)(proc))
+    clock.at(T0 + 50, flag.touch)
+    clock.at(T0 + 150, lambda: seen.update(paused=heartbeat.read(run_dir / "heartbeat.json")))
+    clock.at(T0 + 200, flag.unlink)
+    clock.at(T0 + 300, look)
+    clock.at(T0 + 400, game_quits)
+    outcome = sup.run(deadline_s=500.0)
+
+    assert outcome.state == "finished"
+    assert [t for t, _ in spawner.calls] == [T0, T0 + 400] and spawner.calls[1][1][-1] == "--resume"
+    assert sup.paused_s == 350.0 and sup.restarts == 0  # held from the pause until the GPU came free
+    assert seen["paused"]["resume_needs_gpu_gb"] == pytest.approx(5.95)  # what Resume Blink compares
+    beat = seen["beat"]
+    assert beat["state"] == userpause.PAUSED_USER and beat["resume_needs_gpu_gb"] == pytest.approx(5.95)
+    assert "1.50 GB" in beat["waiting_for_gpu"] and "5.95 GB" in beat["waiting_for_gpu"]
+    assert seen["record"]["state"] == userpause.PAUSED_USER and seen["code"] == 0
+    events = _events(run_dir)
+    assert events.count("user_resume_waits_for_gpu") == 1 and "crash" not in events
+
+
+def test_the_supervisor_tells_its_child_it_resumes_user_pauses_and_no_other_does(tmp_path, monkeypatch):
+    monkeypatch.setenv(userpause.RESUMER_ENV, "1")  # inherited from whatever started this supervisor
+    clock = FakeClock(T0)
+    spawner = Spawner(clock, lambda proc: 0)
+    sup, run_dir, _ = _supervisor(tmp_path, clock, spawner)
+    assert sup.run().state == "finished" and spawner.envs[0][userpause.RESUMER_ENV] == "1"
+
+    blind = Spawner(clock, lambda proc: 0)
+    unpausable = supervise.Supervisor(
+        CFG, run_dir, ["trainer"], lambda _: None, clock=clock.time, sleep=clock.sleep, spawn=blind
+    )
+    assert unpausable.run().state == "finished"
+    assert userpause.RESUMER_ENV not in blind.envs[0]  # no flag to watch: its exit 75 would be a crash
 
 
 def test_a_child_that_never_saw_the_flag_gets_a_fresh_startup_grace_when_it_goes(tmp_path):

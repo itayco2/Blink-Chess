@@ -12,12 +12,14 @@ has them), heartbeat.json every `heartbeat_s` seconds, film/ frames when `film` 
 checkpoints ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the straight run, because the
 batch source is seeked to the checkpoint's step.
 
-A user pause (RunSpec.pause_flag, BLINK_HOME/PAUSE under `blink train`; blink.train.userpause): the flag
-is looked for every PAUSE_CHECK_S seconds at step boundaries and between eval chunks. When it is up the
-run checkpoints its current step, beats "paused: user" and returns with `paused` set (`blink train`
-then exits with supervise.EXIT_USER_PAUSE). A pause between eval chunks leaves paused_mid_eval.json, so
-the resumed run scores that step before its next one. A run that starts while the flag is up waits,
-beating "paused: user", before it builds anything, so it holds no GPU memory.
+A user pause (RunSpec.pause_flag, BLINK_HOME/PAUSE under `blink train`; blink.train.userpause): a run
+that starts while the flag is up waits, beating "paused: user", before it builds anything, so it holds
+no GPU memory. A run with `pause_exits` (one a supervisor resumes: `blink train` under `blink
+supervise`) also looks for the flag every PAUSE_CHECK_S seconds at step boundaries and between eval
+chunks; when it is up the run checkpoints its current step, beats "paused: user" and returns with
+`paused` set (`blink train` then exits with supervise.EXIT_USER_PAUSE). A pause between eval chunks
+leaves paused_mid_eval.json, so the resumed run scores that step before its next one. A run without
+`pause_exits` trains on through the flag: nothing would resume it.
 """
 
 import json
@@ -76,6 +78,7 @@ class RunSpec:
     games10k: Path | None = None  # games10k.npy for games10k_top1 (blink train: BLINK_HOME/data)
     mateset: Path | None = None  # the pack's mateset.npz for shortest_mate and mate_preserving
     pause_flag: Path | None = None  # the user pause flag (blink train: BLINK_HOME/PAUSE); None never pauses
+    pause_exits: bool = False  # stop mid-run for the flag: only when a supervisor resumes the run after it
 
 
 @dataclass(frozen=True)
@@ -451,7 +454,7 @@ def train(
         raise RunExists(f"{spec.run_dir} already has checkpoints; pass --resume or pick a new run name")
     _wait_to_start(cfg, spec, log)
     run = _build(cfg, spec, val, probe, log)
-    if spec.pause_flag is not None:
+    if spec.pause_flag is not None and spec.pause_exits:
         run.pause = userpause.FlagWatch(spec.pause_flag, PAUSE_CHECK_S)
     spec.run_dir.mkdir(parents=True, exist_ok=True)
     _start(run)

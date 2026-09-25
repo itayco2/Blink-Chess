@@ -11,9 +11,9 @@ games10k (BLINK_HOME/data/games10k.npy unless --games10k names another); the P1 
 (train_000.bin, val.bin) still works for roots-only configs. `blink status --run NAME` prints the
 run's state and exits 1 when the run is stale, crashed or has a NaN loss. `blink train` honours the
 user pause flag BLINK_HOME/PAUSE (blink.train.userpause): it waits to start while the flag is up, and
-when the flag goes up mid-run it checkpoints the step and exits with supervise.EXIT_USER_PAUSE (75).
-Torch is imported only when a command runs, so `blink --help` stays fast and works on the torch-free
-CI leg.
+under `blink supervise` (which resumes it) a flag that goes up mid-run checkpoints the step and exits
+with supervise.EXIT_USER_PAUSE (75); run any other way it trains on. Torch is imported only when a
+command runs, so `blink --help` stays fast and works on the torch-free CI leg.
 """
 
 import argparse
@@ -104,6 +104,7 @@ def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path
         games10k=plan.games10k,
         mateset=plan.mateset,
         pause_flag=userpause.flag_path(),
+        pause_exits=userpause.resumer_present(),
     )
 
 
