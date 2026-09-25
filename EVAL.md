@@ -116,7 +116,7 @@ flagship evaluates every 4,000 steps (eval_every = 4000); the 5/25/30/50/100% ch
 30-minute checkpoints, metrics every 50 steps and every stop rule are unchanged. The actual training hours
 are reported.
 
-**PR-3 (play latency, proposed; pending Itay's ratification).** The 100 ms p99 rule of section 3 cannot be
+**PR-3 (play latency, adopted: ratified by Itay on 2026-09-25 at 13:25).** The 100 ms p99 rule of section 3 cannot be
 met in fp32 by any size (measured 2026-09-24: M 583 ms at 5 games at once, 219 rows), so N* could not be
 chosen. Proposed: latency never changes N* (p99 is reported, not gating). Policy mode ships in fp32. Value
 mode ships as bf16 + torch.compile if and only if, on the P7 30% preview's weights over the full valprobe,
@@ -124,12 +124,18 @@ value-mode move agreement with fp32 is at least 99% and |dVAA| <= 2 sigma_EMA; o
 in the ship mode, at 219 rows, on an otherwise idle machine, soak at least 5,000 moves at each of 5, 4, 3
 and 2 games at once; a level passes if the maximum is at most 1,000 ms and no move is over 1,500 ms; P8's
 Blink blocks run at the largest passing level and the bot at 2 (or 1). Results go to results/play_mode.json.
-The 2026-09-25 gap's fast-play rows are exploratory and gate nothing. Until ratified, section 3 stands.
+The 2026-09-25 gap's fast-play rows are exploratory and gate nothing. It replaces section 3's 100 ms rule.
 
-**PR-2 (P6, proposed; pending Itay's decision by 2026-09-26 05:30).** N* = M (22,550,272 parameters) by the
+**PR-2 (P6, adopted: approved by Itay on 2026-09-25 at 13:25, before any P6 data).** N* = M (22,550,272 parameters) by the
 research prior (the 120 h optimum was expected at 20-30M parameters; an equal-6 h comparison favours smaller
 sizes, since S sees 42.5 samples per parameter to M's 2.7), overridden only by the epoch floor and VRAM. S,
 M12 and L are not run at 6 h, and prediction 4 is withdrawn untested. M's 6 h rung is a cooldown branched
 from the flagship at step 47,301 (Blink-M, 6.2 GPU-h: 4.96 shared with the flagship plus 1.24 branched), and
 a guard replaces the 5% check: if its final EMA VAA is more than 2 sigma below the mean of a01-a03, the
-flagship pauses. Until decided, P6 runs as the plan describes.
+flagship pauses. T_long stays 120 training hours (PR-5); the plan's clause to extend to 132 h for an early
+launch is not used.
+
+**PR-4 fallback (authorized by Itay on 2026-09-25 at 13:25).** The screen of endgames.epd stopped after about
+9,500 of 157,846 lines with 2 positions passing the 1M-node screen, so PR-4's declaration holds at the 5,000-line
+look (kept <= 14). E2b and E8 use PR-4's fallback source, screened with the unchanged SF19 rule, before any
+conversion game is played.
