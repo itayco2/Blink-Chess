@@ -7,6 +7,7 @@ blink train --run NAME --data DIR --preview-cooldown 3h --from-step N    (writes
 blink train --run NAME --data DIR --preview-steps K --from-step N [--preview-name BRANCH]
             (exactly K cooldown steps, written to runs/BRANCH; `blink supervise -- train ...` watches
             runs/BRANCH, so a branch crash-resumes like any run)
+blink train calibrate --config configs/long.toml [--steps 2000] [--write]    (PR-5: blink.commands.calibrate)
 
 A v1 pack directory holds train_r*.bin roots, train_c*.bin children, val_roots.bin, valprobe.npz
 and manifest.json (with the rebalancing weights), plus mateset.npz, which the checks score with
@@ -29,7 +30,7 @@ EXIT_REFUSED = 2
 CommandError = train_data.CommandError
 
 
-def _device(requested: str | None) -> str:
+def pick_device(requested: str | None) -> str:
     import torch
 
     if requested:
@@ -63,7 +64,19 @@ def _check_branch_flags(args: argparse.Namespace) -> None:
         raise CommandError(f"bad branch name {args.preview_name!r} (a new run name, not --run's)")
 
 
+def _check_required(args: argparse.Namespace) -> None:
+    """What argparse cannot require once `train calibrate` shares the parser: --run and the data."""
+    if args.run is None:
+        raise CommandError("--run is required")
+    if args.data is None and args.source_raw is None:
+        raise CommandError("one of --data or --source-raw is required")
+    calibrate_only = [f for f, v in (("--steps", args.steps), ("--from-run", args.from_run)) if v is not None]
+    if calibrate_only or args.write:
+        raise CommandError(f"{', '.join(calibrate_only or ['--write'])}: only for `blink train calibrate`")
+
+
 def _check_flags(args: argparse.Namespace) -> None:
+    _check_required(args)
     if not status.valid_run_name(args.run):
         raise CommandError(f"bad run name {args.run!r} (letters, digits, _ - . only)")
     if args.lr_scale is not None and (not args.resume or args.lr_scale <= 0):
@@ -145,7 +158,7 @@ def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path
     return loop.RunSpec(
         run_dir=paths.home() / "runs" / name,
         world=plan.world,
-        device=_device(args.device),
+        device=pick_device(args.device),
         resume=args.resume,
         max_steps=args.max_steps,
         data=plan.description,
@@ -158,6 +171,10 @@ def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path
 
 
 def cmd_train(args: argparse.Namespace) -> int:
+    if args.action == "calibrate":
+        from blink.commands.calibrate import cmd_calibrate
+
+        return cmd_calibrate(args)
     from blink.train import loop
     from blink.train.world import WorldMismatch
 
@@ -191,10 +208,16 @@ def cmd_status(args: argparse.Namespace) -> int:
 def register(sub: argparse._SubParsersAction) -> None:
     train = sub.add_parser("train", help="train a model into BLINK_HOME/runs/<run>/")
     train.add_argument(
+        "action",
+        nargs="?",
+        choices=("calibrate",),
+        help="calibrate: PR-5's calibration of a flagship config (sets its steps with --write)",
+    )
+    train.add_argument(
         "--config", help="a TOML config, e.g. configs/s.toml (a preview reads its checkpoint's)"
     )
-    train.add_argument("--run", required=True, help="run name (letters, digits, _ - .)")
-    data = train.add_mutually_exclusive_group(required=True)
+    train.add_argument("--run", help="run name (letters, digits, _ - .); required unless calibrating")
+    data = train.add_mutually_exclusive_group()
     data.add_argument("--data", help="a pack directory: train_r*/train_c* (or train_*) shards, manifest.json")
     data.add_argument("--source-raw", help="parse the first --max-lines of a raw eval-DB .zst (cached)")
     train.add_argument("--max-lines", type=int, default=train_data.DEFAULT_MAX_LINES)
@@ -223,6 +246,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     train.add_argument("--device", choices=("cuda", "cpu"), help="default: cuda when available")
     train.add_argument("--max-steps", type=int, help="stop early at this step (the schedule is unchanged)")
+    train.add_argument("--steps", type=int, help="calibrate: steps to train (default 2000)")
+    train.add_argument("--write", action="store_true", help="calibrate: set the measured steps in --config")
+    train.add_argument(
+        "--from-run", help="calibrate: recompute from this finished run's metrics (no training)"
+    )
     train.set_defaults(func=cmd_train)
 
     run_status = sub.add_parser("status", help="a run's state; exits 1 when stale, crashed or NaN")
