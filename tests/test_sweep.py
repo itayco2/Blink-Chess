@@ -32,9 +32,9 @@ def test_every_ablation_arm_file_only_overrides_the_recipe():
     expected = ["a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a10", "a11", "a12", "a15"]
     assert sorted(plan["arms"] + plan["held"]) == expected
     tonight = ["a01", "a02", "a03", "a04", "a05", "a11", "a12"]  # the seven arms PF66 started
-    assert plan["arms"] == [*tonight, "a10"]  # its code exists now; it runs after tonight's
-    # a06 waits on its cuda tests, a07 on a rescore, a08 on mate labels, a15 last
-    assert plan["held"] == ["a06", "a07", "a08", "a15"]
+    # the late arms run from the GPU gap, a06 only once `pytest -m cuda` passes; a15 combines, so last
+    assert plan["arms"] == [*tonight, "a10", "a06", "a07", "a15"]
+    assert plan["held"] == ["a08"]  # its guard needs child mate labels the mateset lacks
     assert sorted(p.stem for p in ABLATIONS.glob("a*.toml")) == expected  # a09, a13, a14 are cut
     for name in expected:
         arm = sweep.load_arm(ABLATIONS / f"{name}.toml")
