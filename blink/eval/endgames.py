@@ -12,6 +12,12 @@ endgames.epd repeats some positions with other move counters (22 of them). A pos
 first time it appears (placement, side to move, castling and en passant; the counters ignored), so no
 position sits in both the dev set, which chooses epsilon, and the final set, which is published.
 endgames.json records the repeats skipped and the dev/final overlap, which E2b and E8 refuse unless 0.
+
+PR-4 (EVAL.md section 5) adds looks at lines 1,000, 5,000 and 20,000, then every 20,000: the screen stops
+when endgames.epd is declared unable to supply 700 (blink.eval.endgame_looks). endgames.json then also
+records each source and its sha256, the harness commit, the counts at each look, any declaration and the
+branch: "epd" (screening endgames.epd), "epd-declared" (the declaration was made) or "fallback" (PR-4's
+fallback source, blink.eval.endgame_sources: only after the declaration and with Itay's OK).
 """
 
 import json
@@ -233,8 +239,45 @@ def _write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def write_sets(result: ScreenResult, folder: Path) -> dict:
-    """dev.jsonl and final.jsonl (one Endgame per line) and endgames.json with the counts."""
+def combine(dev: ScreenResult, final: ScreenResult) -> ScreenResult:
+    """The fallback's two screens as one result: dev's kept positions, then final's."""
+    return ScreenResult(
+        dev.kept + final.kept,
+        dev.screened + final.screened,
+        dev.passed_screen + final.passed_screen,
+        dev.repeats_skipped + final.repeats_skipped,
+        dev_size=len(dev.kept),
+    )
+
+
+def screen_record(set_name: str, source: dict, result: ScreenResult, limit: int | None) -> dict:
+    """One screen's entry in endgames.json: its source, its counts, its looks and any declaration."""
+    return {
+        "set": set_name,
+        "source": source,
+        "limit": limit,
+        "screened": result.screened,
+        "passed_screen": result.passed_screen,
+        "repeats_skipped": result.repeats_skipped,
+        "kept": len(result.kept),
+        "looks": [asdict(look) for look in result.looks],
+        "declaration": result.declaration,
+    }
+
+
+def recorded_branch(folder: Path) -> str | None:
+    """The branch the folder's endgames.json records (None without one, or from before branches)."""
+    path = folder / "endgames.json"
+    return json.loads(path.read_text(encoding="utf-8")).get("branch") if path.is_file() else None
+
+
+def has_summary(folder: Path) -> bool:
+    return (folder / "endgames.json").is_file()
+
+
+def write_sets(result: ScreenResult, folder: Path, record: dict | None = None) -> dict:
+    """dev.jsonl and final.jsonl (one Endgame per line) and endgames.json with the counts, the declaration
+    and `record` (the branch, the sources and the harness commit)."""
     folder.mkdir(parents=True, exist_ok=True)
     for name, rows in (("dev", result.dev), ("final", result.final)):
         _write(folder / f"{name}.jsonl", "".join(json.dumps(asdict(e)) + "\n" for e in rows))
@@ -249,7 +292,9 @@ def write_sets(result: ScreenResult, folder: Path) -> dict:
         "screen_nodes": SCREEN_NODES,
         "confirm_nodes": CONFIRM_NODES,
         "threshold_pawns": THRESHOLD_PAWNS,
-        "complete": len(result.kept) >= WANT,
+        "complete": result.complete,
+        "declaration": result.declaration,
+        **(record or {}),
     }
     _write(folder / "endgames.json", json.dumps(summary, indent=2))
     return summary

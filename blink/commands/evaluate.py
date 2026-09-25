@@ -250,19 +250,97 @@ def _cmd_books(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_endgames(args: argparse.Namespace) -> int:
+def _print_look(look) -> None:
+    from blink.eval import endgame_looks
+
+    print(f"look at {endgame_looks.describe(look)}{': DECLARED' if look.declares else ''}", flush=True)
+
+
+def _look_plan(positions: int | None, last_line: int):
+    from blink.eval import endgame_looks
+
+    return endgame_looks.LookPlan(
+        positions, last_line, first=endgame_looks.FIRST_LOOKS, every=endgame_looks.LOOK_EVERY
+    )
+
+
+def _screen_epd(args: argparse.Namespace, screen, confirm) -> tuple[endgames.ScreenResult, dict]:
+    """endgames.epd front to back, with PR-4's looks and declaration."""
+    from blink.eval import endgame_sources
+
     source = args.epd or endgames.epd_path()
-    if _missing(source, "endgame file"):
+    described = endgame_sources.describe_epd(source)
+    result = endgames.screen(
+        endgames.read_positions(source, args.limit),
+        screen,
+        confirm,
+        want=args.want,
+        looks=_look_plan(described["positions"], described["lines"]),
+        on_look=_print_look,
+    )
+    branch = "epd-declared" if result.declaration else "epd"
+    return result, {
+        "branch": branch,
+        "screens": [endgames.screen_record("dev+final", described, result, args.limit)],
+    }
+
+
+def _screen_fallback(args: argparse.Namespace, screen, confirm) -> tuple[endgames.ScreenResult, dict]:
+    """PR-4's fallback: dev from val (outside test_grouped's groups), then final from test_grouped."""
+    from blink.eval import endgame_sources
+
+    sources = endgame_sources.fallback_sources(args.data or paths.home() / "data" / "v1")
+    print("fallback source (PR-4): used only with Itay's OK, given before any conversion game", flush=True)
+    results, records = {}, []
+    for name, want in (("dev", endgames.DEV_COUNT), ("final", endgames.WANT - endgames.DEV_COUNT)):
+        source = sources[name]
+        roots = source.read(args.limit)
+        described = source.describe(roots)
+        plan = _look_plan(None, len(roots))
+        results[name] = endgames.screen(
+            source.positions(roots), screen, confirm, want=want, looks=plan, on_look=_print_look
+        )
+        records.append(endgames.screen_record(name, described, results[name], args.limit))
+    return endgames.combine(results["dev"], results["final"]), {"branch": "fallback", "screens": records}
+
+
+def _endgames_refusal(source: str, out: Path) -> str | None:
+    """Why this screen may not write into `out`: endgames.epd never replaces the fallback's sets, and the
+    fallback writes only where endgames.epd's declaration is recorded (or where nothing is yet)."""
+    branch = endgames.recorded_branch(out)
+    if source == "epd" and branch == "fallback":
+        return f"{out} holds the fallback source's sets (PR-4); screen endgames.epd into another --out"
+    if source == "fallback" and endgames.has_summary(out) and branch not in ("epd-declared", "fallback"):
+        return (
+            f"{out}/endgames.json records no PR-4 declaration: the fallback source is used only after "
+            "endgames.epd is declared unable to supply 700, and only with Itay's OK"
+        )
+    return None
+
+
+def _cmd_endgames(args: argparse.Namespace) -> int:
+    from blink.eval import endgame_sources
+
+    out = args.out or endgames.out_dir()
+    refusal = _endgames_refusal(args.source, out)
+    if refusal:
+        return _fail("blink eval endgames", ValueError(refusal))
+    if args.source == "epd" and _missing(args.epd or endgames.epd_path(), "endgame file"):
         return 2
     exe = fastchess.stockfish_exe()
     started = time.perf_counter()
+    run = _screen_epd if args.source == "epd" else _screen_fallback
     with (
         sflabel.SfLabeler(args.screen_nodes, exe=exe, procs=args.sf_procs) as screen,
         sflabel.SfLabeler(args.confirm_nodes, exe=exe, procs=args.sf_procs) as confirm,
     ):
-        result = endgames.screen(endgames.read_positions(source, args.limit), screen, confirm, want=args.want)
+        try:
+            result, record = run(args, screen, confirm)
+        except (OSError, ValueError, KeyError) as exc:
+            return _fail("blink eval endgames", exc)
         searched = screen.searched + confirm.searched
-    summary = endgames.write_sets(result, args.out or endgames.out_dir())
+        dropped = screen.cache.dropped + confirm.cache.dropped
+    summary = endgames.write_sets(result, out, {**record, "harness": endgame_sources.harness_commit()})
     seconds = time.perf_counter() - started
     print(
         f"screened {result.screened:,} positions: {result.passed_screen} at +5.00 after "
@@ -270,6 +348,9 @@ def _cmd_endgames(args: argparse.Namespace) -> int:
         f"dev {summary['dev']}, final {summary['final']} (sharing {summary['overlap_positions']}); "
         f"{result.repeats_skipped} repeated positions skipped; {searched} new searches in {seconds:.0f} s"
     )
+    print(f"branch {summary['branch']}; declaration: {summary['declaration'] or 'none'}")
+    if dropped:
+        print(f"{dropped} cache lines cut short by a kill were skipped (their labels were searched again)")
     for game in result.kept:
         scores = f"+{game.screen_pawns:.2f} / +{game.confirm_pawns:.2f}"
         print(f"  line {game.line}: {game.winner} {scores}  {game.fen}")
@@ -530,13 +611,34 @@ def _register_sets(ev_sub: argparse._SubParsersAction) -> None:
     bk.set_defaults(func=_cmd_books)
 
     eg = ev_sub.add_parser("endgames", help="screen endgames.epd with SF19 for the E8 conversion set")
+    eg.add_argument(
+        "--source",
+        choices=("epd", "fallback"),
+        default="epd",
+        help="epd: endgames.epd (the plan's set). fallback: PR-4's source from the v1 pack (EVAL.md "
+        "section 5), only after endgames.epd is declared unable to supply 700, with Itay's OK given before "
+        "any conversion game",
+    )
     eg.add_argument("--epd", type=Path, default=None, help="default BLINK_HOME/books/endgames.epd")
-    eg.add_argument("--limit", type=int, default=None, help="screen at most this many lines")
-    eg.add_argument("--want", type=int, default=endgames.WANT)
+    eg.add_argument(
+        "--data", type=Path, default=None, help="--source fallback: the pack (default BLINK_HOME/data/v1)"
+    )
+    eg.add_argument("--limit", type=int, default=None, help="screen at most this many lines (records)")
+    eg.add_argument(
+        "--want",
+        type=int,
+        default=endgames.WANT,
+        help="epd: stop at this many kept (the fallback: 200 + 500)",
+    )
     eg.add_argument("--screen-nodes", type=int, default=endgames.SCREEN_NODES)
     eg.add_argument("--confirm-nodes", type=int, default=endgames.CONFIRM_NODES)
     eg.add_argument("--out", type=Path, default=None, help="default BLINK_HOME/eval/endgames")
-    eg.add_argument("--sf-procs", type=int, default=1, help="Stockfish processes (one thread each)")
+    eg.add_argument(
+        "--sf-procs",
+        type=int,
+        default=1,
+        help="Stockfish processes, one thread each (PR-4: at most 4 before P7, 3 during it)",
+    )
     eg.set_defaults(func=_cmd_endgames)
 
 
