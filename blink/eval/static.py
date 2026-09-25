@@ -35,7 +35,7 @@ from blink.board import encode, moves, value
 from blink.data.children import codes_to_board
 from blink.data.record import NO_MOVE, ROOT_DTYPE
 from blink.eval import puzzles
-from blink.eval.sflabel import SfLabeler
+from blink.eval.sflabel import SfLabel, SfLabeler
 from blink.play.evaluator import Evaluator
 
 CHUNK_ROWS = 4096
@@ -423,7 +423,10 @@ def regret(roots: Sequence[Root], picks: Sequence[int], labeler: SfLabeler) -> d
 def mate_rates(
     evaluator: Evaluator, arrays: dict[str, np.ndarray], labeler: SfLabeler | None, limit: int | None = None
 ) -> dict[str, dict]:
-    """Per mode: the pick keeps the shortest mate (child_is_best), and, with SF, still mates at all."""
+    """Per mode: the pick keeps the shortest mate (child_is_best), and, with SF, still mates at all.
+
+    A pick that keeps the shortest mate needs no search; the others are searched in one label_many call
+    (policy picks, then value picks, in root order), so they run on the labeler's processes."""
     n = len(arrays["root_best"]) if limit is None else min(limit, len(arrays["root_best"]))
     out: dict[str, dict] = {}
     picks = {"policy": [], "value": []}
@@ -441,22 +444,32 @@ def mate_rates(
         value_pick = max(order, key=lambda j: (scores[j], -indices[j]))
         for mode, j in (("policy", policy_pick), ("value", value_pick)):
             picks[mode].append((i, j, lo))
-    for mode, chosen in picks.items():
-        shortest = [bool(arrays["child_is_best"][lo + j]) for _, j, lo in chosen]
-        out[mode] = {"shortest": _rate(shortest), "preserving": None}
-        if labeler is not None:
-            keeps = [
-                s or _still_mates(arrays, i, lo + j, labeler)
-                for (i, j, lo), s in zip(chosen, shortest, strict=True)
-            ]
+    shortest = {
+        mode: [bool(arrays["child_is_best"][lo + j]) for _, j, lo in chosen] for mode, chosen in picks.items()
+    }
+    for mode in picks:
+        out[mode] = {"shortest": _rate(shortest[mode]), "preserving": None}
+    if labeler is not None:
+        wanted = [
+            _pick_request(arrays, i, lo + j)
+            for mode, chosen in picks.items()
+            for (i, j, lo), s in zip(chosen, shortest[mode], strict=True)
+            if not s
+        ]
+        labels = iter(labeler.label_many(wanted))
+        for mode in picks:
+            keeps = [s or _still_mates(next(labels)) for s in shortest[mode]]
             out[mode]["preserving"] = _rate(keeps)
     return out
 
 
-def _still_mates(arrays: dict[str, np.ndarray], root: int, child: int, labeler: SfLabeler) -> bool:
+def _pick_request(arrays: dict[str, np.ndarray], root: int, child: int) -> tuple[str, chess.Move]:
+    """(root FEN, the picked move): SF19 searches the root restricted to that move."""
     board = codes_to_board(encode.unpack(arrays["root_board"][root]))
-    move = moves.decode_move(board, int(arrays["child_move"][child]))
-    label = labeler.label(board.fen(), move)
+    return board.fen(), moves.decode_move(board, int(arrays["child_move"][child]))
+
+
+def _still_mates(label: SfLabel) -> bool:
     return label.mate is not None and label.mate > 0
 
 

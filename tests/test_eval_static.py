@@ -140,6 +140,43 @@ def test_the_mateset_rates_shortest_and_preserving_mates(tmp_path):
         assert mode["preserving"]["value"] == 1.0  # the fake SF says every pick still mates
 
 
+def _lowest_move(board):
+    return min(board.legal_moves, key=lambda m: moves.encode_move(board, m))
+
+
+def test_the_mate_preserving_searches_go_to_stockfish_in_one_batch_with_unchanged_results(tmp_path):
+    """Each non-shortest pick is one SF19 search, all in one label_many call (policy picks, then value
+    picks, root order), so `--sf-procs` spreads them; the labels, their order and the rates are today's."""
+    rook, pawn = chess.Board("8/8/4k3/8/8/8/3RK3/8 w - - 0 1"), chess.Board("8/8/8/4k3/8/8/4P3/4K3 w - - 0 1")
+    rook_pick, pawn_best = chess.Move.from_uci("d2d7"), chess.Move.from_uci("e2e4")
+    assert _lowest_move(pawn) != pawn_best
+    records = [record(rook.fen(), _lowest_move(rook).uci(), mate=5), record(pawn.fen(), "e2e4", mate=7)]
+    arrays = valprobe.probe_arrays(np.array(records))
+    # Policy picks the rook move (not the best) and the pawn's best; flat values pick each lowest move.
+    evaluator = Favours([moves.encode_move(rook, rook_pick), moves.encode_move(pawn, pawn_best)])
+    mating = {(rook.fen(), rook_pick.uci())}
+    searched = []
+
+    def analyse(board, nodes, move):
+        searched.append((board.fen(), move.uci()))
+        return (
+            sflabel.SfLabel(None, 4, 20, None)
+            if searched[-1] in mating
+            else sflabel.SfLabel(200, None, 20, None)
+        )
+
+    labeler = sflabel.SfLabeler(1, cache_path=tmp_path / "c.jsonl", analyse=analyse)
+    batches = []
+    label_many = labeler.label_many
+    labeler.label_many = lambda requests: batches.append(list(requests)) or label_many(requests)
+    rates = static.mate_rates(evaluator, arrays, labeler)
+    expected = [(rook.fen(), rook_pick.uci()), (pawn.fen(), _lowest_move(pawn).uci())]
+    assert searched == expected and [[(f, str(m)) for f, m in b] for b in batches] == [expected]
+    assert (rates["policy"]["shortest"]["value"], rates["policy"]["preserving"]["value"]) == (0.5, 1.0)
+    assert (rates["value"]["shortest"]["value"], rates["value"]["preserving"]["value"]) == (0.5, 0.5)
+    assert static.mate_rates(evaluator, arrays, None)["value"]["preserving"] is None
+
+
 def test_the_puzzle_rating_equivalent_recovers_a_known_rating():
     rng = np.random.default_rng(0)
     ratings = rng.uniform(600, 2600, 3000).round()
