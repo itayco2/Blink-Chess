@@ -23,6 +23,7 @@ from pathlib import Path
 import chess
 
 from blink import paths
+from blink.eval.endgame_looks import Look, LookPlan, LookTracker, describe
 from blink.eval.sflabel import SfLabel, SfLabeler
 
 SCREEN_NODES = 1_000_000
@@ -130,14 +131,25 @@ class ScreenResult:
     screened: int
     passed_screen: int  # positions at +5.00 at 1M nodes, each confirmed at 10M
     repeats_skipped: int = 0  # lines holding a position already seen (other move counters)
+    looks: tuple[Look, ...] = ()  # PR-4's looks, when the screen was given a plan
+    declaration: str | None = None  # why the source was declared unable to supply 700 (PR-4), if it was
+    dev_size: int | None = None  # how many of `kept` are the dev set (None: the first DEV_COUNT)
 
     @property
     def dev(self) -> tuple[Endgame, ...]:
-        return self.kept[:DEV_COUNT]
+        return self.kept[: self._dev_size]
 
     @property
     def final(self) -> tuple[Endgame, ...]:
-        return self.kept[DEV_COUNT:WANT]
+        return self.kept[self._dev_size : self._dev_size + WANT - DEV_COUNT]
+
+    @property
+    def _dev_size(self) -> int:
+        return DEV_COUNT if self.dev_size is None else self.dev_size
+
+    @property
+    def complete(self) -> bool:
+        return len(self.dev) == DEV_COUNT and len(self.final) == WANT - DEV_COUNT
 
 
 def _batches(positions: Iterator[tuple[int, str]], size: int) -> Iterator[list[tuple[int, str]]]:
@@ -151,39 +163,68 @@ def _batches(positions: Iterator[tuple[int, str]], size: int) -> Iterator[list[t
         yield batch
 
 
+def _labelled(
+    batch: list[tuple[int, str]], screen_labeler: SfLabeler, confirm_labeler: SfLabeler
+) -> Iterator[tuple[int, str, SfLabel, chess.Color | None, SfLabel | None]]:
+    """(line, fen, 1M-node label, the side at +5.00 or None, its 10M-node label or None) per position:
+    the batch's screens in one label_many call, then its confirms in another."""
+    firsts = screen_labeler.label_many([(fen, None) for _, fen in batch])
+    sides = [winner(label, chess.Board(fen).turn) for label, (_, fen) in zip(firsts, batch, strict=True)]
+    seconds = iter(
+        confirm_labeler.label_many(
+            [(fen, None) for (_, fen), side in zip(batch, sides, strict=True) if side is not None]
+        )
+    )
+    for (line, fen), first, side in zip(batch, firsts, sides, strict=True):
+        yield line, fen, first, side, None if side is None else next(seconds)
+
+
 def screen(
     positions: Iterator[tuple[int, str]],
     screen_labeler: SfLabeler,
     confirm_labeler: SfLabeler,
     want: int = WANT,
     progress: Callable[[int, int], None] | None = None,
+    looks: LookPlan | None = None,
+    on_look: Callable[[Look], None] | None = None,
 ) -> ScreenResult:
     """Screen positions in order until `want` are kept (or the positions run out), a batch at a time so
     the labelers can search on several processes; a position after the `want`-th keep is not counted,
-    and a repeat of a position already seen is skipped."""
+    and a repeat of a position already seen is skipped. With a look plan (PR-4, blink.eval.endgame_looks)
+    each look is taken as its line passes and handed to `on_look`, and a look that declares, or the file
+    ending short of 700 kept, stops the screen with the declaration."""
     kept: list[Endgame] = []
     repeats: list[int] = []
-    screened = passed = 0
+    screened = passed = last_line = 0
+    tracker = LookTracker(looks, on_look) if looks is not None else None
+
+    def result(declaration: str | None = None) -> ScreenResult:
+        taken = tuple(tracker.looks) if tracker else ()
+        return ScreenResult(tuple(kept), screened, passed, len(repeats), taken, declaration)
+
+    def look(line: int) -> str | None:
+        declaring = tracker.reach(line, screened, passed, len(kept)) if tracker else None
+        return describe(declaring) if declaring else None
+
     size = BATCH_PER_PROC * max(screen_labeler.procs, confirm_labeler.procs)
     for batch in _batches(first_sightings(positions, repeats), size):
-        firsts = screen_labeler.label_many([(fen, None) for _, fen in batch])
-        sides = [winner(label, chess.Board(fen).turn) for label, (_, fen) in zip(firsts, batch, strict=True)]
-        seconds = iter(
-            confirm_labeler.label_many(
-                [(fen, None) for (_, fen), side in zip(batch, sides, strict=True) if side is not None]
-            )
-        )
-        for (line, fen), first, side in zip(batch, firsts, sides, strict=True):
-            screened += 1
+        for line, fen, first, side, second in _labelled(batch, screen_labeler, confirm_labeler):
+            declaration = look(line - 1)
+            if declaration:
+                return result(declaration)
+            screened, last_line = screened + 1, line
             if side is not None:
                 passed += 1
-                found = _confirmed(line, fen, first, next(seconds), side)
+                found = _confirmed(line, fen, first, second, side)
                 kept += [found] if found is not None else []
             if progress is not None:
                 progress(screened, len(kept))
-            if len(kept) >= want:
-                return ScreenResult(tuple(kept), screened, passed, len(repeats))
-    return ScreenResult(tuple(kept), screened, passed, len(repeats))
+            declaration = look(line)
+            if declaration or len(kept) >= want:
+                return result(declaration)
+    last_line = max([last_line, *repeats])
+    declaration = look(last_line)
+    return result(declaration or (tracker.ended(last_line, len(kept)) if tracker else None))
 
 
 def _write(path: Path, text: str) -> None:
