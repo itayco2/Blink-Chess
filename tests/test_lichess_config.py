@@ -404,8 +404,8 @@ def test_two_engines_started_at_once_from_the_rated_flags_write_two_whole_logs(t
         subprocess.Popen(command, **pipes, text=True, encoding="utf-8", cwd=ROOT, env=env) for _ in range(2)
     ]
     for engine in engines:  # both engines get their game before either is read, as two live games do
-        engine.stdin.write(DECISION_SCRIPT)
-        engine.stdin.close()
+        engine.stdin.write(DECISION_SCRIPT)  # ends with quit, so neither waits for end of input
+        engine.stdin.flush()  # communicate() closes stdin; on POSIX it flushes first, so a closed pipe raises
     outputs = [engine.communicate(timeout=180) for engine in engines]
     for engine, (out, err) in zip(engines, outputs, strict=True):
         assert engine.returncode == 0, err
