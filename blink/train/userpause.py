@@ -16,8 +16,8 @@ v2 driver for the calibration it reruns as a fresh run after a pause) stops mid-
 trains on through a pause: a plain `blink train` (a calibration or a job run by hand) would fail its
 caller with exit 75, a resumed calibration would time the pause into its rate, and an older supervisor
 would count exit 75 as a crash. The Pause button names such a process as one that could not free the
-GPU. The P7-VAA pause is another thing entirely: a pending gate only Itay clears,
-which removing this flag never lifts.
+GPU. The P7-VAA pause is another thing entirely: a pending gate only Itay clears, which removing this
+flag never lifts.
 
 The trainer asks at every step, so the check is throttled: one os.path.exists (77 us on D: while a run
 trains) at most every few seconds, and a clock read (about 50 ns) otherwise. Torch-free.
