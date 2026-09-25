@@ -222,6 +222,19 @@ def compile_mode(tables: dict[str, dict[str, Any]]) -> str:
     return str(tables.get("train", {}).get("compile", COMPILE_MODES[0]))
 
 
+def micro_batch_pin(tables: dict[str, dict[str, Any]]) -> int | None:
+    """The micro-batch a config's tables pin, or None when they pin none: "auto" (sized from free VRAM
+    at launch) or no micro_batch key at all (planned at the fastest bench row, as before pins existed).
+
+    A pinned size is planned and policed at the bench row of that micro-batch (blink.train.bench):
+    the trainer then runs exactly that, with no VRAM probe. An explicit 0 pins the whole batch."""
+    train = tables.get("train", {})
+    micro = train.get("micro_batch", AUTO)
+    if micro == AUTO:
+        return None
+    return int(micro) or int(train.get("batch_size", TrainConfig.batch_size))
+
+
 def load_config(path: str | Path) -> TrainConfig:
     tables = _read_tables(Path(path))
     return config_from_dict({**tables["train"], "model": tables["model"]})

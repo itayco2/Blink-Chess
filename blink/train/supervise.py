@@ -17,7 +17,9 @@ A stop terminates the child's whole process tree and writes 'stopped: <rule>, <n
 heartbeat.json (state "stopped" or "paused", so `blink status` exits non-zero) and a STATUS-style
 record into supervisor.json. Before each child starts, metrics.jsonl and evals.jsonl are cut back to
 the step it resumes from (0 for a fresh start), exactly as the trainer's own resume does, so a row
-the supervisor sees afterwards was written by that child. Torch-free.
+the supervisor sees afterwards was written by that child. A branch (`train --run long --from-step N
+--preview-steps K --preview-name size-m`) is supervised as the run it writes, runs/size-m, so it
+crash-resumes like any run and its parent is only read. Torch-free.
 """
 
 import json
@@ -36,8 +38,11 @@ import psutil
 
 from blink import heartbeat
 from blink.train.atomic import write_text_atomic
+from blink.train.preview import preview_name
 
 EXIT_FINISHED, EXIT_STOPPED, EXIT_REFUSED, EXIT_PAUSED = 0, 1, 2, 3
+# the train flags that branch a new run from another run's checkpoint (blink.commands.train)
+BRANCH_FLAGS = ("--from-step", "--preview-cooldown", "--preview-steps", "--preview-name")
 RULES = ("nan", "vaa", "heartbeat", "throughput", "clip", "loss", "crash")
 VAA_MARKER = "vaa_check_failed"
 PAUSED_VAA = "paused: P7-VAA"
@@ -249,15 +254,38 @@ def restart_argv(argv: Sequence[str], resume: bool, lr_scale: float) -> list[str
     return out + (["--lr-scale", f"{lr_scale:g}"] if lr_scale != 1.0 else [])
 
 
+def _flag_values(args: Sequence[str], flag: str) -> list[str]:
+    values = [args[i + 1] for i, a in enumerate(args[:-1]) if a == flag]
+    return values + [a.split("=", 1)[1] for a in args if a.startswith(flag + "=")]
+
+
 def _run_names(args: Sequence[str]) -> list[str]:
-    names = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--run"]
-    return names + [a.split("=", 1)[1] for a in args if a.startswith("--run=")]
+    return _flag_values(args, "--run")
+
+
+def is_branch(args: Sequence[str]) -> bool:
+    """Whether a train command branches a new run from another run's checkpoint (a preview cooldown)."""
+    return any(_flag_values(args, flag) for flag in BRANCH_FLAGS)
+
+
+def branch_run(args: Sequence[str]) -> str:
+    """The run a branching train command writes: its --preview-name, else <its --run>-preview.
+
+    Its --run names the run it branches from, which the branch only reads."""
+    names = _run_names(args)
+    if not names:
+        raise ValueError("a branch names the run it branches from with --run in the train command")
+    chosen = _flag_values(args, "--preview-name")
+    return chosen[0] if chosen else preview_name(names[0])
 
 
 def run_of(args: Sequence[str], run: str | None) -> str:
-    """The run a supervise command serves: its own --run, else the one the train command names."""
+    """The run a supervise command serves: its own --run, else the one the train command writes (the
+    --run it names, or a branch's own run)."""
     if run is not None:
         return run
+    if is_branch(args):
+        return branch_run(args)
     names = _run_names(args)
     if not names:
         raise ValueError("name the run: blink supervise --run NAME, or --run NAME in the train command")
@@ -265,11 +293,22 @@ def run_of(args: Sequence[str], run: str | None) -> str:
 
 
 def train_argv(args: Sequence[str], run: str) -> list[str]:
-    """The blink arguments for the child: a `train` command whose --run is this run."""
+    """The blink arguments for the child: a `train` command that writes this run.
+
+    A branch writes its own run (blink.train.preview), so that is the run the supervisor watches,
+    cuts back and resumes; its --run names the parent and stays as it is."""
     args = list(args)
     if not args or args[0] != "train":
         raise ValueError(f"blink supervise wraps `train ...`, got {' '.join(args) or 'nothing'}")
     names = _run_names(args)
+    if is_branch(args):
+        written = branch_run(args)
+        if written != run:
+            raise ValueError(
+                f"the train command writes runs/{written} (a branch of {names[0]}) "
+                f"but supervise says --run {run}"
+            )
+        return args
     if any(name != run for name in names):
         raise ValueError(f"the train command says --run {names[0]} but supervise says --run {run}")
     return args if names else args + ["--run", run]

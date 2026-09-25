@@ -3,19 +3,21 @@
 S, M and M12 run for the same wall-clock hours with the frozen recipe; a conditional size (L) runs only
 if its measured rate passes the epoch floor. Each size is planned and policed at bench.json's best row
 in the compile mode it trains in, and runs through `blink supervise` like an ablation arm, with the
-same resumable state file and run plumbing (blink.train.sweep). `blink sweep choose` then picks N*
+same resumable state file and run plumbing (blink.train.sweep). A size config that pins its micro-batch
+(M and M12 pin 256) keeps the pin over the recipe's "auto" and is planned and policed at that bench
+row, since the trainer then runs exactly that micro-batch. `blink sweep choose` then picks N*
 (blink.train.nstar).
 """
 
 import time
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from blink import paths
-from blink.model.config import compile_mode, read_tables
+from blink.model.config import compile_mode, micro_batch_pin, read_tables
 from blink.train.bench import best_rates
 from blink.train.nstar import ChooseRules, p99_of
 from blink.train.sweep import (  # the run plumbing the ablation sweep and the size sweep share
@@ -76,10 +78,38 @@ def _size_facts(size: str, row: Mapping[str, Any], bench: Mapping, rules: Choose
     }
 
 
+def size_recipe(config_dir: Path, size: str, recipe: Arm) -> Arm:
+    """The recipe as a size runs it: a size config that pins its micro-batch keeps its pin.
+
+    The recipe's micro_batch ("auto") is a hardware default, not a recipe choice, and no arm changes
+    the gradient through it (step.py divides by the whole step's counts)."""
+    train = recipe.overrides.get("train", {})
+    if "micro_batch" not in train or micro_batch_pin(read_tables(config_dir / f"{size}.toml")) is None:
+        return recipe
+    kept = {key: value for key, value in train.items() if key != "micro_batch"}
+    return replace(recipe, overrides={**recipe.overrides, "train": kept})
+
+
+def _train_table(config_dir: Path, size: str, recipe: Arm) -> dict[str, Any]:
+    """A size's [train] table (with its base) under the recipe's overrides, as its run trains it."""
+    tables = read_tables(config_dir / f"{size}.toml")
+    return {**tables["train"], **size_recipe(config_dir, size, recipe).overrides.get("train", {})}
+
+
 def size_compile_mode(setup: SizeSweep, size: str, recipe: Arm) -> str:
     """The compile mode a size's run trains in: its config (with base) under the recipe's overrides."""
-    tables = read_tables(setup.config_dir / f"{size}.toml")
-    return compile_mode({"train": {**tables["train"], **recipe.overrides.get("train", {})}})
+    return compile_mode({"train": _train_table(setup.config_dir, size, recipe)})
+
+
+def size_micro_pin(config_dir: Path, size: str, recipe: Arm | None = None) -> int | None:
+    """The micro-batch a size's run is pinned to (None: "auto", sized from free VRAM at launch)."""
+    recipe = recipe or Arm("D", "Recipe D as the size config writes it")
+    return micro_batch_pin({"train": _train_table(config_dir, size, recipe)})
+
+
+def _not_run_why(size: str, mode: str, pin: int | None) -> str:
+    at = "" if pin is None else f" and micro-batch {pin} (its config's pin)"
+    return f"not run: no bench.json row for {size} at compile {mode}{at} fits the VRAM budget"
 
 
 def _plan_size(setup: SizeSweep, size: str, bench: Mapping, rules: ChooseRules):
@@ -87,12 +117,13 @@ def _plan_size(setup: SizeSweep, size: str, bench: Mapping, rules: ChooseRules):
     recipe = load_arm(setup.recipe) if setup.recipe else Arm("D", "Recipe D as the size config writes it")
     try:
         mode = size_compile_mode(setup, size, recipe)
+        pin = size_micro_pin(setup.config_dir, size, recipe)
+        recipe = size_recipe(setup.config_dir, size, recipe)
     except (ValueError, OSError) as exc:
         return {"name": size, "status": f"invalid: {exc}"}, None
-    row = best_rates(bench, compile=mode).get(size)
+    row = best_rates(bench, compile=mode, pins=None if pin is None else {size: pin}).get(size)
     if row is None:
-        why = f"not run: no bench.json row for {size} at compile {mode} fits the VRAM budget"
-        return {"name": size, "status": why}, None
+        return {"name": size, "status": _not_run_why(size, mode, pin)}, None
     rate = row["samples_per_s"]
     if size in setup.conditional and rate < rules.epoch_floor:
         why = f"not run: fails the epoch floor ({rate:,.0f} < {rules.epoch_floor:,.0f} samples/s)"

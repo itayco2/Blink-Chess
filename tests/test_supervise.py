@@ -284,6 +284,33 @@ def test_train_args_get_the_run_name_and_refuse_another_one():
         supervise.train_argv(["eval", "--run", "long"], "long")
 
 
+NAMED_BRANCH = ["train", "--run", "long", "--from-step", "47301", "--preview-steps", "11825"]
+NAMED_BRANCH += ["--preview-name", "size-m"]
+
+
+def test_a_branch_is_supervised_under_the_run_it_writes_not_the_run_it_branches_from():
+    """`train --run long --from-step N ...` writes runs/size-m (or runs/long-preview): that directory
+    is the one the supervisor must watch, resume and cut back, never the parent's."""
+    assert supervise.run_of(NAMED_BRANCH, None) == "size-m"
+    assert supervise.train_argv(NAMED_BRANCH, "size-m") == NAMED_BRANCH
+    preview = ["train", "--run=long", "--preview-cooldown", "3h", "--from-step", "5"]
+    assert supervise.run_of(preview, None) == "long-preview"
+    assert supervise.train_argv(preview, "long-preview") == preview
+    with pytest.raises(ValueError, match="size-m"):
+        supervise.train_argv(NAMED_BRANCH, "long")  # the parent's name: it would watch the wrong run
+    with pytest.raises(ValueError, match="branches from"):
+        supervise.train_argv(["train", "--from-step", "5", "--preview-steps", "3"], "long-preview")
+
+
+def test_the_supervise_command_wraps_a_named_branch_under_its_own_run(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    assert cli.main(["supervise", "--dry-run", "--", *NAMED_BRANCH]) == 0
+    assert "-m blink.cli " + " ".join(NAMED_BRANCH) in capsys.readouterr().out
+    assert cli.main(["supervise", "--run", "size-m", "--dry-run", "--", *NAMED_BRANCH]) == 0
+    assert cli.main(["supervise", "--run", "long", "--dry-run", "--", *NAMED_BRANCH]) == 2
+    assert "runs/size-m" in capsys.readouterr().err
+
+
 def test_the_supervise_command_wraps_blink_train_and_adds_the_run_name(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BLINK_HOME", str(tmp_path))
     argv = ["supervise", "--run", "long", "--dry-run", "--", "train", "--config", "configs/t.toml"]
@@ -442,3 +469,19 @@ def test_the_supervise_benchmark_matches_the_train_configs_compile_mode(
     argv = ["supervise", "--run", "long", "--dry-run", "--bench", str(bench), "--bench-size", "s"]
     assert cli.main([*argv, "--", "train", "--config", str(config), "--run", "long"]) == 0
     assert f"floor {floor} samples/s" in capsys.readouterr().out
+
+
+def test_the_supervise_benchmark_takes_the_row_at_the_train_configs_pinned_micro_batch(
+    tmp_path, monkeypatch, capsys
+):
+    """The flagship trains M at its pinned 256, so it is policed at the 256 row, not the faster 512."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    ok = {"size": "m", "oom": False, "error": None, "compile": "inductor"}
+    rows = [{**ok, "micro": 256, "samples_per_s": 2695.0}, {**ok, "micro": 512, "samples_per_s": 2803.0}]
+    bench = tmp_path / "bench.json"
+    bench.write_text(json.dumps({"throughput": rows}), encoding="utf-8")
+    config = tmp_path / "c.toml"
+    config.write_text('[train]\ncompile = "inductor"\nmicro_batch = 256\n', encoding="utf-8")
+    argv = ["supervise", "--run", "long", "--dry-run", "--bench", str(bench), "--bench-size", "m"]
+    assert cli.main([*argv, "--", "train", "--config", str(config), "--run", "long"]) == 0
+    assert "floor 2,291 samples/s (85% of 2,695, size m in bench.json)" in capsys.readouterr().out

@@ -324,6 +324,144 @@ def test_preview_cooldown_branches_into_name_preview_and_leaves_the_main_run_alo
     assert beat["state"] == "finished" and beat["step"] == 35
 
 
+def _main_run_at_step_15(home, config, raw) -> tuple[list[str], dict]:
+    """The main run `long` stopped at step 15, and the arguments a branch of it starts from."""
+    base = ["train", "--run", "long", "--source-raw", str(raw), "--max-lines", "100", "--device", "cpu"]
+    base += ["--workers", "1"]
+    assert cli.main([*base, "--config", str(config), "--max-steps", "15"]) == 0
+    main = home / "runs" / "long"
+    return base, {p.name: p.read_bytes() for p in main.iterdir() if p.is_file()}
+
+
+def _saved_config(home, run: str) -> dict:
+    return json.loads((home / "runs" / run / "config.json").read_text(encoding="utf-8"))
+
+
+def test_preview_steps_and_name_branch_an_exact_cooldown_into_the_named_run(home, config, raw, capsys):
+    from blink.train.schedule import cooldown_start
+
+    base, before = _main_run_at_step_15(home, config, raw)
+    (home / "runs" / "long" / "metrics.jsonl").unlink()  # an exact step count needs no measured rate
+    before.pop("metrics.jsonl")
+    branch = [*base, "--from-step", "15", "--preview-steps", "11", "--preview-name", "size-m"]
+    assert cli.main(branch) == 0
+    assert "11 cooldown steps" in capsys.readouterr().out
+    main = home / "runs" / "long"
+    assert {p.name: p.read_bytes() for p in main.iterdir() if p.is_file()} == before
+    assert not (home / "runs" / "long-preview").exists()
+    saved = _saved_config(home, "size-m")
+    assert saved["config"]["steps"] == 26 and saved["branched_from"].endswith("ckpt_000000015.pt")
+    assert cooldown_start(26, saved["config"]["cooldown_frac"]) == 15 and saved["config"]["film"] is False
+    beat = json.loads((home / "runs" / "size-m" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert (beat["run"], beat["state"], beat["step"]) == ("size-m", "finished", 26)
+
+
+def test_preview_name_also_names_a_duration_cooldown(home, config, raw):
+    base, _ = _main_run_at_step_15(home, config, raw)
+    rows = [{"step": s, "samples_per_s": 160.0, "phase": "train"} for s in (5, 10, 15)]
+    metrics = home / "runs" / "long" / "metrics.jsonl"
+    metrics.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    assert cli.main([*base, "--from-step", "15", "--preview-cooldown", "2s", "--preview-name", "p30"]) == 0
+    assert _saved_config(home, "p30")["config"]["steps"] == 15 + 20  # 2 s at 160 samples/s, batch 16
+    assert not (home / "runs" / "long-preview").exists()
+
+
+def test_a_named_branch_resumes_in_its_own_run_and_refuses_another_step_count(home, config, raw, capsys):
+    base, _ = _main_run_at_step_15(home, config, raw)
+    branch = [*base, "--from-step", "15", "--preview-steps", "11", "--preview-name", "size-m"]
+    assert cli.main([*branch, "--max-steps", "20"]) == 0  # an attempt that ended at step 20
+    assert cli.main(branch) == 2  # the branch exists: only --resume continues it
+    moved = [*base, "--from-step", "15", "--preview-steps", "12", "--preview-name", "size-m", "--resume"]
+    assert cli.main(moved) == 2
+    assert "11" in capsys.readouterr().err
+    assert cli.main([*branch, "--resume"]) == 0
+    beat = json.loads((home / "runs" / "size-m" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert (beat["state"], beat["step"]) == ("finished", 26)
+
+
+def test_a_named_branch_resumes_after_its_parent_has_pruned_the_step_it_was_cut_from(home, raw, tmp_path):
+    """A branch cut from a --max-steps stop (not a check step, not a 12-hourly keep) loses that parent
+    checkpoint once the parent resumes and saves keep_last newer ones; a resume reads only the branch's
+    own checkpoints, so it must still continue (under supervise every restart is such a resume)."""
+    pruning = tmp_path / "pruning.toml"
+    pruning.write_text(
+        CONFIG.replace("ckpt_every_steps = 15", "ckpt_every_steps = 5\nkeep_last = 1"), encoding="utf-8"
+    )
+    base, _ = _main_run_at_step_15(home, pruning, raw)
+    branch = [*base, "--from-step", "15", "--preview-steps", "11", "--preview-name", "size-m"]
+    assert cli.main([*branch, "--max-steps", "20"]) == 0  # an attempt that ended at step 20
+    assert cli.main([*base, "--config", str(pruning), "--resume"]) == 0  # the parent moves on to 30
+    assert not (home / "runs" / "long" / "ckpt_000000015.pt").exists()
+    assert cli.main([*branch, "--resume"]) == 0
+    beat = json.loads((home / "runs" / "size-m" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert (beat["state"], beat["step"]) == ("finished", 26)
+
+
+@pytest.mark.parametrize(
+    ("run", "from_step", "length"),
+    [
+        ("long", "10", "16"),  # the same plan length (26) from another step of the parent
+        ("other", "15", "11"),  # the same step of another run
+    ],
+)
+def test_a_resumed_branch_refuses_a_branch_point_it_was_not_cut_from(
+    home, config, raw, capsys, run, from_step, length
+):
+    base, _ = _main_run_at_step_15(home, config, raw)
+    branch = [*base, "--from-step", "15", "--preview-steps", "11", "--preview-name", "size-m"]
+    assert cli.main([*branch, "--max-steps", "20"]) == 0
+    capsys.readouterr()
+    moved = [a if a != "long" else run for a in base]
+    moved += ["--from-step", from_step, "--preview-steps", length, "--preview-name", "size-m", "--resume"]
+    assert cli.main(moved) == 2
+    assert "branched from long step 15" in capsys.readouterr().err
+    assert [p.name for p in (home / "runs" / "size-m").glob("ckpt_*.pt")] == ["ckpt_000000020.pt"]
+
+
+def test_resuming_a_run_that_is_not_a_branch_as_a_branch_is_refused(home, config, raw, capsys):
+    base, _ = _main_run_at_step_15(home, config, raw)
+    plain = [a if a != "long" else "plain" for a in base]
+    assert cli.main([*plain, "--config", str(config), "--max-steps", "20"]) == 0
+    capsys.readouterr()
+    as_branch = [*base, "--from-step", "15", "--preview-steps", "15", "--preview-name", "plain", "--resume"]
+    assert cli.main(as_branch) == 2
+    assert "plain is not a branch" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--preview-steps", "11"],  # no --from-step
+        ["--from-step", "15"],  # a branch needs a length
+        ["--from-step", "15", "--preview-steps", "11", "--preview-cooldown", "2s"],  # two lengths
+        ["--from-step", "15", "--preview-steps", "0"],
+        ["--preview-name", "size-m"],  # not a branch
+        ["--from-step", "15", "--preview-steps", "11", "--preview-name", "../escape"],
+        ["--from-step", "15", "--preview-steps", "11", "--preview-name", "long"],  # the parent itself
+    ],
+)
+def test_branch_flags_that_do_not_make_one_branch_are_refused(home, config, raw, flags):
+    base = ["train", "--run", "long", "--source-raw", str(raw), "--device", "cpu", "--config", str(config)]
+    assert cli.main([*base, *flags]) == 2
+
+
+def test_a_named_branch_runs_under_supervise_and_resumes_into_its_own_run(home, config, raw):
+    """A branch gets crash-resume like any run: the supervisor watches runs/size-m and its restart
+    command resumes there (an attempt already left a checkpoint at step 20)."""
+    from blink.train import supervise
+
+    base, before = _main_run_at_step_15(home, config, raw)
+    branch = [*base, "--from-step", "15", "--preview-steps", "11", "--preview-name", "size-m"]
+    assert cli.main([*branch, "--max-steps", "20"]) == 0
+    fast = ["--interval", "0.5", "--backoff", "0", "--stale", "120"]
+    assert cli.main(["supervise", *fast, "--", *branch, "--resume"]) == supervise.EXIT_FINISHED
+    record = supervise.read_record(home / "runs" / "size-m")
+    assert record["state"] == "finished" and "--resume" in record["command"]
+    assert supervise.read_record(home / "runs" / "long") is None
+    beat = json.loads((home / "runs" / "size-m" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert (beat["state"], beat["step"]) == ("finished", 26)
+
+
 def test_a_shard_directory_without_a_manifest_is_refused(home, config, tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
