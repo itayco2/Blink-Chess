@@ -444,7 +444,7 @@ def puzzle_home(tmp_path, monkeypatch, epsilon=1 / 256):
     (tmp_path / "results").mkdir()
     (tmp_path / "results" / "epsilon.json").write_text(json.dumps({"epsilon": epsilon}), encoding="utf-8")
     monkeypatch.setattr(
-        factory, "load_evaluator", lambda selector, device="cuda", seed=0: RandomLogitEvaluator()
+        factory, "load_evaluator", lambda selector, device="cuda", seed=0, **mode: RandomLogitEvaluator()
     )
 
 

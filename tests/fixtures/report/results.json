@@ -79,8 +79,10 @@
   "schema_version": 1,
   "shipped": {
     "agent": "Blink-M",
+    "compile": false,
     "epsilon": null,
     "mode": "value",
+    "precision": "fp32",
     "sha": "0123abcd"
   },
   "strength": [

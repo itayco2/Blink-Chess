@@ -19,6 +19,13 @@ and blink-uci's own default is 0. Generation copies it into engine_options.epsil
 check-config compares it with the epsilon results.json records for the shipped model (or, for a
 results.json written before that field existed, the epsilon.json beside it).
 
+The rated bot plays the fast play mode (blink.play.fastmode: --precision bf16, --compile) the shipped
+model was rated in, the same way: generation copies results.json's shipped precision and compile
+(--results-dir) into engine_options and the stamp, and check-config compares the engine's mode with the
+stamp's and with the one results.json records. The default mode, fp32 uncompiled, adds no key at all
+(a results.json written before those fields existed was rated in it), so a default config is unchanged.
+Any config whose engine asks for a mode blink-uci would refuse (bf16 off CUDA) is a problem too.
+
 `problems()` is the one check behind check-config, the generator and the tests: every lookup off
 (config_check); where the token and the engine go (lichess-bot sends the token to `url` and runs
 `interpreter interpreter_options dir/name` in working_dir with the token in its environment, so url,
@@ -26,8 +33,8 @@ engine.dir and working_dir are pinned, interpreter and matchmaking.overrides mus
 engine key outside the template's is allowed); abort_time 30, concurrency under challenge, only UCI
 options blink-uci declares, engine options blink-uci accepts, a decision log per engine process when
 games run at once (lichess-bot starts one blink-uci per game with the same flags), the plan's rated
-or casual settings, and (rated only) the shipped sha, mode and epsilon. The casual smoke runs the preview
-model during P7, so it is exempt from the ship check.
+or casual settings, and (rated only) the shipped sha, mode, epsilon and fast play mode. The casual smoke
+runs the preview model during P7, so it is exempt from the ship check.
 
 `check_file()` is the gate before the bot starts, so it fails closed: what it cannot verify is a
 problem, not a note. The engine exe must exist, and for the rated config the weights file must be
@@ -46,6 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from blink.lichess import config_check
+from blink.play import fastmode
 from blink.report.results_schema import Shipped
 from blink.train.atomic import write_text_atomic
 
@@ -62,7 +70,9 @@ SHA = re.compile(r"^[0-9a-f]{7,64}$")  # --sha may be a prefix of the weights fi
 FULL_SHA = re.compile(r"^[0-9a-f]{64}$")  # a rated config records all of it
 TOKEN = re.compile(r"(lip|lio)_[A-Za-z0-9]{16,}")
 EPSILON_FILE = "epsilon.json"  # E2b's choice, written next to results.json
+RESULTS_FILE = "results.json"  # its shipped record names the fast play mode the rated games used
 DEFAULT_RESULTS_DIR = Path("results")
+DEFAULT_PLAY_MODE = (fastmode.DEFAULT_PRECISION, False)
 
 LICHESS_URL = "https://lichess.org/"
 # The rated engine runs from a non-editable install of the shipped tag (RUNBOOK section 7), so work in
@@ -281,9 +291,20 @@ def _uci_option_problems(config: Mapping, declared: frozenset[str]) -> list[str]
     ]
 
 
-def _engine_flag_problems(config: Mapping) -> list[str]:
+def _engine_flags(options: Mapping) -> tuple[object | None, str]:
+    """engine_options parsed as blink-uci parses what lichess-bot passes (--key=value, or --key for a
+    null): (the namespace, "") or (None, the parser's complaint)."""
     from blink import uci
 
+    flags = [f"--{key}={value}" if value is not None else f"--{key}" for key, value in options.items()]
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        try:
+            return uci.build_parser().parse_args(flags), ""
+        except SystemExit:
+            return None, err.getvalue().strip()
+
+
+def _engine_flag_problems(config: Mapping) -> list[str]:
     present, raw = _lookup(config, ("engine", "engine_options"))
     if present and not isinstance(raw, Mapping):
         return ["engine.engine_options must be a mapping of blink-uci flags"]
@@ -295,12 +316,12 @@ def _engine_flag_problems(config: Mapping) -> list[str]:
     ]
     if "random" in options:
         found.append("engine.engine_options.random plays a random network")
-    flags = [f"--{key}={value}" if value is not None else f"--{key}" for key, value in options.items()]
-    with contextlib.redirect_stderr(io.StringIO()) as err:
-        try:
-            uci.build_parser().parse_args(flags)
-        except SystemExit:
-            found.append(f"engine.engine_options do not parse as blink-uci flags: {err.getvalue().strip()}")
+    parsed, complaint = _engine_flags(options)
+    if parsed is None:
+        return [*found, f"engine.engine_options do not parse as blink-uci flags: {complaint}"]
+    refusal = fastmode.refusal(parsed.precision, parsed.compile, parsed.device)
+    if refusal:
+        found.append(f"engine.engine_options ask for a play mode blink-uci refuses at startup: {refusal}")
     return found
 
 
@@ -344,6 +365,34 @@ def _epsilon_problems(config: Mapping, expected: float | None) -> list[str]:
         found.append(f"blink.epsilon {stamp.get('epsilon')!r} is not the engine's epsilon {epsilon!r}")
     if expected is not None and float(epsilon) != float(expected):
         found.append(f"the engine plays epsilon {epsilon!r} but the shipped model was rated at {expected!r}")
+    return found
+
+
+def engine_play_mode(config: Mapping) -> tuple[str, bool] | None:
+    """(precision, compile) the engine plays, engine_options read as blink-uci reads them (no key: fp32
+    uncompiled); None when they do not parse, which _engine_flag_problems reports."""
+    parsed, _ = _engine_flags(_section(config, "engine", "engine_options"))
+    return None if parsed is None else (parsed.precision, parsed.compile)
+
+
+def _fast_problems(config: Mapping, shipped: Shipped | None) -> list[str]:
+    """A rated engine plays the fast play mode its stamp records, the one the shipped model was rated in."""
+    engine = engine_play_mode(config)
+    if engine is None:
+        return []
+    stamp = _section(config, PROVENANCE)
+    recorded = (stamp.get("precision", fastmode.DEFAULT_PRECISION), stamp.get("compile", False))
+    found = []
+    if recorded != engine:
+        found.append(
+            f"blink.precision and blink.compile {recorded} are not the engine's {engine} "
+            "(engine_options.precision, engine_options.compile)"
+        )
+    if shipped is not None and engine != (shipped.precision, shipped.compile):
+        found.append(
+            f"the engine plays {fastmode.describe(*engine)} but the shipped model was rated in "
+            f"{fastmode.describe(shipped.precision, shipped.compile)}: every rated game was played in it"
+        )
     return found
 
 
@@ -395,6 +444,7 @@ def problems(
     if kind == "rated":
         found += _ship_problems(config, shipped, weights_sha)
         found += _epsilon_problems(config, epsilon)
+        found += _fast_problems(config, shipped)
     return found
 
 
@@ -449,21 +499,53 @@ def chosen_epsilon(results_dir: Path) -> float | None:
     return float(json.loads(path.read_text(encoding="utf-8"))["epsilon"])
 
 
+def chosen_play_mode(results_dir: Path) -> tuple[str, bool]:
+    """The fast play mode results_dir/results.json's shipped model was rated in; fp32 uncompiled when
+    there is no results.json or no shipped model yet (check-config then has the last word)."""
+    path = Path(results_dir) / RESULTS_FILE
+    if not path.is_file():
+        return DEFAULT_PLAY_MODE
+    from blink.report.results_schema import from_json
+
+    try:
+        shipped = from_json(path.read_text(encoding="utf-8")).shipped
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ConfigError(f"{path} cannot be read for the shipped play mode: {exc}") from exc
+    return DEFAULT_PLAY_MODE if shipped is None else (shipped.precision, shipped.compile)
+
+
+def fast_options(precision: str, compile: bool) -> dict:
+    """The engine_options (and stamp) keys of a fast play mode: none for the default, so a default
+    config is byte for byte what it was."""
+    return {
+        **({"precision": precision} if precision != fastmode.DEFAULT_PRECISION else {}),
+        **({"compile": True} if compile else {}),
+    }
+
+
 def render(
-    template: Mapping, kind: str, model: str, mode: str, sha: str | None, epsilon: float | None = None
+    template: Mapping,
+    kind: str,
+    model: str,
+    mode: str,
+    sha: str | None,
+    epsilon: float | None = None,
+    play_mode: tuple[str, bool] = DEFAULT_PLAY_MODE,
 ) -> dict:
     """A new config: the template with the engine pointed at `model` in `mode`, and its provenance.
 
-    The rated config pins the weights (sha) and, in value mode, plays with E2b's epsilon."""
+    The rated config pins the weights (sha), in value mode plays with E2b's epsilon, and plays the fast
+    play mode the shipped model was rated in (`play_mode`: precision, compile)."""
     config = copy.deepcopy(dict(template))
     engine = dict(config.get("engine") or {})
     rated = kind == "rated"
     pin = {"sha": sha} if rated else {}  # blink-uci --sha: each engine checks its weights
     tie = {"epsilon": epsilon} if rated and mode == "value" and epsilon is not None else {}
-    options = {**(engine.get("engine_options") or {}), "model": model, "mode": mode, **pin, **tie}
+    fast = fast_options(*play_mode) if rated else {}
+    options = {**(engine.get("engine_options") or {}), "model": model, "mode": mode, **pin, **tie, **fast}
     engine["engine_options"] = options
     stamp = {"kind": kind, "model": model, "mode": mode, "template": TEMPLATES[kind], "note": NOTE}
-    return {**config, "engine": engine, PROVENANCE: {**stamp, "sha": sha, **tie} if rated else stamp}
+    return {**config, "engine": engine, PROVENANCE: {**stamp, "sha": sha, **tie, **fast} if rated else stamp}
 
 
 def _render_all(
@@ -475,7 +557,8 @@ def _render_all(
         if kind == "rated":
             sha = shipped_sha(spec.model, spec.sha, resolve)
             epsilon = chosen_epsilon(results_dir) if spec.mode == "value" else None
-            configs[kind] = render(template, kind, spec.model, spec.mode, sha, epsilon)
+            play_mode = chosen_play_mode(results_dir)
+            configs[kind] = render(template, kind, spec.model, spec.mode, sha, epsilon, play_mode)
         else:
             configs[kind] = render(template, kind, spec.casual_model or spec.model, spec.mode, None)
     return configs
@@ -491,7 +574,8 @@ def generate(
 ) -> dict[str, Path]:
     """Write config.yml and/or config.casual.yml into `out_dir`; nothing is written unless all pass.
 
-    A rated value-mode config takes its epsilon from results_dir/epsilon.json (E2b's choice)."""
+    A rated value-mode config takes its epsilon from results_dir/epsilon.json (E2b's choice), and a rated
+    config its fast play mode from results_dir/results.json's shipped record."""
     kinds = tuple(kinds)
     if spec.mode not in MODES:
         raise ConfigError(f"--mode must be one of {MODES}, got {spec.mode!r}")

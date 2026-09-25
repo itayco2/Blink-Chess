@@ -133,16 +133,20 @@ def fastchess_player(ctx, selector: str, mode: str, subdir: str, anchor_tc: str 
 
     Blink gets E2b's epsilon (results/epsilon.json) on its command line: the same value the in-process
     blocks read, so every game filed under one Blink name is played by one configuration. It also gets
-    --sha, the weights file's sha256 when the player was built, so a replaced file stops the match.
+    --sha, the weights file's sha256 when the player was built, so a replaced file stops the match, and
+    the run's fast play mode (--precision, --compile), whose tag its name carries as the in-process
+    blocks' names do. DM-9M has no fast mode.
     The locator's dev-slice games go to <subdir>-locator, so <subdir> holds final-slice games only."""
     from blink.eval import fastchess, match
     from blink.eval.orchestrate import weights_sha
+    from blink.reference import registry
 
     epsilon = match.read_epsilon(ctx.results_dir)
     sha = weights_sha(selector)  # every engine start refuses other weights (None: nothing to pin)
+    fast = {} if registry.is_dm(selector) else ctx.play_mode
 
     def play(anchor: Anchor, games: int, book: str, skip: int) -> Report:
-        first = fastchess.blink_engine(selector, mode, ctx.device, epsilon=epsilon, sha=sha)
+        first = fastchess.blink_engine(selector, mode, ctx.device, epsilon=epsilon, sha=sha, **fast)
         second = fastchess.stockfish_anchor(anchor.rating, fastchess.stockfish_exe())
         if anchor_tc:
             second = fastchess.with_tc(second, anchor_tc)
@@ -166,7 +170,7 @@ def e5_block(ctx, state: dict) -> dict:
     from blink.play.factory import MODES
 
     for mode in MODES:
-        fastchess.check_distinct_names([ctx.model, *ctx.side_models], mode)
+        fastchess.check_distinct_names([ctx.model, *ctx.side_models], mode, **ctx.play_mode)
     tc = anchor_control(ctx, state)
     modes, side_models = ((shipped_mode(ctx, state),), ()) if tc else (MODES, ctx.side_models)
     grid = rating.read_anchors()
@@ -209,7 +213,8 @@ def e7_block(ctx, state: dict) -> dict:
     from blink.reference import registry
 
     dm = "dm:9M"
-    blink = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)[shipped_mode(ctx, state)]
+    agents = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir, **ctx.play_mode)
+    blink = agents[shipped_mode(ctx, state)]
     deepmind = registry.load_agent(dm, device=ctx.device)
 
     def play_blink(games: int) -> Report:

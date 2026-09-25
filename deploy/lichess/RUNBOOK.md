@@ -135,6 +135,15 @@ because every rated game behind the published Elo was played with it and blink-u
 It refuses a value-mode rated config when that file is missing, and `check-config` compares the
 epsilon with the one results.json records for the shipped model.
 
+The rated config plays the fast play mode the shipped model was rated in, the same way. When the
+evaluation ran with `blink eval all --precision bf16 [--compile]`, every rated game was played in that
+mode (under a name ending `-bf16` or `-bf16-compile`), and results.json's shipped record says so
+(`shipped.precision`, `shipped.compile`). `blink lichess config` copies them into
+`engine_options.precision` and `engine_options.compile` (lichess-bot passes `--precision=bf16
+--compile=True` to blink-uci) and into the `blink:` stamp. The default mode, fp32 uncompiled, adds no
+key, so a default config is unchanged. `check-config` fails a rated engine whose mode differs from its
+stamp or from the shipped record, and any engine that asks for bf16 off CUDA (blink-uci would exit 2).
+
 The rated config also passes the sha to every engine (`engine_options.sha`, which lichess-bot hands
 to blink-uci as `--sha=<sha>`). Each blink-uci hashes its weights file before the UCI handshake and
 exits 2 on any other hash, so an overwritten `ship` file stops the bot at lichess-bot's startup

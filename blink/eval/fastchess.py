@@ -10,6 +10,11 @@ A dm:9M[:ema] selector runs the same UCI process under DeepMind's own name, DM-9
 --mode (it has one, action-value), and its moves are audited with the engine filter "dm" (PF60): under a
 Blink name its games would be filed as Blink's and the "blink" audit filter would see none of its moves.
 Stockfish at a fixed node count (the E4 node ladder) is `SF19-n<nodes>`, full strength.
+
+Blink plays fp32 uncompiled unless a fast mode is asked for (blink.play.fastmode): then the engine gets
+`--precision=bf16` and/or `--compile` after its other flags (epsilon, sha), and its name (and so its PGN)
+ends in the mode's tag (Blink-value-ship-bf16-compile), so games of different modes never share a name.
+Default engine names and commands are unchanged. DeepMind's port has no fast mode: one is refused.
 """
 
 import hashlib
@@ -25,6 +30,7 @@ from pathlib import Path
 import blink
 from blink import paths
 from blink.eval import books, nosearch
+from blink.play import fastmode
 from blink.play.factory import RANDOM_SELECTORS, ModelUnavailable
 from blink.reference import registry
 
@@ -102,18 +108,26 @@ def model_tag(model: str) -> str:
     return f"{tag[: NAME_TAG_MAX - NAME_HASH_CHARS - 1]}-{digest}"
 
 
-def engine_name(model: str, mode: str) -> str:
-    """The fastchess name of the engine under test: DM-9M[-ema] for a dm selector (PF60), else Blink's."""
+def engine_name(
+    model: str, mode: str, precision: str = fastmode.DEFAULT_PRECISION, compile: bool = False
+) -> str:
+    """The fastchess name of the engine under test: DM-9M[-ema] for a dm selector (PF60), else Blink's,
+    Blink-<mode>-<model tag>, ending in the fast mode's tag when it plays one (-bf16, -compile)."""
     if registry.is_dm(model):
         return dm_name(model)
-    return f"Blink-{mode}-{model_tag(model)}"
+    return f"Blink-{mode}-{model_tag(model)}{fastmode.tag(precision, compile)}"
 
 
-def check_distinct_names(selectors: Sequence[str], mode: str) -> None:
+def check_distinct_names(
+    selectors: Sequence[str],
+    mode: str,
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
+) -> None:
     """Refuse two different selectors that would play under one name: Ordo would merge their games."""
     seen: dict[str, str] = {}
     for selector in selectors:
-        name = engine_name(selector, mode)
+        name = engine_name(selector, mode, precision, compile)
         first = seen.setdefault(name, selector)
         if first != selector:
             raise ValueError(
@@ -127,22 +141,35 @@ def audit_engine(name: str) -> str:
 
 
 def blink_engine(
-    model: str, mode: str, device: str = "cuda", epsilon: float | None = None, sha: str | None = None
+    model: str,
+    mode: str,
+    device: str = "cuda",
+    epsilon: float | None = None,
+    sha: str | None = None,
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
 ) -> EngineSpec:
     """Blink (or DM-9M, for a dm selector) as `python -m blink.uci`, with this harness's interpreter.
 
     `epsilon` is Blink's R4 tie window (E2b's choice); without it blink-uci plays its default, 0.
-    `sha` pins Blink's weights: blink-uci exits before the handshake if its file hashes to anything else."""
-    if registry.is_dm(model):
+    `sha` pins Blink's weights: blink-uci exits before the handshake if its file hashes to anything else.
+    `precision` and `compile` are the fast play mode (blink.play.fastmode): its flags come last and its
+    tag ends the name; the default mode adds neither. A mode this device (or DM-9M) cannot play is a
+    ValueError here, before fastchess starts anything."""
+    deepmind = registry.is_dm(model)
+    refusal = fastmode.refusal(precision, compile, device, deepmind=deepmind)
+    if refusal:
+        raise ValueError(refusal)
+    if deepmind:
         args = ("-m", "blink.uci", f"--model={model}", f"--device={device}")
     else:
         selector = ("--random",) if model in RANDOM_SELECTORS else (f"--model={model}",)
         tie = () if epsilon is None else (f"--epsilon={float(epsilon)!r}",)
         pin = () if sha is None else (f"--sha={sha}",)
-        args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}", *tie, *pin)
-    return EngineSpec(
-        engine_name(model, mode), sys.executable, args, st=BLINK_ST, timemargin_ms=BLINK_MARGIN_MS
-    )
+        fast = fastmode.uci_args(precision, compile)
+        args = ("-m", "blink.uci", *selector, f"--mode={mode}", f"--device={device}", *tie, *pin, *fast)
+    name = engine_name(model, mode, precision, compile)
+    return EngineSpec(name, sys.executable, args, st=BLINK_ST, timemargin_ms=BLINK_MARGIN_MS)
 
 
 def stockfish_anchor(elo: int, exe: Path) -> EngineSpec:
@@ -277,11 +304,14 @@ def prepare_gauntlet(
     max_moves: int = MAX_MOVES,
     tc: str | None = None,
     epsilon: float | None = None,
+    precision: str = fastmode.DEFAULT_PRECISION,
+    compile: bool = False,
 ) -> Gauntlet:
     """Blink against one SF19 anchor: engines, book slice and a fresh timestamped PGN under out_dir.
 
-    `epsilon` is Blink's R4 tie window, as anchors.fastchess_player passes it for E5 (E2b's choice)."""
-    blink_spec = blink_engine(model, mode, device, epsilon=epsilon)
+    `epsilon` is Blink's R4 tie window, as anchors.fastchess_player passes it for E5 (E2b's choice), and
+    `precision`/`compile` its fast play mode (blink.play.fastmode), which its name carries."""
+    blink_spec = blink_engine(model, mode, device, epsilon=epsilon, precision=precision, compile=compile)
     anchor_spec = stockfish_anchor(anchor, stockfish_exe())
     if tc:
         blink_spec, anchor_spec = with_tc(blink_spec, tc), with_tc(anchor_spec, tc)

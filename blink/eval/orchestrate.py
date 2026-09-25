@@ -26,6 +26,13 @@ The weights are pinned the same way: the model's weights file is hashed once whe
 block report records that sha256, a block refuses to start if the file no longer hashes to it, and each
 fastchess engine starts blink-uci with --sha, so it refuses other weights. results.json names a shipped
 model only with that pinned sha, and only if the file still matches it at the end.
+
+Blink plays one fast play mode for the whole run (--precision, --compile; blink.play.fastmode), fp32
+uncompiled by default: in process (load_evaluator) and under fastchess (blink-uci gets the flags) alike.
+The mode's tag ends every Blink engine name (Blink-value-ship-bf16-compile), so games in two modes are
+never rated as one player; every block report records the mode, and results.json's shipped record says
+which one the rated games used (the Lichess bot must play it). The default mode adds nothing to a name.
+E1's film frames are static training snapshots and stay fp32.
 """
 
 import datetime
@@ -48,6 +55,7 @@ from blink.eval.publish import (
     public_audit,
     write_pgn_list,
 )
+from blink.play import fastmode
 
 BLOCK_ORDER = ("E0", "E1", "E2", "E2b", "E3", "E4", "E4b", "E5", "E6", "E7", "E8", "E9")
 FROZEN_TAG = "eval-v1-frozen"
@@ -130,6 +138,21 @@ class EvalContext:
     selfcheck_tc: str = SELFCHECK_TC  # E0: the slow side of SF's st=0.1 self-check
     sf_procs: int = 1  # Stockfish processes for SF19 labels (E2 regret, E9)
     allow_busy_cpu: bool = False  # smoke runs only: start time-based blocks on a busy machine
+    precision: str = fastmode.DEFAULT_PRECISION  # the fast play mode of every Blink player in the run
+    compile: bool = False
+
+    def __post_init__(self) -> None:
+        fastmode.check(self.precision, self.device)  # bf16 off CUDA is refused, never played as fp32
+
+    @property
+    def play_mode(self) -> dict:
+        """precision and compile, as blink_engine, blink_agents and engine_name take them."""
+        return {"precision": self.precision, "compile": self.compile}
+
+    @property
+    def mode_tag(self) -> str:
+        """'' for the default mode, else the tag that ends every Blink engine name of this run."""
+        return fastmode.tag(self.precision, self.compile)
 
     def n(self, default: int) -> int:
         """A match length: the override when set (rounded up to whole pairs), else the plan's number."""
@@ -422,6 +445,7 @@ def run_blocks(
             "cpu_pct_at_start": busy,
             "epsilon": epsilon,
             "weights_sha": pinned,
+            **ctx.play_mode,
         }
         state[block_id] = report
         if epsilon is not None:
@@ -584,8 +608,8 @@ def e2_block(ctx: EvalContext, state: dict) -> dict:
     from blink.eval.sflabel import SfLabeler
 
     epsilon = match.read_epsilon(ctx.results_dir)
-    agents = match.blink_agents(ctx.model, ctx.device, epsilon=epsilon)
-    label = fastchess.model_tag(ctx.model)
+    agents = match.blink_agents(ctx.model, ctx.device, epsilon=epsilon, **ctx.play_mode)
+    label = fastchess.model_tag(ctx.model) + ctx.mode_tag  # as `blink eval puzzles` labels its files
     inputs, limits = static_inputs(ctx, label, epsilon), static_limits(ctx)
     with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:
         e2 = static.run_e2(agents["policy"].evaluator, agents, inputs, limits, labeler)
@@ -646,7 +670,7 @@ def e3_block(ctx: EvalContext, state: dict) -> dict:
     """The pre-registered mode SPRT, in process with one model load, on the dev slice."""
     from blink.eval import books, match, sprt
 
-    agents = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)
+    agents = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir, **ctx.play_mode)
     config = sprt.SprtConfig(cap_games=ctx.n(sprt.MODE_SPRT.cap_games))
     pairs = config.cap_games // 2
     openings = books.openings_for("dev", 2 * pairs)

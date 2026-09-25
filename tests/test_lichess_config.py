@@ -623,3 +623,71 @@ def test_check_config_refuses_an_epsilon_other_than_the_one_the_shipped_model_wa
     assert any("unverified" in p for p in found), found  # no epsilon in results.json, none beside it
     (tmp_path / "epsilon.json").write_text(json.dumps({"epsilon": EPSILON}), encoding="utf-8")
     assert check(path, weights, results_file(tmp_path, unrecorded)).problems == ()
+
+
+# ---------------------------------------------------------------- the fast play mode, like the epsilon
+# Every rated game behind the published Elo was played in one fast play mode (precision, compile), and
+# results.json's shipped record names it. The rated bot plays that mode; fp32 uncompiled adds no key.
+
+FAST = {"precision": "bf16", "compile": True}
+
+
+def shipped_fast(**fields) -> results_schema.Shipped:
+    base = {"agent": "Blink-value-ship-bf16-compile", "mode": "value", "sha": SHA, "epsilon": EPSILON}
+    return results_schema.Shipped(**{**base, **FAST, **fields})
+
+
+def fast_results(tmp_path: Path) -> Path:
+    """A results folder where E2b chose EPSILON and the evaluation rated the model in bf16, compiled."""
+    folder = e2b_results(tmp_path)
+    results_file(folder, shipped_fast())
+    return folder
+
+
+def test_the_rated_bot_plays_the_fast_mode_the_shipped_model_was_rated_in(tmp_path):
+    configs = generate(tmp_path, results_dir=fast_results(tmp_path))
+    rated = configs["rated"]
+    options = rated["engine"]["engine_options"]
+    assert {key: options[key] for key in FAST} == FAST == {key: rated["blink"][key] for key in FAST}
+    args = uci.build_parser().parse_args(lichess_bot_flags(options))  # --precision=bf16 --compile=True
+    assert (args.precision, args.compile, args.epsilon, args.sha) == ("bf16", True, EPSILON, SHA)
+    assert botconfig.problems(rated, "rated", frozenset(), shipped=shipped_fast(), epsilon=EPSILON) == []
+    casual = configs["casual"]["engine"]["engine_options"]  # the CPU smoke plays fp32
+    assert not {"precision", "compile"} & set(casual)
+
+
+def test_a_default_rated_config_carries_no_fast_mode_key(tmp_path):
+    rated = generate(tmp_path)["rated"]  # no results.json: fp32 uncompiled, main's config unchanged
+    assert not {"precision", "compile"} & (set(rated["engine"]["engine_options"]) | set(rated["blink"]))
+    assert botconfig.engine_play_mode(rated) == ("fp32", False)
+
+
+def test_check_config_refuses_a_fast_mode_other_than_the_shipped_one(tmp_path):
+    path, weights = rated_file(tmp_path)  # generated fp32 uncompiled
+    found = check(path, weights, results_file(tmp_path, shipped_fast())).problems
+    assert any("plays fp32 but the shipped model was rated in bf16 compiled" in p for p in found), found
+    fp32 = shipped_fast(precision="fp32", compile=False)
+    assert check(path, weights, results_file(tmp_path, fp32)).problems == ()
+
+
+def test_an_engine_mode_its_stamp_does_not_record_is_named(tmp_path):
+    rated = copy.deepcopy(generate(tmp_path, results_dir=fast_results(tmp_path))["rated"])
+    rated["engine"]["engine_options"]["compile"] = "off"  # lichess-bot would pass --compile=off
+    found = botconfig.problems(rated, "rated", frozenset(), shipped=shipped_fast(), epsilon=EPSILON)
+    assert any(p.startswith("blink.precision and blink.compile") for p in found), found
+    assert any("plays bf16 but the shipped model was rated in bf16 compiled" in p for p in found), found
+
+
+def test_bf16_on_the_cpu_is_named_for_any_config(tmp_path):
+    casual = copy.deepcopy(generate(tmp_path)["casual"])
+    casual["engine"]["engine_options"]["precision"] = "bf16"
+    found = botconfig.problems(casual, "casual", frozenset())
+    assert any("refuses at startup" in p and "CUDA only" in p for p in found), found
+
+
+def test_the_cli_says_which_fast_mode_the_rated_config_plays(tmp_path, capsys):
+    weights = fake_weights(tmp_path)
+    argv = ["lichess", "config", "--only", "rated", "--model", str(weights), "--mode", "value", "--sha", SHA]
+    folder = fast_results(tmp_path)
+    assert cli.main([*argv, "--out-dir", str(tmp_path / "bot"), "--results-dir", str(folder)]) == 0
+    assert "bf16 compiled" in capsys.readouterr().out

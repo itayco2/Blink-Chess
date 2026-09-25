@@ -505,16 +505,26 @@ def read_epsilon(results_dir: Path = Path("results")) -> float:
 
 
 def blink_agents(
-    selector: str, device: str, epsilon: float | None = None, results_dir: Path = Path("results")
+    selector: str,
+    device: str,
+    epsilon: float | None = None,
+    results_dir: Path = Path("results"),
+    precision: str = "fp32",
+    compile: bool = False,
 ) -> dict[str, Agent]:
-    """Both modes of one model on one evaluator (one load, one CUDA context), named as fastchess does."""
+    """Both modes of one model on one evaluator (one load, one CUDA context), named as fastchess does:
+    in the fast play mode given (blink.play.fastmode; fp32 uncompiled by default), whose tag the names
+    carry, so an in-process game and a fastchess game of one configuration file under one name."""
     from blink.eval.fastchess import engine_name
     from blink.play import factory
 
-    evaluator = factory.load_evaluator(selector, device=device)
+    evaluator = factory.load_evaluator(selector, device=device, precision=precision, compile=compile)
     eps = read_epsilon(results_dir) if epsilon is None else epsilon
     return {
-        mode: replace(factory.make_agent(mode, evaluator, epsilon=eps), name=engine_name(selector, mode))
+        mode: replace(
+            factory.make_agent(mode, evaluator, epsilon=eps),
+            name=engine_name(selector, mode, precision, compile),
+        )
         for mode in factory.MODES
     }
 

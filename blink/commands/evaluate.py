@@ -14,7 +14,7 @@ from pathlib import Path
 
 from blink import paths
 from blink.eval import books, endgames, fastchess, match, nosearch, puzzles, rating, sflabel, signcheck, sprt
-from blink.play import factory, rules
+from blink.play import factory, fastmode, rules
 from blink.play.agents import Agent
 from blink.reference import registry
 
@@ -47,17 +47,29 @@ def _puzzle_agents(args: argparse.Namespace, epsilon: float) -> list[tuple[str, 
     """(mode, agent) pairs to score; a DeepMind selector has its one mode, action-value."""
     if registry.is_dm(args.model):
         return [(registry.MODE, registry.load_agent(args.model, device=args.device))]
-    evaluator = factory.load_evaluator(args.model, device=args.device)
+    evaluator = factory.load_evaluator(
+        args.model, device=args.device, precision=args.precision, compile=args.compile
+    )
     modes = factory.MODES if args.mode == "both" else (args.mode,)
     return [(mode, factory.make_agent(mode, evaluator, epsilon=epsilon)) for mode in modes]
 
 
+def _fast_refused(prefix: str, args: argparse.Namespace) -> bool:
+    """Print why the fast play mode asked for cannot play here (bf16 off CUDA, any mode for dm:)."""
+    refusal = fastmode.refusal(args.precision, args.compile, args.device, deepmind=registry.is_dm(args.model))
+    if refusal:
+        print(f"{prefix}: {refusal}", file=sys.stderr)
+    return refusal is not None
+
+
 def _cmd_puzzles(args: argparse.Namespace) -> int:
     source = puzzles.resolve_set(args.set)
-    if _missing(source, "puzzle set"):
+    if _missing(source, "puzzle set") or _fast_refused("blink eval puzzles", args):
         return 2
-    # The engine name's tag, so results.json finds these files (blink.eval.publish._blink_puzzles).
-    label = f"{_set_label(args.set)}_{fastchess.model_tag(args.model)}"
+    # The engine name's tag (model tag, then the fast mode's), so results.json finds these files
+    # (blink.eval.publish._blink_puzzles): a fast mode's scores are filed apart from fp32's.
+    tag = fastchess.model_tag(args.model) + fastmode.tag(args.precision, args.compile)
+    label = f"{_set_label(args.set)}_{tag}"
     out_dir = args.out or paths.home() / "eval" / "puzzles"
     # The published value-mode score is the shipped configuration's: E2b's epsilon unless told otherwise.
     epsilon = args.epsilon if args.epsilon is not None else match.read_epsilon(args.results_dir)
@@ -161,6 +173,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="value mode's R4 tie window (default: E2b's choice in <results-dir>/epsilon.json, 0 before E2b)",
     )
     pz.add_argument("--results-dir", type=Path, default=Path("results"), help="where E2b wrote epsilon.json")
+    fastmode.add_arguments(pz)
     pz.add_argument("--out", type=Path, default=None, help="folder (default BLINK_HOME/eval/puzzles)")
     pz.set_defaults(func=factory.friendly(_cmd_puzzles))
 
@@ -348,6 +361,8 @@ def _context(args: argparse.Namespace):
         selfcheck_tc=args.selfcheck_tc,
         sf_procs=args.sf_procs,
         allow_busy_cpu=args.allow_busy_cpu,
+        precision=args.precision,
+        compile=args.compile,
     )
 
 
@@ -378,6 +393,8 @@ def _run_guarded(prefix: str, action) -> int:
 def _cmd_block(args: argparse.Namespace) -> int:
     from blink.eval import orchestrate
 
+    if _fast_refused("blink eval block", args):
+        return 2
     ctx = _context(args)
     return _run_guarded(
         "blink eval block",
@@ -388,6 +405,8 @@ def _cmd_block(args: argparse.Namespace) -> int:
 def _cmd_all(args: argparse.Namespace) -> int:
     from blink.eval import orchestrate
 
+    if _fast_refused("blink eval all", args):
+        return 2
     ctx = _context(args)
     only = args.only.split(",") if args.only else None
     if args.dry_run:
@@ -408,13 +427,15 @@ def _cmd_all(args: argparse.Namespace) -> int:
 def _cmd_static(args: argparse.Namespace) -> int:
     from blink.eval import orchestrate, static
 
+    if _fast_refused("blink eval static", args):
+        return 2
     ctx = _context(args)
-    label = fastchess.model_tag(args.model)
+    label = fastchess.model_tag(args.model) + ctx.mode_tag
     limits = static.StaticLimits(
         args.roots, args.value_roots, args.val_roots, args.games10k, args.mateset, args.band_puzzles
     )
     epsilon = match.read_epsilon(args.results)
-    agents = match.blink_agents(args.model, args.device, epsilon=epsilon)
+    agents = match.blink_agents(args.model, args.device, epsilon=epsilon, **ctx.play_mode)
     inputs = orchestrate.static_inputs(ctx, label, epsilon)
     started = time.perf_counter()
     with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=args.sf_procs) as labeler:
@@ -431,6 +452,7 @@ def _cmd_static(args: argparse.Namespace) -> int:
             "e2": e2,
             "diagnostics": [r.__dict__ for r in rows],
             "value_epsilon": epsilon,
+            **ctx.play_mode,
         },
     )
     for row in rows:
@@ -463,6 +485,7 @@ def _add_block_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--allow-busy-cpu", action="store_true", help="smoke runs only: time-based blocks on a busy machine"
     )
+    fastmode.add_arguments(parser)  # every Blink player of the run plays this mode; its tag ends the names
 
 
 def _register_p8(ev_sub: argparse._SubParsersAction, subparsers: argparse._SubParsersAction) -> None:

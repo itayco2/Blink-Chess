@@ -133,6 +133,10 @@ class Shipped:
     mode: str
     sha: str
     epsilon: float | None = None  # value mode: the R4 tie window every rated game was played with (E2b)
+    # The fast play mode every rated game was played in (blink.play.fastmode); a results.json written
+    # before these fields existed was rated fp32 uncompiled, the only mode there was.
+    precision: str = "fp32"
+    compile: bool = False
 
 
 @dataclass(frozen=True)

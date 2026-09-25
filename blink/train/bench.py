@@ -6,7 +6,9 @@
 - loader: ShardLoader samples/s and read MB/s over the shards, one sequential pass after another.
 - play: value-mode latency (p50, p99) of one evaluate() call at a given row count (1, or L+1 up to
   219), with 1, 2 or 5 processes calling at once, as fastchess (5) and the bot (2) do. Each process
-  holds its own CUDA context, exactly like separate engine processes.
+  holds its own CUDA context, exactly like separate engine processes. A row also records the play
+  mode it was timed in (precision fp32|bf16, compile; blink.play.fastmode), which is part of its key,
+  so fp32 and fast rows of one size sit side by side. Rows written before the mode existed are fp32.
 
 Every section is merged into one JSON file by its key, so commands can run one at a time. Model
 sizes are configs/<size>.toml (area P4 writes s, m, m12 and l) or any TOML path.
@@ -17,7 +19,7 @@ import json
 import multiprocessing
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ import numpy as np
 
 from blink.board import encode, moves
 from blink.data.record import NO_MOVE, ROOT_DTYPE
+from blink.play import fastmode
 from blink.train.atomic import write_text_atomic
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +37,12 @@ COMPILE_MODES = ("off", "inductor", "cudagraphs")
 EFFECTIVE_BATCH = 1024
 MIN_MICRO = 256  # a size is only eligible at micro-batch >= 256 (plan P6)
 GIB = 2**30
-KEYS = {"throughput": ("size", "micro", "compile"), "play": ("size", "rows", "concurrency")}
+KEYS = {
+    "throughput": ("size", "micro", "compile"),
+    "play": ("size", "rows", "concurrency", "precision", "compile"),
+}
+# a play row without these fields was timed before they existed: fp32, uncompiled
+KEY_DEFAULTS = {"play": {"precision": fastmode.DEFAULT_PRECISION, "compile": False}}
 WORKER_TIMEOUT_S = 900
 ABORT = -1.0  # the shared start time's value when a worker failed before the start
 START_DELAY_S = 0.5  # the start time is this far after the last worker reports warm
@@ -281,19 +289,39 @@ class PlaySpec:
     rows: int
     concurrency: int = 1
     iters: int = 200
-    warmup: int = 20
+    warmup: int = 20  # after play's own warm-up (compile and tuning) when compile is on
     device: str = "cuda"
+    precision: str = fastmode.DEFAULT_PRECISION
+    compile: bool = False
+
+    def __post_init__(self) -> None:
+        fastmode.check(self.precision, self.device)
+
+    @property
+    def mode(self) -> tuple[str, bool]:
+        return self.precision, self.compile
 
 
-def _latencies(config: str, rows: int, iters: int, warmup: int, device: str, start=None) -> list[float]:
+def play_mode(row: Mapping[str, Any]) -> tuple[str, bool]:
+    """(precision, compile) a play row was timed in; a row from before the fields existed is fp32."""
+    defaults = KEY_DEFAULTS["play"]
+    return row.get("precision", defaults["precision"]), bool(row.get("compile", defaults["compile"]))
+
+
+def _latencies(
+    config: str, rows: int, iters: int, warmup: int, device: str, mode: tuple[str, bool], start=None
+) -> list[float]:
     import torch
 
     from blink.model.config import load_config
-    from blink.model.evaluator import TorchEvaluator
+    from blink.model.evaluator import play_evaluator
     from blink.model.transformer import BlinkNet
 
     torch.manual_seed(0)
-    evaluator = TorchEvaluator(BlinkNet(load_config(config).model), device)
+    precision, compile = mode
+    model = BlinkNet(load_config(config).model)
+    # built and warmed exactly as load_evaluator builds it: a compiled trunk is tuned at play's rows
+    evaluator = play_evaluator(model, device, precision=precision, compile=compile)
     codes = random_codes(rows, seed=rows)
     for _ in range(warmup):
         evaluator.evaluate(codes)
@@ -321,13 +349,15 @@ def _wait_for_start(start_at, timeout_s: float = WORKER_TIMEOUT_S) -> None:
         time.sleep(START_POLL_S)
 
 
-def _play_worker(config: str, rows: int, iters: int, warmup: int, device: str, start_at, messages) -> None:
+def _play_worker(
+    config: str, rows: int, iters: int, warmup: int, device: str, mode: tuple[str, bool], start_at, messages
+) -> None:
     def start() -> None:
         messages.put(("ready", os.getpid()))
         _wait_for_start(start_at)
 
     try:
-        messages.put(("ok", _latencies(config, rows, iters, warmup, device, start)))
+        messages.put(("ok", _latencies(config, rows, iters, warmup, device, mode, start)))
     except BaseException as exc:  # noqa: BLE001 - reported to the parent, which raises it
         messages.put(("error", f"{type(exc).__name__}: {exc}"))
 
@@ -356,7 +386,7 @@ def _concurrent_latencies(spec: PlaySpec) -> list[float]:
     """
     ctx = multiprocessing.get_context("spawn")
     messages, start_at = ctx.Queue(), ctx.Value("d", 0.0, lock=False)
-    args = (str(spec.config), spec.rows, spec.iters, spec.warmup, spec.device, start_at, messages)
+    args = (str(spec.config), spec.rows, spec.iters, spec.warmup, spec.device, spec.mode, start_at, messages)
     workers = [ctx.Process(target=_play_worker, args=args, daemon=True) for _ in range(spec.concurrency)]
     for worker in workers:
         worker.start()
@@ -373,17 +403,25 @@ def _concurrent_latencies(spec: PlaySpec) -> list[float]:
     return [latency for _, latencies in replies for latency in latencies]
 
 
+def _play_key(spec: PlaySpec) -> dict[str, Any]:
+    return {
+        "size": spec.size,
+        "rows": spec.rows,
+        "concurrency": spec.concurrency,
+        "precision": spec.precision,
+        "compile": spec.compile,
+    }
+
+
 def measure_play(spec: PlaySpec) -> dict[str, Any]:
     if spec.concurrency == 1:
-        latencies = _latencies(str(spec.config), spec.rows, spec.iters, spec.warmup, spec.device)
+        latencies = _latencies(str(spec.config), spec.rows, spec.iters, spec.warmup, spec.device, spec.mode)
     else:
         latencies = _concurrent_latencies(spec)
     ms = np.asarray(latencies) * 1000.0
     return {
-        "size": spec.size,
+        **_play_key(spec),
         "config": str(spec.config),
-        "rows": spec.rows,
-        "concurrency": spec.concurrency,
         "device": spec.device,
         "latencies": len(ms),
         "p50_ms": float(np.percentile(ms, 50)),
@@ -399,15 +437,11 @@ def run_play(specs: Sequence[PlaySpec], log: Log = print) -> list[dict[str, Any]
         try:
             row = measure_play(spec)
         except Exception as exc:  # noqa: BLE001 - recorded in its row; the sweep goes on
-            row = {
-                "size": spec.size,
-                "rows": spec.rows,
-                "concurrency": spec.concurrency,
-                "error": f"{type(exc).__name__}: {exc}"[:300],
-            }
+            row = {**_play_key(spec), "error": f"{type(exc).__name__}: {exc}"[:300]}
         rows.append(row)
         summary = row.get("error") or f"p50 {row['p50_ms']:.2f} ms, p99 {row['p99_ms']:.2f} ms"
-        log(f"{spec.size} value mode, {spec.rows} rows, concurrency {spec.concurrency}: {summary}")
+        mode = fastmode.describe(*spec.mode)
+        log(f"{spec.size} value mode, {spec.rows} rows, concurrency {spec.concurrency}, {mode}: {summary}")
     return rows
 
 
@@ -431,9 +465,14 @@ def machine_facts(device: str = "cuda") -> dict[str, Any]:
     return facts
 
 
-def _merge_rows(old: list[dict], new: list[dict], key: tuple[str, ...]) -> list[dict]:
-    fresh = {tuple(row.get(k) for k in key) for row in new}
-    return [row for row in old if tuple(row.get(k) for k in key) not in fresh] + list(new)
+def _row_key(row: Mapping[str, Any], section: str) -> tuple:
+    defaults = KEY_DEFAULTS.get(section, {})
+    return tuple(row.get(k, defaults.get(k)) for k in KEYS[section])
+
+
+def _merge_rows(old: list[dict], new: list[dict], section: str) -> list[dict]:
+    fresh = {_row_key(row, section) for row in new}
+    return [row for row in old if _row_key(row, section) not in fresh] + list(new)
 
 
 def update_bench(path: Path, section: str, value: Any, machine: dict[str, Any] | None = None) -> dict:
@@ -444,7 +483,7 @@ def update_bench(path: Path, section: str, value: Any, machine: dict[str, Any] |
     except FileNotFoundError:
         data = {}
     if section in KEYS:
-        merged = _merge_rows(data.get(section, []), list(value), KEYS[section])
+        merged = _merge_rows(data.get(section, []), list(value), section)
     else:
         merged = {**data.get(section, {}), **value}
     updated = {**data, section: merged, **({"machine": machine} if machine else {})}

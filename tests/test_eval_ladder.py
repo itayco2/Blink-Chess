@@ -137,7 +137,7 @@ def captured_anchor_play(tmp_path, monkeypatch, epsilon=None):
     import json
     from types import SimpleNamespace
 
-    from blink.eval import fastchess
+    from blink.eval import fastchess, orchestrate
 
     results = tmp_path / "results"
     results.mkdir(exist_ok=True)
@@ -154,7 +154,9 @@ def captured_anchor_play(tmp_path, monkeypatch, epsilon=None):
     monkeypatch.setattr(
         fastchess, "match_report", lambda r: {"games": 2, "score": 0.5, "pgn": r.pgn, "penta": None}
     )
-    ctx = SimpleNamespace(device="cpu", out_dir=tmp_path / "out", concurrency=1, results_dir=results)
+    ctx = orchestrate.EvalContext(
+        model="ship", device="cpu", out_dir=tmp_path / "out", concurrency=1, results_dir=results
+    )
     return ctx, seen
 
 

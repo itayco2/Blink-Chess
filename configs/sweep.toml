@@ -17,4 +17,6 @@ default = "m"
 p99_ms_max = 100.0
 p99_rows = 219
 p99_concurrency = [5, 2]      # fastchess plays 5 at once, the bot 2
+p99_precision = "fp32"        # the play mode p99 is judged in: fp32 | bf16 (bench play --precision)
+p99_compile = false           # true: only bench play rows timed with --compile
 sigma_factor = 2.0

@@ -259,15 +259,14 @@ def _games_in(path) -> int:
 
 def _rerun_context(tmp_path, monkeypatch):
     import contextlib
-    from types import SimpleNamespace
 
-    from blink.eval import match
+    from blink.eval import match, orchestrate
 
     blink = agents.ValueAgent(MaterialEvaluator(), name="Blink-value-x")
     monkeypatch.setattr(conversion, "_endgame_set", lambda ctx, name, count: [endgame(MATE_IN_ONE_WHITE)])
     monkeypatch.setattr(match, "blink_agents", lambda *a, **k: {"value": blink, "policy": blink})
     monkeypatch.setattr(conversion, "_stockfish", lambda: contextlib.nullcontext(agents.RandomAgent()))
-    return SimpleNamespace(
+    return orchestrate.EvalContext(
         model="x", device="cpu", out_dir=tmp_path / "out", results_dir=tmp_path, positions=None, mode="value"
     )
 

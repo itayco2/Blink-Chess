@@ -86,15 +86,13 @@ def test_two_selectors_that_would_play_under_one_name_are_refused():
         fastchess.check_distinct_names(["run:a b", "run_a_b"], "policy")
 
 
-def test_e5_refuses_side_models_that_collide_before_any_game(monkeypatch):
-    from types import SimpleNamespace
-
-    from blink.eval import anchors
+def test_e5_refuses_side_models_that_collide_before_any_game(monkeypatch, tmp_path):
+    from blink.eval import anchors, orchestrate
 
     def no_games(*args, **kwargs):
         raise AssertionError("no game may start")
 
     monkeypatch.setattr(anchors, "run_anchor_block", no_games)
-    ctx = SimpleNamespace(model="run:a b", side_models=("run_a_b",))
+    ctx = orchestrate.EvalContext(model="run:a b", side_models=("run_a_b",), out_dir=tmp_path)
     with pytest.raises(ValueError, match="both play as"):
         anchors.e5_block(ctx, {})

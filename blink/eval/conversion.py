@@ -258,8 +258,9 @@ def e2b_block(ctx, state: dict) -> dict:
     from blink.play.agents import ValueAgent
 
     dev = _endgame_set(ctx, "dev", endgames.DEV_COUNT)
-    evaluator = match.blink_agents(ctx.model, ctx.device, epsilon=0.0)["value"].evaluator
-    agent = {eps: ValueAgent(evaluator, epsilon=eps, name=f"Blink-value-eps{eps:.6f}") for eps in EPSILONS}
+    evaluator = match.blink_agents(ctx.model, ctx.device, epsilon=0.0, **ctx.play_mode)["value"].evaluator
+    names = {eps: f"Blink-value-eps{eps:.6f}{ctx.mode_tag}" for eps in EPSILONS}
+    agent = {eps: ValueAgent(evaluator, epsilon=eps, name=names[eps]) for eps in EPSILONS}
     pgns: list[str] = []
 
     def convert(eps: float) -> ConversionResult:
@@ -289,7 +290,7 @@ def e8_block(ctx, state: dict) -> dict:
 
     final = _endgame_set(ctx, "final", endgames.WANT - endgames.DEV_COUNT)
     mode = shipped_mode(ctx, state)
-    rules_on = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir)[mode]
+    rules_on = match.blink_agents(ctx.model, ctx.device, results_dir=ctx.results_dir, **ctx.play_mode)[mode]
     rules_off = RulesOffAgent(rules_on.evaluator, mode, name=f"{rules_on.name}-rules-off")
     out, pgns = {}, []
     for label, agent in (("rules_on", rules_on), ("rules_off", rules_off)):

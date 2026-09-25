@@ -2,7 +2,8 @@
 
 results.json goes through blink.report.results_schema: Ordo over the final-slice PGNs for the Elo column,
 E2 and E6's rungs for the diagnostics, E0 and `blink eval puzzles` for DeepMind's puzzles, and the
-shipped model with the sha pinned when the run started and the epsilon its rated games used. Every Blink
+shipped model with the sha pinned when the run started, and the epsilon and fast play mode (precision,
+compile) its rated games used: the Lichess bot's check-config holds the bot to both. Every Blink
 row also carries what it cost: parameters, positions seen, distinct training positions and GPU-hours
 from its training run (runs/<name>/config.json, metrics.jsonl and the pack manifest; `ship` reads the
 flagship named by --film-run), and rows and milliseconds per move from its own public moves.
@@ -161,13 +162,13 @@ def model_facts(selector: str, ctx: EvalContext) -> dict:
 
 def blink_selectors(ctx: EvalContext) -> dict[str, str]:
     """Each Blink engine name the run can rate, mapped to its selector: the model under test, E5's side
-    models and E6's Blink rung, in both modes."""
+    models and E6's Blink rung, in both modes, named in the run's fast play mode as they played."""
     from blink.eval.fastchess import engine_name
     from blink.eval.ladder import LADDER_PLAYERS
     from blink.play.factory import MODES
 
     selectors = [ctx.model, *ctx.side_models, *(p for p in LADDER_PLAYERS if p.startswith("run:"))]
-    return {engine_name(s, mode): s for s in selectors for mode in MODES}
+    return {engine_name(s, mode, **ctx.play_mode): s for s in selectors for mode in MODES}
 
 
 def row_costs(ctx: EvalContext, agents: Iterable[str], audits: Mapping[str, dict], notes) -> dict[str, dict]:
@@ -261,8 +262,9 @@ def run_epsilon(state: dict, ctx: EvalContext) -> float | None:
 def shipped_record(
     state: dict, ctx: EvalContext, name: str, mode: str, epsilon: float | None, notes: list[str] | None
 ):
-    """The shipped model, with the sha pinned when the run started; None (and a note) when the weights
-    could not be hashed or no longer match the pin, so the bot's --sha never trusts a guess."""
+    """The shipped model, with the sha pinned when the run started and the fast play mode its rated
+    games used; None (and a note) when the weights could not be hashed or no longer match the pin, so
+    the bot's --sha never trusts a guess."""
     from blink.report.results_schema import Shipped
 
     pinned = state.get("weights_sha")
@@ -272,7 +274,7 @@ def shipped_record(
     if _orchestrate().weights_sha(ctx.model) != pinned:
         _note(notes, f"no shipped model: the weights of {ctx.model} changed after the run pinned {pinned}")
         return None
-    return Shipped(name, mode, pinned, epsilon if mode == "value" else None)
+    return Shipped(name, mode, pinned, epsilon if mode == "value" else None, **ctx.play_mode)
 
 
 def build_results(
@@ -287,7 +289,7 @@ def build_results(
     from blink.report.results_schema import Results
 
     mode = (state.get("E3") or {}).get("mode") or ctx.mode
-    shipped_name = engine_name(ctx.model, mode) if mode else None
+    shipped_name = engine_name(ctx.model, mode, **ctx.play_mode) if mode else None
     epsilon = run_epsilon(state, ctx)
     shipped = shipped_record(state, ctx, shipped_name, mode, epsilon, notes) if mode else None
     reproduce = reproduce_command(listing or ctx.results_dir / FINAL_SLICE_LIST)

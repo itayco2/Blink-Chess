@@ -220,7 +220,7 @@ def e9_block(ctx, state: dict) -> dict:
     from blink.eval.sflabel import SfLabeler
 
     mode = shipped_mode(ctx, state)
-    player = fastchess.engine_name(ctx.model, mode)
+    player = fastchess.engine_name(ctx.model, mode, **ctx.play_mode)  # E5's name for it, mode tag and all
     pgns = e9_pgns(ctx, state, mode)
     cap = MAX_FAILURES if ctx.games is None else min(MAX_FAILURES, ctx.games)
     with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:

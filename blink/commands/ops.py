@@ -1,14 +1,13 @@
-"""Operations commands: `blink ops launch|ps`, `blink supervise`, `blink bench ...`, `blink sweep ...`.
+"""Operations commands: `blink ops launch|ps`, `blink supervise`, `blink bench ...`, `blink sweep ...`
+(the Lichess bot's commands are blink.commands.lichess).
 
 blink ops launch --name NAME -- <blink args>    a fully detached job (Win32_Process.Create), prints its PID
 blink ops ps                                    Blink processes and launched jobs, with their heartbeats
 blink supervise --run NAME -- train ...         the trainer as a child, every P7 stop rule enforced
 blink bench throughput|loader|play              measured rates into bench.json (plan P4)
+blink bench parity                              a fast play mode's moves against fp32's, on val roots
 blink sweep ablations|sizes|choose              plan P5 and P6
 blink sweep rescore                             score finished arms post hoc (games10k, mateset)
-blink lichess config|check-config               the bot's config.yml and config.casual.yml (plan P9)
-blink lichess snapshot|check|pause|resume-note  public-API numbers, the stop rule, the bot pause
-blink lichess watch                             the stop rule enforced every 2 minutes, no agent needed
 
 Torch is imported only inside the commands that need it, so `blink --help` works torch-free.
 """
@@ -16,10 +15,10 @@ Torch is imported only inside the commands that need it, so `blink --help` works
 import argparse
 import json
 import sys
-from collections.abc import Callable
 from pathlib import Path
 
 from blink import paths
+from blink.play import fastmode
 
 EXIT_REFUSED = 2
 
@@ -242,19 +241,99 @@ def cmd_bench_play(args: argparse.Namespace) -> int:
 
     try:
         sizes = [bench.resolve_size(size) for size in args.sizes.split(",") if size]
-    except FileNotFoundError as exc:
+        mode = {"precision": args.precision, "compile": args.compile}
+        specs = [
+            bench.PlaySpec(name, path, rows, concurrency, args.iters, args.warmup, args.device, **mode)
+            for name, path in sizes
+            for rows in _ints(args.rows)
+            for concurrency in _ints(args.concurrency)
+        ]
+    except (FileNotFoundError, ValueError) as exc:
         print(f"blink bench play: {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    specs = [
-        bench.PlaySpec(name, path, rows, concurrency, args.iters, args.warmup, args.device)
-        for name, path in sizes
-        for rows in _ints(args.rows)
-        for concurrency in _ints(args.concurrency)
-    ]
     machine = bench.machine_facts(args.device)
     rows = bench.run_play(specs, log=_say)
     bench.update_bench(_bench_out(args), "play", rows, machine)
     return 0
+
+
+def _parity_out(args: argparse.Namespace) -> Path:
+    from blink.eval.fastchess import NAME_UNSAFE
+
+    if args.out:
+        return Path(args.out)
+    name = NAME_UNSAFE.sub("_", args.model).strip("_") + fastmode.tag(args.precision, args.compile)
+    return paths.home() / "eval" / "parity" / f"{name}.json"
+
+
+def _parity_evaluators(args: argparse.Namespace):
+    """fp32 and the fast mode on one model object: the fast one compiles its own trunk wrapper."""
+    from blink.model.evaluator import TorchEvaluator, play_evaluator
+    from blink.model.loading import load_model
+
+    model = load_model(args.model, device=args.device)
+    fast = play_evaluator(model, args.device, precision=args.precision, compile=args.compile)
+    return TorchEvaluator(model, args.device), fast
+
+
+def cmd_bench_parity(args: argparse.Namespace) -> int:
+    import time
+
+    from blink.eval import parity
+    from blink.train.atomic import write_text_atomic
+    from blink.train.posthoc import gpu_refusal
+
+    data = Path(args.data) if args.data else paths.home() / "data" / "v1"
+    refusal = fastmode.refusal(args.precision, args.compile, args.device) or gpu_refusal(args.device)
+    try:
+        if refusal:
+            raise ValueError(refusal)
+        boards = parity.val_positions(data, args.positions)
+        reference, fast = _parity_evaluators(args)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"blink bench parity: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    mode = fastmode.describe(args.precision, args.compile)
+    _say(f"parity of {args.model} {mode} against fp32 on {len(boards)} val roots of {data}")
+    started = time.perf_counter()
+    report = parity.compare(reference, fast, boards, epsilon=args.epsilon, log=_say)
+    result = {
+        "model": args.model,
+        "device": args.device,
+        "precision": args.precision,
+        "compile": args.compile,
+        "reference": {"precision": fastmode.DEFAULT_PRECISION, "compile": False},
+        "data": str(data),
+        "requested": args.positions,
+        "epsilon": args.epsilon,
+        "seconds": round(time.perf_counter() - started, 1),
+        **report,
+    }
+    out = _parity_out(args)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(out, json.dumps(result, indent=2) + "\n")
+    _say(
+        f"policy top-1 agreement {report['policy_top1_agreement']}, value choice agreement "
+        f"{report['value_choice_agreement']}, max |d win%| {report['max_abs_dwin_pct']} pt "
+        f"({report['scored']} positions scored, {report['mate_now']} mates in one by R2) -> {out}"
+    )
+    return 0
+
+
+def _register_parity(actions: argparse._SubParsersAction) -> None:
+    from blink.play import rules
+
+    parity = actions.add_parser(
+        "parity", help="policy top-1, value choice and win% of a fast mode against fp32 on val roots"
+    )
+    parity.add_argument("--model", required=True, help="run:<name>[:ema] | ship | release:<tag> | <path>")
+    parity.add_argument("--positions", type=int, default=2000, help="val roots, taken as VAA takes them")
+    parity.add_argument("--data", help="the pack holding val_roots.bin (default BLINK_HOME/data/v1)")
+    parity.add_argument("--epsilon", type=float, default=rules.DEFAULT_EPSILON, help="R4 tie window")
+    parity.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    parity.add_argument("--out", help="JSON report (default BLINK_HOME/eval/parity/<model><mode>.json)")
+    fastmode.add_arguments(parity)
+    parity.set_defaults(func=cmd_bench_parity)
 
 
 def _register_bench(sub: argparse._SubParsersAction) -> None:
@@ -280,12 +359,14 @@ def _register_bench(sub: argparse._SubParsersAction) -> None:
     play.add_argument("--rows", default="1,219")
     play.add_argument("--concurrency", default="1,2,5")
     play.add_argument("--iters", type=int, default=200)
-    play.add_argument("--warmup", type=int, default=20)
+    play.add_argument("--warmup", type=int, default=20, help="untimed calls first (compile happens here)")
+    fastmode.add_arguments(play)
     for parser in (throughput, loader, play):
         parser.add_argument("--out", help="bench.json path (default BLINK_HOME/eval/bench.json)")
     for parser in (throughput, play):
         parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     play.set_defaults(func=cmd_bench_play)
+    _register_parity(actions)
 
 
 # ---------------------------------------------------------------- sweep
@@ -538,252 +619,8 @@ def _register_sweep(sub: argparse._SubParsersAction) -> None:
     choose.set_defaults(func=cmd_sweep_choose)
 
 
-# ---------------------------------------------------------------- lichess (plan P9)
-
-
-def _refuse(command: str, exc: Exception) -> int:
-    print(f"blink lichess {command}: {exc}", file=sys.stderr)
-    return EXIT_REFUSED
-
-
-def _positive(kind: type, zero_ok: bool = False) -> Callable[[str], int | float]:
-    """An argparse type: an int or float above zero (a zero poll would spin on the public API).
-
-    `zero_ok` admits zero too: a pause --timeout of 0 stops the bot without waiting for its game.
-    """
-
-    def parse(text: str) -> int | float:
-        value = kind(text)
-        if value < 0 or (value == 0 and not zero_ok):
-            raise argparse.ArgumentTypeError(
-                f"must be {'0 or more' if zero_ok else 'above zero'}, got {text}"
-            )
-        return value
-
-    return parse
-
-
-def cmd_lichess_config(args: argparse.Namespace) -> int:
-    from blink.lichess import config
-
-    spec = config.BotSpec(args.model, args.mode, args.sha, args.casual_model)
-    kinds = (args.only,) if args.only else config.KINDS
-    try:
-        written = config.generate(
-            spec,
-            Path(args.out_dir),
-            kinds=kinds,
-            templates=Path(args.templates),
-            results_dir=args.results_dir,
-        )
-    except (config.ConfigError, FileNotFoundError) as exc:
-        return _refuse("config", exc)
-    for kind, path in written.items():
-        stamp = config.load_config(path)["blink"]
-        sha = f", sha256 {stamp['sha'][:12]}" if stamp.get("sha") else ""
-        tie = f", epsilon {stamp['epsilon']!r}" if "epsilon" in stamp else ""
-        _say(f"{kind}: {path} (model {stamp['model']}, mode {stamp['mode']}{sha}{tie})")
-    _say("check them with `blink lichess check-config --config <file>`; the token is never written")
-    return 0
-
-
-def cmd_lichess_check_config(args: argparse.Namespace) -> int:
-    from blink.lichess import config
-
-    results = None if args.results.lower() == "none" else Path(args.results)
-    try:
-        report = config.check_file(Path(args.config), kind=args.kind, results=results)
-    except (config.ConfigError, FileNotFoundError, ValueError) as exc:
-        return _refuse("check-config", exc)
-    for note in report.notes:
-        _say(f"  note: {note}")
-    for problem in report.problems:
-        _say(f"  problem: {problem}")
-    _say(f"{args.config} ({report.kind or 'unknown kind'}): {len(report.problems)} problems")
-    return 1 if report.problems else 0
-
-
-def cmd_lichess_snapshot(args: argparse.Namespace) -> int:
-    import datetime
-
-    from blink.lichess import snapshot
-
-    today = datetime.datetime.now(datetime.UTC).date().isoformat()
-    try:
-        snapshot.check_name(args.bot)
-        report = snapshot.take_snapshot(snapshot.default_api(), args.bot, args.max_games, today)
-    except (ValueError, snapshot.ApiError, OSError) as exc:
-        return _refuse("snapshot", exc)
-    for line in snapshot.format_report(report, args.max_games):
-        _say(line)
-    if args.no_write:
-        _say("--no-write: nothing written")
-        return 0
-    _say(f"-> {snapshot.write_snapshot(report.snapshot, Path(args.out))}")
-    return 0
-
-
-def _pause_bot(bot: str, api, args: argparse.Namespace, reason: str) -> None:
-    from blink.lichess import pause
-
-    deps = pause.default_deps(bot, api, Path(args.bot_root))
-    record = pause.pause(bot, deps, paths.home() / "lichess", args.timeout, args.poll, reason)
-    for line in pause.format_record(record):
-        _say(line)
-
-
-def _pgn_dir(args: argparse.Namespace) -> Path:
-    return Path(args.pgn_dir) if args.pgn_dir else paths.home() / "lichess" / "pgn"
-
-
-def cmd_lichess_check(args: argparse.Namespace) -> int:
-    from blink.lichess import monitor, snapshot, watch
-
-    try:
-        snapshot.check_name(args.bot)
-        api = snapshot.default_api()
-        verdict = monitor.check(api, args.bot, window=args.window, pgn_dir=_pgn_dir(args))
-    except (ValueError, snapshot.ApiError, OSError) as exc:
-        return _refuse("check", exc)
-    _say(monitor.format_verdict(args.bot, verdict))
-    if verdict.stop and args.stop:
-        try:
-            action = watch.enforce(
-                verdict,
-                paths.home() / "lichess",
-                lambda reason: _pause_bot(args.bot, api, args, reason),
-                watch.utc_now(),
-                _say,
-            )
-        except OSError as exc:
-            return _refuse("check --stop", exc)
-        _say(f"action: {action}")
-    return 1 if verdict.stop else 0
-
-
-def cmd_lichess_watch(args: argparse.Namespace) -> int:
-    from blink.lichess import monitor, snapshot, watch
-
-    try:
-        snapshot.check_name(args.bot)
-    except ValueError as exc:
-        return _refuse("watch", exc)
-    api = snapshot.default_api()
-    pgn_dir, lichess_dir = _pgn_dir(args), paths.home() / "lichess"
-    deps = watch.WatchDeps(
-        exported=lambda: monitor.exported_games(api, args.bot, args.window),
-        local=lambda: monitor.games_from_pgns(pgn_dir, args.bot),
-        pause_now=lambda reason: _pause_bot(args.bot, api, args, reason),
-        log=_say,
-    )
-    _say(
-        f"watching {args.bot} every {args.every:g} s: PGNs in {pgn_dir}, heartbeat "
-        f"{lichess_dir / watch.HEARTBEAT_NAME}; a firing rule pauses the bot (--timeout {args.timeout:g})"
-    )
-    watch.watch(args.bot, deps, lichess_dir, args.every, args.rounds, args.window)
-    return 0
-
-
-def cmd_lichess_pause(args: argparse.Namespace) -> int:
-    from blink.lichess import snapshot
-
-    try:
-        snapshot.check_name(args.bot)
-        _pause_bot(args.bot, snapshot.default_api(), args, args.reason)
-    except (ValueError, OSError) as exc:
-        return _refuse("pause", exc)
-    return 0
-
-
-def cmd_lichess_resume_note(args: argparse.Namespace) -> int:
-    from blink.lichess import pause
-
-    _say(pause.resume_note(paths.home() / "lichess" / pause.FLAG_NAME))
-    return 0
-
-
-def _pause_options(parser: argparse.ArgumentParser, timeout: float) -> None:
-    from blink.lichess import pause
-
-    parser.add_argument(
-        "--timeout",
-        type=_positive(float, zero_ok=True),
-        default=timeout,
-        help=f"seconds to wait for no game before stopping the bot (default {timeout:g})",
-    )
-    parser.add_argument(
-        "--poll", type=_positive(float), default=pause.DEFAULT_POLL_S, help="seconds between status reads"
-    )
-    parser.add_argument("--bot-root", default=str(pause.BOT_ROOT), help="the lichess-bot folder to match")
-
-
-def _register_lichess_config(actions: argparse._SubParsersAction) -> None:
-    from blink.lichess import config
-
-    gen = actions.add_parser(
-        "config", help="write config.yml and config.casual.yml from the tracked templates"
-    )
-    gen.add_argument("--model", required=True, help="the rated bot's model selector (casual too, by default)")
-    gen.add_argument("--mode", required=True, choices=config.MODES)
-    gen.add_argument("--sha", help="the shipped weights' sha256 (default: hashed from the weights file)")
-    gen.add_argument("--casual-model", help="the preview model for the G5 casual smoke (default: --model)")
-    gen.add_argument("--only", choices=config.KINDS, help="write just one of the two configs")
-    gen.add_argument("--out-dir", default=str(config.DEFAULT_OUT_DIR))
-    gen.add_argument("--templates", default=str(config.TEMPLATE_DIR), help="default: deploy/lichess")
-    gen.add_argument(
-        "--results-dir",
-        type=Path,
-        default=config.DEFAULT_RESULTS_DIR,
-        help="where E2b wrote epsilon.json: a rated value-mode bot plays with that epsilon (default results)",
-    )
-    gen.set_defaults(func=cmd_lichess_config)
-    chk = actions.add_parser("check-config", help="check a generated config against the plan")
-    chk.add_argument("--config", required=True)
-    chk.add_argument("--kind", choices=config.KINDS, help="default: the kind the config records")
-    chk.add_argument(
-        "--results", default="results/results.json", help="the shipped model to compare, or none"
-    )
-    chk.set_defaults(func=cmd_lichess_check_config)
-
-
-def _register_lichess(sub: argparse._SubParsersAction) -> None:
-    from blink.lichess import pause
-
-    lichess = sub.add_parser("lichess", help="the Lichess BOT: configs, public snapshot, stop rule, pause")
-    actions = lichess.add_subparsers(dest="lichess_command", required=True)
-    _register_lichess_config(actions)
-    snap = actions.add_parser("snapshot", help="rating, RD, N and game rates from the public API (no token)")
-    snap.add_argument("--bot", required=True)
-    snap.add_argument("--no-write", action="store_true", help="print only; write nothing")
-    snap.add_argument("--out", default=str(Path("results") / "lichess.json"))
-    snap.add_argument(
-        "--max-games", type=_positive(int), default=3000, help="newest rated blitz games to export"
-    )
-    snap.set_defaults(func=cmd_lichess_snapshot)
-    check = actions.add_parser("check", help="the stop rule over the last 50 games; exits 1 when it fires")
-    check.add_argument("--stop", action="store_true", help="pause the bot when the rule fires on new games")
-    watcher = actions.add_parser("watch", help="the stop rule every --every seconds, pausing the bot itself")
-    watcher.add_argument("--every", type=_positive(float), default=120.0, help="seconds between checks")
-    watcher.add_argument("--rounds", type=_positive(int), help="stop after this many checks (default never)")
-    for parser in (check, watcher):
-        parser.add_argument("--bot", required=True)
-        parser.add_argument("--window", type=_positive(int), default=50)
-        parser.add_argument("--pgn-dir", help="the PGNs lichess-bot saves (default BLINK_HOME/lichess/pgn)")
-        _pause_options(parser, timeout=0.0)  # a stop-rule pause never waits for the live game
-    stop = actions.add_parser("pause", help="flag, wait for no live game, then stop the bot by PID")
-    stop.add_argument("--bot", required=True)
-    stop.add_argument("--reason", default="GPU window", help="recorded in pause.json and the flag")
-    _pause_options(stop, timeout=pause.DEFAULT_TIMEOUT_S)
-    note = actions.add_parser("resume-note", help="delete the PAUSED flag; Itay restarts the bot himself")
-    note.set_defaults(func=cmd_lichess_resume_note)
-    check.set_defaults(func=cmd_lichess_check)
-    watcher.set_defaults(func=cmd_lichess_watch)
-    stop.set_defaults(func=cmd_lichess_pause)
-
-
 def register(sub: argparse._SubParsersAction) -> None:
     _register_ops(sub)
     _register_supervise(sub)
     _register_bench(sub)
     _register_sweep(sub)
-    _register_lichess(sub)
