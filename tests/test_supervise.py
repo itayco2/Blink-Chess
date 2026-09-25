@@ -284,6 +284,33 @@ def test_train_args_get_the_run_name_and_refuse_another_one():
         supervise.train_argv(["eval", "--run", "long"], "long")
 
 
+NAMED_BRANCH = ["train", "--run", "long", "--from-step", "47301", "--preview-steps", "11825"]
+NAMED_BRANCH += ["--preview-name", "size-m"]
+
+
+def test_a_branch_is_supervised_under_the_run_it_writes_not_the_run_it_branches_from():
+    """`train --run long --from-step N ...` writes runs/size-m (or runs/long-preview): that directory
+    is the one the supervisor must watch, resume and cut back, never the parent's."""
+    assert supervise.run_of(NAMED_BRANCH, None) == "size-m"
+    assert supervise.train_argv(NAMED_BRANCH, "size-m") == NAMED_BRANCH
+    preview = ["train", "--run=long", "--preview-cooldown", "3h", "--from-step", "5"]
+    assert supervise.run_of(preview, None) == "long-preview"
+    assert supervise.train_argv(preview, "long-preview") == preview
+    with pytest.raises(ValueError, match="size-m"):
+        supervise.train_argv(NAMED_BRANCH, "long")  # the parent's name: it would watch the wrong run
+    with pytest.raises(ValueError, match="branches from"):
+        supervise.train_argv(["train", "--from-step", "5", "--preview-steps", "3"], "long-preview")
+
+
+def test_the_supervise_command_wraps_a_named_branch_under_its_own_run(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    assert cli.main(["supervise", "--dry-run", "--", *NAMED_BRANCH]) == 0
+    assert "-m blink.cli " + " ".join(NAMED_BRANCH) in capsys.readouterr().out
+    assert cli.main(["supervise", "--run", "size-m", "--dry-run", "--", *NAMED_BRANCH]) == 0
+    assert cli.main(["supervise", "--run", "long", "--dry-run", "--", *NAMED_BRANCH]) == 2
+    assert "runs/size-m" in capsys.readouterr().err
+
+
 def test_the_supervise_command_wraps_blink_train_and_adds_the_run_name(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BLINK_HOME", str(tmp_path))
     argv = ["supervise", "--run", "long", "--dry-run", "--", "train", "--config", "configs/t.toml"]

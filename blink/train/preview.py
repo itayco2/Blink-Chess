@@ -5,7 +5,9 @@ new run, runs/long-preview, from it: the same data stream from step N on, with t
 falling from its step-N value to zero along the same 1 - sqrt curve over the preview's steps. The
 main run's directory is only read. The preview's step count comes from the duration and the main
 run's measured training throughput (the median samples/s of its "train"-phase metrics rows), so the
-branch-a-cooldown idea (arXiv 2410.05192) costs a fixed amount of GPU time.
+branch-a-cooldown idea (arXiv 2410.05192) costs a fixed amount of GPU time. `--preview-steps K` gives
+the length as exactly K steps instead (a branch that must match another run's schedule step for step),
+and `--preview-name BRANCH` writes runs/BRANCH instead of runs/long-preview.
 """
 
 import dataclasses

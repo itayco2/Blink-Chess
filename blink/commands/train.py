@@ -4,6 +4,9 @@ blink train --config configs/s.toml --run NAME (--data DIR | --source-raw PATH [
             [--valprobe FILE] [--games10k FILE] [--resume [--lr-scale F]] [--max-steps N]
             [--device cuda|cpu]
 blink train --run NAME --data DIR --preview-cooldown 3h --from-step N    (writes runs/NAME-preview)
+blink train --run NAME --data DIR --preview-steps K --from-step N [--preview-name BRANCH]
+            (exactly K cooldown steps, written to runs/BRANCH; `blink supervise -- train ...` watches
+            runs/BRANCH, so a branch crash-resumes like any run)
 
 A v1 pack directory holds train_r*.bin roots, train_c*.bin children, val_roots.bin, valprobe.npz
 and manifest.json (with the rebalancing weights), plus mateset.npz, which the checks score with
@@ -34,21 +37,81 @@ def _device(requested: str | None) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _is_branch(args: argparse.Namespace) -> bool:
+    return args.preview_cooldown is not None or args.preview_steps is not None
+
+
+def _branch_name(args: argparse.Namespace) -> str:
+    """The run a branch writes: --preview-name, else NAME-preview."""
+    from blink.train import preview
+
+    return args.preview_name or preview.preview_name(args.run)
+
+
+def _check_branch_flags(args: argparse.Namespace) -> None:
+    if args.preview_cooldown is not None and args.preview_steps is not None:
+        raise CommandError("--preview-cooldown and --preview-steps are two lengths for one branch: give one")
+    if _is_branch(args) != (args.from_step is not None):
+        raise CommandError("--from-step goes with one of --preview-cooldown or --preview-steps")
+    if args.preview_steps is not None and args.preview_steps < 1:
+        raise CommandError(f"--preview-steps must be at least 1, got {args.preview_steps}")
+    if args.preview_name is None:
+        return
+    if not _is_branch(args):
+        raise CommandError("--preview-name names a branch: it needs --from-step and a branch length")
+    if not status.valid_run_name(args.preview_name) or args.preview_name == args.run:
+        raise CommandError(f"bad branch name {args.preview_name!r} (a new run name, not --run's)")
+
+
 def _check_flags(args: argparse.Namespace) -> None:
     if not status.valid_run_name(args.run):
         raise CommandError(f"bad run name {args.run!r} (letters, digits, _ - . only)")
     if args.lr_scale is not None and (not args.resume or args.lr_scale <= 0):
         raise CommandError("--lr-scale needs --resume and a positive factor")
-    if (args.preview_cooldown is None) != (args.from_step is None):
-        raise CommandError("--preview-cooldown and --from-step go together")
-    if args.preview_cooldown is None and args.config is None:
+    _check_branch_flags(args)
+    if not _is_branch(args) and args.config is None:
         raise CommandError("--config is required (a preview takes its config from the checkpoint)")
+
+
+def _saved_branch_config(args: argparse.Namespace, saved: Path) -> TrainConfig:
+    """A resumed branch keeps the plan it was started with; an exact length must still be that plan."""
+    import json
+
+    cfg = config_from_dict(json.loads(saved.read_text(encoding="utf-8"))["config"])
+    if args.preview_steps is not None and cfg.steps != args.from_step + args.preview_steps:
+        planned = cfg.steps - args.from_step
+        raise CommandError(
+            f"{saved.parent.name} was branched for {planned:,} cooldown steps from step {args.from_step:,}; "
+            f"--preview-steps {args.preview_steps:,} would change its plan"
+        )
+    return cfg
+
+
+def _branch_steps(args: argparse.Namespace, main_dir: Path, batch_size: int) -> int:
+    """The branch's cooldown steps: exactly --preview-steps, or --preview-cooldown at the main run's
+    measured training rate."""
+    from blink.train import preview
+
+    if args.preview_steps is not None:
+        print(
+            f"preview: {args.preview_steps:,} cooldown steps (--preview-steps) "
+            f"from {main_dir.name} step {args.from_step:,}",
+            flush=True,
+        )
+        return args.preview_steps
+    seconds = preview.parse_duration(args.preview_cooldown)
+    rate = preview.training_rate(preview.read_metrics(main_dir))
+    steps = preview.preview_steps(seconds, rate, batch_size)
+    print(
+        f"preview: {steps:,} cooldown steps ({args.preview_cooldown} at {rate:,.0f} samples/s) "
+        f"from {main_dir.name} step {args.from_step:,}",
+        flush=True,
+    )
+    return steps
 
 
 def _preview_config(args: argparse.Namespace, main_dir: Path, preview_dir: Path) -> tuple[TrainConfig, Path]:
     """(the preview's config, the main run's checkpoint it branches from)."""
-    import json
-
     from blink.train import preview
     from blink.train.checkpoint import checkpoint_name, list_checkpoints, load_checkpoint, step_of
 
@@ -58,36 +121,27 @@ def _preview_config(args: argparse.Namespace, main_dir: Path, preview_dir: Path)
         raise CommandError(f"{main_dir.name} has no checkpoint at step {args.from_step} (it has {steps})")
     saved = preview_dir / "config.json"
     if args.resume and saved.is_file():
-        return config_from_dict(json.loads(saved.read_text(encoding="utf-8"))["config"]), source
+        return _saved_branch_config(args, saved), source
     main_cfg = config_from_dict(load_checkpoint(source)["config"])
     if args.config is not None and load_config(args.config) != main_cfg:
         raise CommandError(f"--config differs from the config {main_dir.name} was trained with")
-    seconds = preview.parse_duration(args.preview_cooldown)
-    rate = preview.training_rate(preview.read_metrics(main_dir))
-    steps = preview.preview_steps(seconds, rate, main_cfg.batch_size)
-    print(
-        f"preview: {steps:,} cooldown steps ({args.preview_cooldown} at {rate:,.0f} samples/s) "
-        f"from {main_dir.name} step {args.from_step:,}",
-        flush=True,
-    )
+    steps = _branch_steps(args, main_dir, main_cfg.batch_size)
     return preview.preview_config(main_cfg, args.from_step, steps), source
 
 
 def _config(args: argparse.Namespace) -> tuple[TrainConfig, Path | None]:
     """(the run's config, the checkpoint a preview branches from, or None)."""
-    if args.preview_cooldown is None:
+    if not _is_branch(args):
         return load_config(args.config), None
-    from blink.train import preview
-
     runs = paths.home() / "runs"
-    return _preview_config(args, runs / args.run, runs / preview.preview_name(args.run))
+    return _preview_config(args, runs / args.run, runs / _branch_name(args))
 
 
 def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path | None):
-    from blink.train import loop, preview
+    from blink.train import loop
 
-    is_preview = args.preview_cooldown is not None
-    name = preview.preview_name(args.run) if is_preview else args.run
+    is_preview = _is_branch(args)
+    name = _branch_name(args) if is_preview else args.run
     return loop.RunSpec(
         run_dir=paths.home() / "runs" / name,
         world=plan.world,
@@ -156,7 +210,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     train.add_argument(
         "--preview-cooldown", help="branch a cooldown of this long (3h, 90m) into NAME-preview"
     )
-    train.add_argument("--from-step", type=int, help="with --preview-cooldown: the checkpoint step to branch")
+    train.add_argument(
+        "--preview-steps", type=int, help="branch a cooldown of exactly this many steps (not a duration)"
+    )
+    train.add_argument(
+        "--preview-name", help="the branch's run name (default NAME-preview); supervise it under this name"
+    )
+    train.add_argument(
+        "--from-step",
+        type=int,
+        help="with --preview-cooldown or --preview-steps: the checkpoint step to branch",
+    )
     train.add_argument("--device", choices=("cuda", "cpu"), help="default: cuda when available")
     train.add_argument("--max-steps", type=int, help="stop early at this step (the schedule is unchanged)")
     train.set_defaults(func=cmd_train)
