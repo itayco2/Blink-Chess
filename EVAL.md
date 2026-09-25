@@ -139,3 +139,14 @@ launch is not used.
 9,500 of 157,846 lines with 2 positions passing the 1M-node screen, so PR-4's declaration holds at the 5,000-line
 look (kept <= 14). E2b and E8 use PR-4's fallback source, screened with the unchanged SF19 rule, before any
 conversion game is played.
+
+**PR-6 (P7 length, adopted by Itay on 2026-09-25 at 14:20; replaces PR-5's fixed 120 h).** The PC is Itay's
+during the day, so the flagship trains whenever he does not need the GPU (always at night) and pauses when he
+asks. Its length is decided by Itay during the run: at each pause, or at least once a day, the latest EMA
+checkpoint is scored on the first 2,000 DeepMind puzzles (value and policy mode, on the CPU) and the result
+is shown to him beside DeepMind 9M's 86.6% on the same puzzles and the earlier checks. When he decides the
+level is good enough, the run is re-planned so its final 20% 1-sqrt cooldown starts at the current step, and
+the cooled model is the flagship. configs/long.toml keeps PR-5's 120-hour step count as the upper bound. The
+flagship's actual training hours, the full check history and the step at which he stopped are published;
+no claim describes the length as fixed in advance. PR-3's parity and soak tests run on the first check after
+24 training hours instead of the 30% preview. Everything else in sections 3-5 stands.
