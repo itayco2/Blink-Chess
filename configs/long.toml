@@ -25,7 +25,9 @@ eval_every = 4000       # PR-5: the EMA subset VAA every 4,000 steps (not 2,000)
                         # 30-minute checkpoints, metrics every 50 steps and every stop rule are unchanged
 film = true             # 21 frames under runs/long/film/
 vaa_checks = true       # 5%: >= the reference at equal samples - 2 sigma; 25%, 50%: >= previous - 2 sigma
-vaa_sigma = 0.01        # replace with the measured 3-seed sigma (a fraction: 0.01 is 1 point)
+vaa_sigma = 0.0016023   # sigma_EMA (PR-2's guard): sample sd of a01-a03's 100% check ema_vaa, full
+                        # valprobe (0.55115, 0.5529, 0.5497 in D:\blink runs/abl-a01..a03, 2026-09-25)
+                        # = 0.0016023; tools/p7_v2_driver.py refuses to start unless they agree
 vaa_sigma_subset = 0.0  # the subset's measured 3-seed sigma; 0 = not measured, full rows only
 vaa_reference = ""      # the N* 6 h sweep run; empty skips the 5% rule (the row says so)
 keep_every_hours = 12.0 # keep the last 3 checkpoints plus one every 12 h (check steps are always kept)
