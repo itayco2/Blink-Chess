@@ -665,14 +665,39 @@ def engine_present(path: Path) -> bool:
     return path.is_file()
 
 
+def compile_backend_present(engine_dir: Path) -> bool:
+    """Whether the install whose Scripts folder is `engine_dir` holds triton, torch.compile's CUDA backend
+    (triton-windows, the `compile` dependency group; torch's Windows wheel does not bring it)."""
+    root = Path(engine_dir).parent
+    sites = [root / "Lib" / "site-packages", *root.glob("lib/python3*/site-packages")]
+    return any((site / "triton" / "__init__.py").is_file() for site in sites)
+
+
+def _compile_backend_problems(config: Mapping, present: Callable[[Path], bool]) -> list[str]:
+    """A compiled engine on CUDA compiles at its first isready, in every game's process: without triton
+    in its own install that fails, and the startup `uci`/`quit` check never sends isready."""
+    parsed, _ = _engine_flags(_section(config, "engine", "engine_options"))
+    if parsed is None or not parsed.compile or str(parsed.device).split(":", 1)[0] != "cuda":
+        return []
+    folder = Path(str(_section(config, "engine").get("dir", "")))
+    if present(folder):
+        return []
+    return [
+        f"the engine plays compiled on CUDA but {folder.parent} has no triton (torch.compile's backend): "
+        "blink-uci would fail at its first isready; sync the engine with --group compile (RUNBOOK section 7)"
+    ]
+
+
 def check_file(
     path: Path,
     kind: str | None = None,
     results: Path | None = None,
     resolve: Callable[[str], Path | None] | None = None,
     exists: Callable[[Path], bool] | None = None,
+    backend: Callable[[Path], bool] | None = None,
 ) -> CheckReport:
-    """Every problem with the config file at `path`; anything that cannot be verified is one too."""
+    """Every problem with the config file at `path`; anything that cannot be verified is one too.
+    `backend` says whether an engine folder's install holds torch.compile's backend (triton)."""
     config = load_config(path)
     kind = kind or (config.get(PROVENANCE) or {}).get("kind") or ""
     notes: list[str] = []
@@ -688,6 +713,7 @@ def check_file(
     exe = engine_exe(config)
     if not (exists or engine_present)(exe):
         found.append(f"engine {exe} does not exist on this machine: lichess-bot cannot start it")
+    found += _compile_backend_problems(config, backend or compile_backend_present)
     declared = declared_uci_options()
     found += problems(config, kind, declared, shipped=shipped, weights_sha=weights_sha, epsilon=epsilon)
     return CheckReport(kind=kind, problems=tuple(found), notes=tuple(notes))

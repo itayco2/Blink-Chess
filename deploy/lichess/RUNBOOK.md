@@ -91,7 +91,7 @@ token (lichess-bot reads it from `LICHESS_BOT_TOKEN`, which only `start-bot.ps1`
 
 | file | template | what it is |
 |---|---|---|
-| `D:\blink-bot\config.yml` | [config.template.yml](config.template.yml) | the rated bot (G7): torch CUDA fp32, the shipped model, sha and mode, run from the frozen engine install `D:\blink-bot\engine` (section 7) |
+| `D:\blink-bot\config.yml` | [config.template.yml](config.template.yml) | the rated bot (G7): torch CUDA in the shipped fast mode (fp32 uncompiled by default), the shipped model, sha and mode, run from the frozen engine install `D:\blink-bot\engine` (section 7) |
 | `D:\blink-bot\config.casual.yml` | [config.casual.yml](config.casual.yml) | the G5 casual smoke: the preview model on CPU (1 thread, below-normal priority), only `itayco2`, run from the dev venv `C:\dev\blink-chess\.venv` |
 
 Both switch off every lookup lichess-bot could make for the engine (polyglot book, every
@@ -142,7 +142,9 @@ mode (under a name ending `-bf16` or `-bf16-compile`), and results.json's shippe
 `engine_options.precision` and `engine_options.compile` (lichess-bot passes `--precision=bf16
 --compile=True` to blink-uci) and into the `blink:` stamp. The default mode, fp32 uncompiled, adds no
 key, so a default config is unchanged. `check-config` fails a rated engine whose mode differs from its
-stamp or from the shipped record, and any engine that asks for bf16 off CUDA (blink-uci would exit 2).
+stamp or from the shipped record, any engine that asks for bf16 off CUDA (blink-uci would exit 2), and a
+compiled CUDA engine whose own install has no triton (section 7: blink-uci would fail at its first
+`isready`).
 
 The rated config also passes the sha to every engine (`engine_options.sha`, which lichess-bot hands
 to blink-uci as `--sha=<sha>`). Each blink-uci hashes its weights file before the UCI handshake and
@@ -173,24 +175,41 @@ that folder; the G5 casual smoke keeps the plan's folder. Blink is still evaluat
 ships: the same tag, sha, runtime, mode and rules.
 
 1. **(agent)** freezes the engine from the shipped tag (the uv cache already holds torch, so nothing
-   new is downloaded; set the variable in this shell only, never with `setx`):
+   new is downloaded; set the variable in this shell only, never with `setx`). When results.json's
+   shipped record has `compile: true`, the sync also takes `--group compile`. The compiled engine
+   needs triton-windows, torch.compile's CUDA backend, and torch's Windows wheel does not include it.
+   The dev venv syncs that group by default, so the uv cache already holds it.
 
    ```powershell
    git -C C:\dev\blink-chess worktree add C:\dev\blink-wt\ship-<tag> <tag>
    $env:UV_PROJECT_ENVIRONMENT = 'D:\blink-bot\engine'
-   uv sync --project C:\dev\blink-wt\ship-<tag> --frozen --no-editable --no-default-groups --group train
+   uv sync --project C:\dev\blink-wt\ship-<tag> --frozen --no-editable --no-default-groups --group train   # add --group compile when shipped.compile is true
    Remove-Item Env:\UV_PROJECT_ENVIRONMENT
    git -C C:\dev\blink-chess worktree remove C:\dev\blink-wt\ship-<tag>
    'uci', 'quit' | D:\blink-bot\engine\Scripts\blink-uci.exe --model ship --sha <shipped sha256>   # uciok, exit 0
    ```
 
-   The cold-start gate (cold start plus the first move under 10 s) is measured with `--sha`, since
-   every engine now hashes its weights first (about 300 MB/s on this PC under load).
+   This check proves only that the engine starts and accepts the weights: `uci` never loads the
+   model. The cold-start gate follows in step 2.
 2. **(agent)** generates and checks `config.yml` (section 5): rated blitz only; matchmaking bases
    [180, 300] and increments [0, 2, 3], `challenge_timeout: 2`, `opponent_rating_difference: 300`,
    `challenge_filter: fine`; under `challenge:` `concurrency: 2` with `games_reserved_for_humans: 1`
    (so one bot game at a time), `preference: human`, `bullet_requires_increment: true`,
    `max_simultaneous_games_per_user: 1`; resign and draw offers off; PGNs in `D:\blink\lichess\pgn`.
+
+   Then the agent measures the cold-start gate: cold start plus the first move, under 10 s. It runs
+   the engine the way lichess-bot starts it, with every `engine_options` entry of `config.yml` except
+   `log`. That means `--sha` (every engine hashes its weights first, at about 300 MB/s on this PC
+   under load), `--epsilon` in value mode, and `--precision` and `--compile` when the shipped record
+   has them. The model loads and warms up at the first `isready`, and a compiled engine compiles
+   there too. lichess-bot starts one engine per game, so every game start pays this cost:
+
+   ```powershell
+   $flags = '--model=ship', '--mode=<mode>', '--device=cuda', '--sha=<sha256>'   # plus '--epsilon=<e>', '--precision=bf16', '--compile=True' as config.yml has them
+   Measure-Command { 'uci', 'isready', 'position startpos', 'go movetime 1000', 'quit' | D:\blink-bot\engine\Scripts\blink-uci.exe @flags | Out-Host }
+   ```
+
+   Pass: `uciok`, `readyok` and one `bestmove` are printed, and `TotalSeconds` is under 10.
 3. Itay registers and starts the watcher task (section 8) before the bot's first rated game; the
    agent confirms its heartbeat in `D:\blink\lichess\watch.json`.
 4. Itay: `D:\blink-bot\start-bot.ps1`

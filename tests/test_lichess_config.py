@@ -691,3 +691,46 @@ def test_the_cli_says_which_fast_mode_the_rated_config_plays(tmp_path, capsys):
     folder = fast_results(tmp_path)
     assert cli.main([*argv, "--out-dir", str(tmp_path / "bot"), "--results-dir", str(folder)]) == 0
     assert "bf16 compiled" in capsys.readouterr().out
+
+
+# A compiled engine on CUDA needs triton (triton-windows, the `compile` dependency group) in its own
+# install: torch's Windows wheel does not bring it, and the frozen rated engine (RUNBOOK section 7) is
+# synced with --no-default-groups. Without it blink-uci fails at its first isready, which the startup
+# `uci`/`quit` check never sends.
+
+
+def test_the_compile_backend_is_looked_for_in_the_engines_own_install(tmp_path):
+    scripts = tmp_path / "engine" / "Scripts"
+    scripts.mkdir(parents=True)
+    assert not botconfig.compile_backend_present(scripts)
+    triton = tmp_path / "engine" / "Lib" / "site-packages" / "triton"
+    triton.mkdir(parents=True)
+    (triton / "__init__.py").write_text("", encoding="utf-8")
+    assert botconfig.compile_backend_present(scripts)
+
+
+def test_check_config_fails_a_compiled_engine_whose_install_has_no_triton(tmp_path):
+    weights, folder = fake_weights(tmp_path), fast_results(tmp_path)
+    spec = botconfig.BotSpec(str(weights), "value", SHA)
+    path = botconfig.generate(
+        spec, tmp_path / "bot", kinds=("rated",), resolve=lambda s: weights, results_dir=folder
+    )["rated"]
+
+    def found(has_triton: bool) -> tuple[str, ...]:
+        return botconfig.check_file(
+            path,
+            results=folder / "results.json",
+            resolve=lambda s: weights,
+            exists=lambda p: True,
+            backend=lambda engine_dir: has_triton,
+        ).problems
+
+    missing = found(False)
+    assert len(missing) == 1 and "no triton" in missing[0] and "--group compile" in missing[0], missing
+    assert found(True) == ()
+    (tmp_path / "fp32").mkdir()
+    uncompiled, weights = rated_file(tmp_path / "fp32")  # an uncompiled engine never needs it
+    report = botconfig.check_file(
+        uncompiled, results=None, resolve=lambda s: weights, exists=lambda p: True, backend=lambda d: False
+    )
+    assert report.problems == ()
