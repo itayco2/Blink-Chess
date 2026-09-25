@@ -23,13 +23,16 @@ def test_the_upper_bound_is_the_exact_one_sided_95_percent_poisson_bound():
     ("screened", "last_declaring"), [(1_000, 0), (5_000, 14), (20_000, 73), (19_999, 73)]
 )
 def test_pr4_declares_at_kept_0_14_and_73_at_the_first_three_looks(screened, last_declaring):
-    assert looks.declares(last_declaring, screened, FILE_POSITIONS)
-    assert not looks.declares(last_declaring + 1, screened, FILE_POSITIONS)
+    """Through look_at, which the screen's LookTracker calls at each look line."""
+    plan = looks.LookPlan(FILE_POSITIONS, 157_846)
+    assert looks.look_at(plan, screened, screened, last_declaring, last_declaring).declares
+    assert not looks.look_at(plan, screened, screened, last_declaring + 1, last_declaring + 1).declares
 
 
 def test_nothing_screened_or_no_known_total_never_declares():
-    assert not looks.declares(0, 0, FILE_POSITIONS)
+    assert not looks.look_at(looks.LookPlan(FILE_POSITIONS, 157_846), 1_000, 0, 0, 0).declares
     assert looks.look_at(looks.LookPlan(None, 10), 5, 5, 0, 0).upper95_total is None
+    assert not hasattr(looks, "declares")  # one rule, the one the screen calls
 
 
 def test_looks_fall_at_lines_1000_5000_and_20000_then_every_20000():

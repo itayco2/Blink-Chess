@@ -143,6 +143,27 @@ def test_ps_rows_show_each_blink_process_with_its_heartbeat(tmp_path):
     assert "long" in text and "12 s ago" in text
 
 
+def test_a_branch_launch_watches_the_branch_s_heartbeat_not_its_parent_s(tmp_path):
+    """p7-long-final and size-m train runs/long-final and runs/size-m: runs/long only lends its checkpoint
+    (blink.train.supervise.run_of)."""
+    runs = tmp_path / "runs"
+    finish = ["supervise", "--bench-size", "m", "--", "train", "--run", "long", "--data", "D:/v1",
+              "--from-step", "331758", "--preview-steps", "82940",
+              "--preview-name", "long-final"]  # fmt: skip
+    preview = ["train", "--run", "long", "--preview-cooldown", "3h", "--from-step", "331758"]
+    assert launch.heartbeat_of(finish, tmp_path) == runs / "long-final" / "heartbeat.json"
+    assert launch.heartbeat_of(preview, tmp_path) == runs / "long-preview" / "heartbeat.json"
+    assert launch.heartbeat_of(["supervise", "--run", "x", "--", "train", "--run", "y"], tmp_path) == (
+        runs / "x" / "heartbeat.json"
+    )
+    assert (
+        launch.heartbeat_of(["train", "--run", "long", "--resume"], tmp_path)
+        == runs / "long" / "heartbeat.json"
+    )
+    procs = [{"pid": 7, "create_time": 1.0, "cmdline": ["python.exe", "-m", "blink.cli", *finish]}]
+    assert launch.ps_rows(procs, home=tmp_path, now=2.0)[0]["run"] == "long-final"
+
+
 def test_a_windows_path_to_blink_exe_is_recognised_on_any_os():
     """PF63: pathlib on Linux does not split backslashes, so CI missed C:\\...\\blink.exe."""
     assert launch.is_blink([r"C:\v\Scripts\blink.exe", "heartbeat-probe"])

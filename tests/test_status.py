@@ -136,6 +136,18 @@ def test_the_status_text_shows_the_phase_clip_and_vaa_with_a_failed_check(tmp_pa
     assert "VAA 0.31 (ema 0.33, full)" in text and "check 5% FAILED" in text
 
 
+def test_a_skipped_check_says_skipped_with_its_reason_never_passed(tmp_path):
+    """P6 v2 skips the flagship's 5% check (vaa_reference is "" until the guard): the trainer's log says
+    so, and `blink status` must say the same."""
+    run_dir = _run(tmp_path)
+    heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 60, "steps": 100}, now=1.0)
+    row = {"step": 5, "check": "5%", "vaa": 0.31, "ema_vaa": 0.33, "vaa_set": "full"}
+    row |= {"check_skipped": "no reference run"}
+    (run_dir / "evals.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    text = status.format_status(status.run_status(run_dir, now=2.0))
+    assert "check 5% skipped (no reference run)" in text and "passed" not in text
+
+
 def test_the_status_text_shows_a_subset_eval_s_ema_vaa(tmp_path):
     run_dir = _run(tmp_path)
     heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 60, "steps": 100}, now=1.0)
@@ -182,3 +194,27 @@ def test_blink_status_prints_the_speed_warning_but_keeps_its_exit_code(tmp_path,
     (run_dir / "metrics.jsonl").write_text(lines.splitlines(keepends=True)[0], encoding="utf-8")
     assert cli.main(["status", "--run", "spill"]) == 0
     assert "WARN" not in capsys.readouterr().out
+
+
+def test_blink_status_live_prints_every_run_that_trains_or_waits_out_a_user_pause(
+    tmp_path, monkeypatch, capsys
+):
+    """The Blink Status button's first block: runs whose heartbeat is fresh, running or paused by the
+    user; a run that stopped long ago is left out, and none live is no error."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    now = time.time()
+    beats = {
+        "long": ("running", now),
+        "size-m": ("paused: user", now - 3),
+        "abl-a01": ("finished", now - 9e4),
+    }
+    for name, (state, at) in beats.items():
+        heartbeat.write(_run(tmp_path / "runs", name) / "heartbeat.json", {"state": state, "step": 5}, now=at)
+    assert cli.main(["status", "--live"]) == 0
+    out = capsys.readouterr().out
+    assert "long: LIVE" in out and "size-m: PAUSED: USER" in out and "abl-a01" not in out
+    (tmp_path / "runs" / "long" / "heartbeat.json").unlink()
+    (tmp_path / "runs" / "size-m" / "heartbeat.json").unlink()
+    assert cli.main(["status", "--live"]) == 0
+    assert "no live run" in capsys.readouterr().out
+    assert cli.main(["status"]) == 2  # a run name, or --live

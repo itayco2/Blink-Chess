@@ -9,8 +9,10 @@ CPU budget of the SF19 labels (plan P8): `eval all` searches E2's win% regret an
 and E9's failure labels on P8_SF_PROCS = 5 Stockfish processes, one thread each. P8 runs on an idle machine
 (the i7-8700 has 6 cores: 5 for Stockfish, 1 for the harness); the blocks run one at a time, so no timed
 block runs beside the labels, and the pool has exited before the next block's CPU check. `eval block` and
-`eval static` keep 1 unless told. While a training run is live, side jobs get 3 processes at most (plan
-P7), and `eval endgames` follows PR-4 (EVAL.md section 5): at most 4 before P7 and 3 during it.
+`eval static` keep 1 unless told. While a blink train, supervise or sweep process is live, `eval all`,
+`eval block` and `eval static` label on 3 processes at most whatever they were given (plan P7;
+blink.eval.sfbudget), and `eval endgames` follows PR-4 (EVAL.md section 5): at most 4
+before P7 and 3 during it.
 """
 
 import argparse
@@ -20,7 +22,20 @@ import time
 from pathlib import Path
 
 from blink import paths
-from blink.eval import books, endgames, fastchess, match, nosearch, puzzles, rating, sflabel, signcheck, sprt
+from blink.commands import strength as strength_command
+from blink.eval import (
+    books,
+    endgames,
+    fastchess,
+    match,
+    nosearch,
+    puzzles,
+    rating,
+    sfbudget,
+    sflabel,
+    signcheck,
+    sprt,
+)
 from blink.play import factory, fastmode, rules
 from blink.play.agents import Agent
 from blink.reference import registry
@@ -51,12 +66,13 @@ def _missing(path: Path, what: str) -> bool:
     return True
 
 
-def _puzzle_agents(args: argparse.Namespace, epsilon: float) -> list[tuple[str, Agent]]:
-    """(mode, agent) pairs to score; a DeepMind selector has its one mode, action-value."""
+def _puzzle_agents(args: argparse.Namespace, epsilon: float, selector: str) -> list[tuple[str, Agent]]:
+    """(mode, agent) pairs to score, loading `selector` (args.model, pinned when it names a run); a
+    DeepMind selector has its one mode, action-value."""
     if registry.is_dm(args.model):
         return [(registry.MODE, registry.load_agent(args.model, device=args.device))]
     evaluator = factory.load_evaluator(
-        args.model, device=args.device, precision=args.precision, compile=args.compile
+        selector, device=args.device, precision=args.precision, compile=args.compile
     )
     modes = factory.MODES if args.mode == "both" else (args.mode,)
     return [(mode, factory.make_agent(mode, evaluator, epsilon=epsilon)) for mode in modes]
@@ -70,6 +86,23 @@ def _fast_refused(prefix: str, args: argparse.Namespace) -> bool:
     return refusal is not None
 
 
+def _pinned(model: str) -> tuple[str, str | None]:
+    """(the selector to load, its weights line). A run selector is resolved once, to the run's latest
+    checkpoint when the scoring starts, and that very file is loaded, so a check of a run that is still
+    training names the step it scored (blink.eval.strength reads the line) even when the trainer saves
+    another checkpoint meanwhile. Without torch (a stand-in evaluator on the torch-free leg) there is no
+    checkpoint to name, and anything but a run selector loads as given."""
+    if not model.startswith("run:"):
+        return model, None
+    try:
+        from blink.model.loading import pinned_selector, resolve_selector
+
+        path, which = resolve_selector(model)
+    except (ImportError, FileNotFoundError, ValueError):
+        return model, None
+    return pinned_selector(path, which), f"weights {path} ({which})"
+
+
 def _cmd_puzzles(args: argparse.Namespace) -> int:
     source = puzzles.resolve_set(args.set)
     if _missing(source, "puzzle set") or _fast_refused("blink eval puzzles", args):
@@ -81,8 +114,10 @@ def _cmd_puzzles(args: argparse.Namespace) -> int:
     out_dir = args.out or paths.home() / "eval" / "puzzles"
     # The published value-mode score is the shipped configuration's: E2b's epsilon unless told otherwise.
     epsilon = args.epsilon if args.epsilon is not None else match.read_epsilon(args.results_dir)
-    illegal = 0
-    for mode, agent in _puzzle_agents(args, epsilon):
+    illegal, (selector, weights) = 0, _pinned(args.model)
+    if weights:
+        print(weights, flush=True)
+    for mode, agent in _puzzle_agents(args, epsilon, selector):
         started = time.perf_counter()
         tie = epsilon if mode == "value" else None
         summary = puzzles.run_puzzle_set(
@@ -184,6 +219,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     fastmode.add_arguments(pz)
     pz.add_argument("--out", type=Path, default=None, help="folder (default BLINK_HOME/eval/puzzles)")
     pz.set_defaults(func=factory.friendly(_cmd_puzzles))
+    strength_command.register(ev_sub)
 
     sc = ev_sub.add_parser(
         "signcheck", help="value-mode top-1 with the true child sign against a flipped one"
@@ -549,7 +585,8 @@ def _cmd_static(args: argparse.Namespace) -> int:
     agents = match.blink_agents(args.model, args.device, epsilon=epsilon, **ctx.play_mode)
     inputs = orchestrate.static_inputs(ctx, label, epsilon)
     started = time.perf_counter()
-    with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=args.sf_procs) as labeler:
+    procs = sfbudget.sf_procs_now(args.sf_procs)
+    with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=procs) as labeler:
         e2 = static.run_e2(
             agents["policy"].evaluator, agents, inputs, limits, None if args.no_sf else labeler
         )

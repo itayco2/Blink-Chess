@@ -106,6 +106,12 @@ def _user_paused(report: RunStatus) -> bool:
     return report.state == PAUSED_USER and age is not None and age <= LIVE_WITHIN_S
 
 
+def active(report: RunStatus) -> bool:
+    """Training now, or waiting out a user pause under a supervisor that still beats: what `blink status
+    --live` (and the Blink Status button) shows."""
+    return report.live or _user_paused(report)
+
+
 def exit_code(report: RunStatus) -> int:
     if _has_nan(report.last_metrics):
         return 1
@@ -140,8 +146,18 @@ def _format_eval(e: dict[str, Any]) -> str:
     elif "ema_vaa" in e:
         text += f", VAA ema {e.get('ema_vaa')} ({e.get('vaa_set', 'subset')} of {e.get('vaa_n')})"
     if "check" in e:
-        text += f", check {e['check']} {'FAILED' if 'vaa_check_failed' in e else 'passed'}"
+        text += f", check {e['check']} {_check_verdict(e)}"
     return text
+
+
+def _check_verdict(e: dict[str, Any]) -> str:
+    """As the trainer's log says it (blink.train.evals): a skipped check (the 5% one under P6 v2, whose
+    reference is set only by the guard) never reads as passed."""
+    if "vaa_check_failed" in e:
+        return "FAILED"
+    if "check_skipped" in e:
+        return f"skipped ({e['check_skipped']})"
+    return "passed"
 
 
 # ---------------------------------------------------------------- the speed WARN (P4)

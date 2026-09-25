@@ -6,20 +6,22 @@ gradient (a fixed norm, or "auto" measured over the warmup) and updates the EMA.
 
 Everything a run writes lives in its run directory: config.json (world id, config, parameter counts,
 VRAM budget), metrics.jsonl every `metrics_every` steps (with the window's phase: train, eval or
-ckpt, its wall time and its loader wait share), evals.jsonl every `eval_every` steps plus the
-full-valprobe checks at 5/25/30/50/100% (which also score games10k and the pack's mateset when the run
-has them), heartbeat.json every `heartbeat_s` seconds, film/ frames when `film` is on, and atomic
-checkpoints ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the straight run, because the
-batch source is seeked to the checkpoint's step.
+ckpt, its wall time, its loader wait share and its session: when this trainer process started, so the
+rows either side of a pause, crash restart or relaunch tell themselves apart), evals.jsonl every
+`eval_every` steps plus the full-valprobe checks at 5/25/30/50/100% (which also score games10k and the
+pack's mateset when the run has them), heartbeat.json every `heartbeat_s` seconds, film/ frames when
+`film` is on, and atomic checkpoints ckpt_<step:09d>.pt. On CPU a resume is bitwise identical to the
+straight run, because the batch source is seeked to the checkpoint's step.
 
 A user pause (RunSpec.pause_flag, BLINK_HOME/PAUSE under `blink train`; blink.train.userpause): a run
 that starts while the flag is up waits, beating "paused: user", before it builds anything, so it holds
-no GPU memory. A run with `pause_exits` (one a supervisor resumes: `blink train` under `blink
-supervise`) also looks for the flag every PAUSE_CHECK_S seconds at step boundaries and between eval
-chunks; when it is up the run checkpoints its current step, beats "paused: user" and returns with
-`paused` set (`blink train` then exits with supervise.EXIT_USER_PAUSE). A pause between eval chunks
-leaves paused_mid_eval.json, so the resumed run scores that step before its next one. A run without
-`pause_exits` trains on through the flag: nothing would resume it.
+no GPU memory. A run with `pause_exits` (one a resumer restarts: `blink train` under `blink
+supervise`, or a calibration the P6 v2 driver reruns) also looks for the flag every PAUSE_CHECK_S
+seconds at step boundaries and between eval chunks; when it is up the run checkpoints its current step,
+beats "paused: user" and returns with `paused` set (`blink train` then exits with
+supervise.EXIT_USER_PAUSE). A pause between eval chunks leaves paused_mid_eval.json, so the resumed run
+scores that step before its next one. A run without `pause_exits` trains on through the flag: nothing
+would resume it.
 """
 
 import json
@@ -78,7 +80,7 @@ class RunSpec:
     games10k: Path | None = None  # games10k.npy for games10k_top1 (blink train: BLINK_HOME/data)
     mateset: Path | None = None  # the pack's mateset.npz for shortest_mate and mate_preserving
     pause_flag: Path | None = None  # the user pause flag (blink train: BLINK_HOME/PAUSE); None never pauses
-    pause_exits: bool = False  # stop mid-run for the flag: only when a supervisor resumes the run after it
+    pause_exits: bool = False  # stop mid-run for the flag: only when a resumer restarts the run after it
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,7 @@ class _Run:
     last_checkpoint_time: float = field(default_factory=time.monotonic)
     last_beat: float = 0.0
     pause: userpause.FlagWatch | None = None
+    session: float = field(default_factory=time.time)  # this trainer process's stamp on its metrics rows
 
 
 def _choose_micro(cfg: TrainConfig, model: BlinkNet, device: torch.device, free: int | None, log) -> tuple:
@@ -260,7 +263,7 @@ def _train_step(run: _Run, data: StepData, lr: float) -> tuple[torch.Tensor, ...
 
 
 def _write_metrics(run: _Run, window: telemetry.MetricWindow, lr: float) -> None:
-    record = {**window.flush(run.step, lr), "clip": run.clip.value}
+    record = {**window.flush(run.step, lr), "clip": run.clip.value, "session": run.session}
     telemetry.append_jsonl(run.spec.run_dir / "metrics.jsonl", record)
     run.last_metrics = record
     run.log(

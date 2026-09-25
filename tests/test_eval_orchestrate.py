@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from blink.eval import orchestrate, publish, rating
+from blink.eval import orchestrate, publish, rating, sfbudget
 from blink.report import results_schema
 
 PLAN_TOTAL = 28_600
@@ -567,3 +567,45 @@ def test_fastchess_starts_blink_uci_pinned_to_the_weights_it_hashed(tmp_path, mo
     context = ctx(tmp_path, device="cpu")
     anchors.fastchess_player(context, "ship", "value", "E5")(anchors.Anchor("SF1320", 1320), 2, "final", 0)
     assert f"--sha={sha}" in seen[0].args
+
+
+def _sf_recorder(seen):
+    def run(context, state):
+        seen.append(context.sf_procs)
+        return {"games": 0, "pgns": []}
+
+    return {block: run for block in orchestrate.BLOCK_ORDER}
+
+
+@pytest.mark.parametrize(
+    ("processes", "procs"),
+    [
+        ([["supervise", "--bench-size", "m", "--", "train", "--run", "long"]], 3),
+        ([["train", "--config", "configs/long.toml", "--run", "long"]], 3),
+        ([["sweep", "ablations"]], 3),
+        ([["eval", "endgames", "--sf-procs", "3"], ["train", "--dry-run", "--run", "x"]], 5),
+        ([], 5),
+    ],
+)
+def test_eval_all_labels_on_3_stockfish_processes_at_most_while_blink_trains(tmp_path, processes, procs):
+    """PR-4 and plan P7: at most 3 Stockfish processes beside a live train, supervise or sweep process;
+    P8's 5 only on an idle machine. The process list is injected, as `blink ops ps` would read it."""
+    seen = []
+    orchestrate.run_blocks(
+        ctx(tmp_path, sf_procs=5),
+        _sf_recorder(seen),
+        only=["E2", "E9"],
+        runs_root=tmp_path / "runs",
+        log=lambda s: None,
+        load=IDLE,
+        processes=lambda: processes,
+    )
+    assert seen == [procs, procs]
+
+
+def test_the_training_cap_never_raises_a_smaller_request_or_asks_for_processes_it_cannot_cut(tmp_path):
+    asked = []
+    busy = [["supervise", "--", "train", "--run", "long"]]
+    assert sfbudget.sf_procs_now(2, lambda: asked.append(1) or busy) == 2
+    assert asked == []  # 3 or fewer: no process listing at all
+    assert sfbudget.sf_procs_now(5, lambda: busy) == sfbudget.TRAINING_SF_PROCS == 3

@@ -43,11 +43,6 @@ def poisson_upper(kept: int, confidence: float = CONFIDENCE) -> float:
     return (low + high) / 2
 
 
-def declares(kept: int, screened: int, positions: int, need: int = NEED) -> bool:
-    """PR-4: the upper bound on the projected file total is below `need`."""
-    return screened > 0 and poisson_upper(kept) * positions / screened < need
-
-
 def look_lines(end: int, first: tuple[int, ...] = FIRST_LOOKS, every: int = LOOK_EVERY) -> Iterator[int]:
     """The look lines up to `end`: `first`, then every `every` lines after the last of them."""
     yield from (line for line in first if line <= end)
@@ -79,6 +74,8 @@ class Look:
 
 
 def look_at(plan: LookPlan, line: int, screened: int, passed: int, kept: int) -> Look:
+    """PR-4's look at `line`: it declares when the upper bound on the projected file total is below
+    plan.need. The screen's LookTracker calls this at each look line; it is the rule's only form."""
     if plan.positions is None or screened == 0:
         return Look(line, screened, passed, kept, None, None, plan.need, False)
     scale = plan.positions / screened

@@ -1,4 +1,5 @@
-"""tools/p7_v2_driver.py: P6 v2's flagship choreography (EVAL.md PR-2), driven against a fake machine.
+"""tools/p7_v2_driver.py: P6 v2's flagship choreography (EVAL.md PR-2), driven against a fake machine
+(the PR-6 side, the user pause and the relaunch's verification, is tests/test_p7_pause.py).
 
 Nothing here trains or starts a process: the fake host answers each blink command the way the real one
 would and writes the files the real command leaves behind (checkpoints, the branch's final row, the
@@ -16,13 +17,14 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tools"))  # the driver imports its siblings p7_machine and p7_guard
 SPEC = importlib.util.spec_from_file_location("p7_v2_driver", REPO / "tools" / "p7_v2_driver.py")
 driver = importlib.util.module_from_spec(SPEC)
 sys.modules["p7_v2_driver"] = driver
 SPEC.loader.exec_module(driver)
 
 RATE = "2621.3"  # a true M rate (PR-5 expects about 2,621 samples/s at micro 256)
-ARMS = {"a01": 0.55115, "a02": 0.5529, "a03": 0.5536}  # final full-valprobe EMA VAA of the seeds
+ARMS = {"a01": 0.55115, "a02": 0.5529, "a03": 0.5497}  # the seeds' real 100% check EMA VAA (D:/blink)
 VALPROBE = 20_000
 PR2 = {"rung": 59_126, "start": 47_301, "cooldown": 11_825}  # EVAL.md PR-2 (adopted): size-m's steps
 
@@ -303,21 +305,48 @@ class FakeHost:
         self.s, self.rate = s, rate
         self.options = {"calibrate": True, "busy": [], "n_star": "m", "branch_vaa": 0.585, "leg1": 0,
                         "branch": 0, "print_rate": True, "write_steps": None, "raise_in": None,
-                        "command_lines": [], **options}  # fmt: skip
+                        "command_lines": [], "calibrate_codes": [], "resumed": "running",
+                        "resumed_step": None, "on_sleep": None, "on_run": None, "processes": [],
+                        "supervisor_gone": False, **options}  # fmt: skip
+        self.launched: list[str] | None = None  # the relaunched supervisor's blink arguments
         self.log: list[tuple] = []  # every call and event, in order
+        self.envs: list[tuple[str, dict]] = []  # (step, the variables the driver added for it)
+        self.now = 1_800_000_000.0  # the fake clock: sleeps advance it
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.log.append(("sleep", seconds))
+        self.now += seconds
+        if self.options["on_sleep"] is not None:
+            self.options["on_sleep"](self)
 
     def reference(self) -> str:
         return driver.train_table(self.s.config_path)["vaa_reference"]
 
-    def run(self, step: str, args: list[str]) -> tuple[int, str]:
+    def run(self, step: str, args: list[str], env: dict | None = None) -> tuple[int, str]:
         self.log.append(("run", step, list(args), self.reference()))
+        self.envs.append((step, dict(env or {})))
         if self.options["raise_in"] == step:
             raise OSError(f"disk gone in {step}")
-        return getattr(self, "_" + step.replace("-", "_"))(args)
+        answer = getattr(self, "_" + step.replace("-", "_"))(args)
+        if self.options["on_run"] is not None:
+            self.options["on_run"](self, step)
+        return answer
 
     def command_lines(self) -> list[str]:
         self.log.append(("ps",))
         return [*self.options["busy"], *self.options["command_lines"]]
+
+    def processes(self) -> list[dict]:
+        """The relaunched flagship's supervisor once launched (unless it died at startup), and any other."""
+        procs = list(self.options["processes"])
+        if self.launched is not None and not self.options["supervisor_gone"]:
+            procs.append(
+                {"pid": 4243, "ppid": 4242, "cmdline": ["python.exe", "-m", "blink.cli", *self.launched]}
+            )
+        return procs
 
     def stop_endgame_screen(self) -> None:
         self.log.append(("stop-screen",))
@@ -343,6 +372,13 @@ class FakeHost:
     _choose = _preflight_choose
 
     def _calibrate(self, args):
+        codes = self.options["calibrate_codes"]  # exit codes for successive calibrations (75: paused)
+        code = codes.pop(0) if codes else 0
+        if code != 0:
+            return (
+                code,
+                f"calibrate: 2,000 steps of configs/long.toml as run calib-long-{len(codes)} (film off)",
+            )
         steps = self.options["write_steps"] or exact_steps(120, self.rate)
         path = self.s.config_path
         text = path.read_text(encoding="utf-8")
@@ -368,6 +404,17 @@ class FakeHost:
         return self.options["branch"], ""
 
     def _launch(self, args):
+        """What the relaunch leaves behind: its supervisor's first record and the trainer's beat, past
+        the rung start unless the test says the flagship is paused by the user or stopped."""
+        self.launched = args[args.index("--") + 1 :]
+        run, resumed = self.s.runs / "long", self.options["resumed"]
+        if resumed is None:  # its supervisor wrote nothing (it died at startup, or hangs)
+            return 0, "launched p7-long: pid 4242 (cmd.exe), python [4243]\n  logs ...\n"
+        step = self.options["resumed_step"] or PR2["start"] + (150 if resumed == "running" else 0)
+        beat = {"state": resumed, "step": step, "time": self.now + 30}
+        (run / "heartbeat.json").write_text(json.dumps(beat), encoding="utf-8")
+        record = {"state": resumed, "status": resumed, "started": self.now}
+        (run / "supervisor.json").write_text(json.dumps(record), encoding="utf-8")
         return 0, "launched p7-long: pid 4242 (cmd.exe), python [4243]\n  logs ...\n"
 
 
@@ -410,8 +457,9 @@ def test_the_driver_runs_the_v2_sequence_and_hands_the_flagship_size_m_as_its_re
 
 
 def test_the_relaunch_stops_at_the_30_percent_check_and_the_status_names_the_preview(tmp_path):
-    """Plan P7: at 30% the long run pauses for the 3 GPU-h preview (PR-2 (2): size-m is its reference;
-    PR-3's parity and soak run on its weights), so the relaunch trains only to the 30% check."""
+    """Plan P7: at 30% the long run pauses for the 3 GPU-h preview (PR-2 (2): size-m is its reference),
+    so the relaunch trains only to the 30% check; PR-6 moved PR-3's parity and soak to the first strength
+    check after 24 training hours, and the status names PR-6's strength check and finish."""
     s = _settings(tmp_path)
     host = FakeHost(s)
     assert driver.drive(s, host) == driver.EXIT_DONE
@@ -420,9 +468,11 @@ def test_the_relaunch_stops_at_the_30_percent_check_and_the_status_names_the_pre
     assert launch[launch.index("--max-steps") + 1] == str(preview) and launch[-1] == "--resume"
     assert driver.load_state(s)["plan"]["preview_step"] == preview
     detail = _status(s)["detail"]
-    assert f"stops at the 30% check, step {preview:,}" in detail
+    assert f"If it reaches the 30% check, step {preview:,}, it stops" in detail
     assert f"--preview-cooldown 3h --from-step {preview}" in detail
     assert "then resume without --max-steps" in detail
+    assert "eval strength --run long" in detail and "p7_finish.py" in detail
+    assert "p7_finish closes runs/long" in detail  # its resume command is refused after the finish
 
 
 def test_the_endgame_screen_stops_before_the_calibration_and_the_keeper_restarts(tmp_path):
@@ -520,7 +570,7 @@ def test_a_reference_set_before_the_branch_exists_is_refused(tmp_path):
 
 def test_a_failed_guard_pauses_the_flagship_at_the_rung_s_start_and_sets_gate_p7_vaa(tmp_path):
     s = _settings(tmp_path)
-    host = FakeHost(s, branch_vaa=0.545)  # the seeds' mean is 0.5526 and 2 sigma about 0.0025
+    host = FakeHost(s, branch_vaa=0.545)  # the seeds' mean is 0.5513 and 2 sigma about 0.0032
     assert driver.drive(s, host) == driver.EXIT_PAUSED
     assert host.steps()[-1] == "branch" and "choose" not in host.steps()
     beat = json.loads((s.runs / "long" / "heartbeat.json").read_text(encoding="utf-8"))

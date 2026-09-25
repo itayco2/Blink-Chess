@@ -3,7 +3,7 @@
 
 blink ops launch --name NAME -- <blink args>    a fully detached job (Win32_Process.Create), prints its PID
 blink ops ps                                    Blink processes and launched jobs, with their heartbeats
-blink ops install-pause-buttons [--to DIR]      Pause Blink.cmd and Resume Blink.cmd onto the Desktop
+blink ops install-pause-buttons [--to DIR]      the Pause, Resume and Status buttons onto the Desktop
 blink supervise --run NAME -- train ...         the trainer as a child, every P7 stop rule enforced
 blink bench throughput|loader|play              measured rates into bench.json (plan P4)
 blink bench parity                              a fast play mode's moves against fp32's, on val roots
@@ -80,7 +80,7 @@ def cmd_install_pause_buttons(args: argparse.Namespace) -> int:
     from blink.ops import buttons
 
     target = Path(args.to) if args.to else buttons.default_target()
-    names = " and ".join(buttons.BUTTONS)
+    names = ", ".join(buttons.BUTTONS)
     if args.dry_run:
         _say(f"would copy {names} from {buttons.BUTTONS_DIR} to {target}")
         return 0
@@ -115,12 +115,46 @@ def _bench_rate(args: argparse.Namespace) -> tuple[float | None, str]:
 
 
 def _train_tables(train_args: list[str]) -> dict | None:
-    """The [model] and [train] tables of the child's `--config`, or None without one."""
+    """The [model] and [train] tables the child trains with: its `--config`'s; for a branch, which names
+    none (blink.commands.train takes its config from the parent checkpoint), the branch's; else None."""
     from blink.model.config import read_tables
+    from blink.train import supervise
 
-    if "--config" not in train_args[:-1]:
-        return None
-    return read_tables(train_args[train_args.index("--config") + 1])
+    if "--config" in train_args[:-1]:
+        return read_tables(train_args[train_args.index("--config") + 1])
+    return _branch_tables(train_args) if supervise.is_branch(train_args) else None
+
+
+def _flag_value(args: list[str], flag: str) -> str | None:
+    found = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == flag]
+    found += [arg.split("=", 1)[1] for arg in args if arg.startswith(flag + "=")]
+    return found[0] if found else None
+
+
+def _branch_tables(train_args: list[str]) -> dict:
+    """A branch's config as blink train reads it: runs/<branch>/config.json on --resume once it exists,
+    else the parent's checkpoint at --from-step (so a size-m branch is policed as the flagship is)."""
+    from blink.train import supervise
+
+    runs = paths.home() / "runs"
+    saved = runs / supervise.branch_run(train_args) / "config.json"
+    if "--resume" in train_args and saved.is_file():
+        return _tables_of(json.loads(saved.read_text(encoding="utf-8"))["config"])
+    from blink.train.checkpoint import checkpoint_name, load_checkpoint
+
+    step = _flag_value(train_args, "--from-step")
+    parent = runs / str(_flag_value(train_args, "--run")) / checkpoint_name(int(step or 0))
+    if step is None or not parent.is_file():
+        raise FileNotFoundError(f"the branch's parent checkpoint {parent} is not there to read its config")
+    return _tables_of(load_checkpoint(parent)["config"])
+
+
+def _tables_of(config: dict) -> dict:
+    """A saved config (blink.model.config.config_to_dict) as the [model] and [train] tables."""
+    return {
+        "model": dict(config.get("model") or {}),
+        "train": {k: v for k, v in config.items() if k != "model"},
+    }
 
 
 def _train_compile_mode(train_args: list[str]) -> str | None:
@@ -160,12 +194,15 @@ def _supervise_config(args: argparse.Namespace):
 
 
 def cmd_supervise(args: argparse.Namespace) -> int:
-    from blink.train import status, supervise, userpause
+    from blink.train import finished, status, supervise, userpause
 
     try:
         run = supervise.run_of(_rest(args.train_args), args.run)
         if not status.valid_run_name(run):
             raise ValueError(f"bad run name {run!r} (letters, digits, _ - . only)")
+        closed = finished.refusal(paths.home() / "runs" / run)  # PR-6's finish closed it
+        if closed:
+            raise ValueError(closed)
         cfg, throughput = _supervise_config(args)
         argv = supervise.child_argv(supervise.train_argv(_rest(args.train_args), run))
     except (FileNotFoundError, ValueError) as exc:
@@ -203,7 +240,7 @@ def _register_ops(sub: argparse._SubParsersAction) -> None:
     ps.add_argument("--recent", type=int, default=5, help="how many launch records to show")
     ps.set_defaults(func=cmd_ps)
     buttons = actions.add_parser(
-        "install-pause-buttons", help="copy Pause Blink.cmd and Resume Blink.cmd onto the Desktop"
+        "install-pause-buttons", help="copy the Pause, Resume and Blink Status buttons onto the Desktop"
     )
     buttons.add_argument("--to", help="the folder to copy them into (default: the user's Desktop)")
     buttons.add_argument("--dry-run", action="store_true", help="say where they would go and stop")
@@ -216,7 +253,11 @@ def _register_supervise(sub: argparse._SubParsersAction) -> None:
     sup = sub.add_parser("supervise", help="run `train ...` as a child and enforce every stop rule")
     sup.add_argument("--run", help="the run name (default: the --run of the train command)")
     sup.add_argument("--bench-rate", type=float, help="benchmark samples/s; turns the throughput rule on")
-    sup.add_argument("--bench-size", help="take the benchmark from bench.json's best row for this size")
+    sup.add_argument(
+        "--bench-size",
+        help="take the benchmark from bench.json's best row for this size, at the micro-batch and compile "
+        "mode the child trains with (a branch: its parent checkpoint's)",
+    )
     sup.add_argument("--bench", help="bench.json for --bench-size (default BLINK_HOME/eval/bench.json)")
     sup.add_argument("--interval", type=float, default=60.0, help="seconds between rule checks")
     sup.add_argument("--stale", type=float, default=60.0, help="heartbeat age that stops the run")

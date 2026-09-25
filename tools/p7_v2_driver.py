@@ -1,25 +1,35 @@
 """P6 v2's flagship choreography (EVAL.md PR-2), run detached: calibrate, leg 1, the size-m branch, the
-guard, the N* record, then the flagship resumed with size-m as its reference.
+guard, the N* record, then the flagship resumed with size-m as its reference, trained under PR-6.
 
 Run it ONLY after P5 has ended (PR-2 was adopted on 2026-09-25), the recipe is frozen and EVAL.md v1 is
-tagged, from the worktree the flagship trains in (it must hold the p6v2 and p7prep merges). Launch it
-through WMI so it outlives the agent session (PF38), for example:
+tagged, from the worktree the flagship trains in (it must hold the p6v2, p7prep and p7final merges).
+Launch it through WMI so it outlives the agent session (PF38), for example:
 
     powershell -NoProfile -Command "Invoke-CimMethod -ClassName Win32_Process -MethodName Create
       -Arguments @{CommandLine='C:\\dev\\blink-chess\\.venv\\Scripts\\python.exe tools\\p7_v2_driver.py';
       CurrentDirectory='C:\\dev\\blink-run'}"
 
 With no flags it branches size-m at PR-2's step 47,301 over 11,825 steps; rerun it with the same flags.
-`--dry-run --rate R` prints the plan and every command and runs nothing. Each step logs to
-<home>/logs/p7v2-<step>.out|err; the state goes to p7v2.status.json (and p7v2.state.json):
+`--dry-run --rate R` prints the plan and every command and runs nothing. One instance runs at a time
+(logs/p7v2.lock holds its pid and create time; a stale lock is replaced). Each step logs to
+<home>/logs/p7v2-<step>.out|err; the state goes to p7v2.status.json (and p7v2.state.json).
+
+The PC is Itay's during the day (PR-6): no step starts while BLINK_HOME/PAUSE is up (the Pause Blink
+button), and a heartbeat or supervisor.json saying "paused: user" is alive, never a failure, and never
+counted toward a timeout. The supervised steps wait out a pause inside `blink supervise` itself.
 
 0. preflight: no blink train/supervise/sweep process runs; configs/sweep.toml's rule is "prior";
-   --preview-steps/--preview-name exist; `sweep choose` into a scratch file says N* = m. Nothing
-   trains when any of these fails.
+   configs/long.toml's vaa_sigma is sigma_EMA, the sample sd of a01-a03's 100% check EMA VAA (what the
+   guard computes), to its printed precision; --preview-steps/--preview-name exist; `sweep choose` into a
+   scratch file says N* = m. Nothing trains when any of these fails.
 1. calibrate (PR-5): the endgame screen is stopped (PR-4: never during a calibration), then `blink
    train calibrate --config configs/long.toml --steps 2000 --write` measures R_true and writes
    long.toml's steps = floor(120 x 3600 x R_true / 1024). The driver reads R_true from its output
-   and checks those steps; it fails clearly when the command is missing.
+   and checks those steps; it fails clearly when the command is missing. The calibration runs with
+   BLINK_PAUSE_RESUMER=1 (this driver reruns a paused one), so Pause Blink stops it at its next step and
+   frees the GPU. A user pause inside the calibration (it exits 75, or its calibration.json or metrics
+   rows show a pause or restart) is never used: the driver waits for Resume and calibrates again as a
+   fresh run.
 2. plan: size-m is PR-2's literal 59,126-step M run (adopted 2026-09-25: "branched from the flagship at
    step 47,301"), cooling down over round(0.2 x 59,126) = 11,825 steps from 47,301
    (blink.train.schedule), whatever R_true is. 6 h at R_true, floor(6 x 3600 x R_true / 1024) steps
@@ -33,29 +43,35 @@ With no flags it branches size-m at PR-2's step 47,301 over 11,825 steps; rerun 
    --preview-name size-m`; it inherits vaa_reference "" so its end check is skipped.
 5. guard (PR-2 (3)): Delta = size-m's final EMA VAA - the mean final EMA VAA of a01-a03, all on the full
    valprobe. If Delta < -2 sigma_EMA (their sample sd), the flagship stays paused at START: runs/long's
-   heartbeat says "paused: P7-VAA" (gate P7-VAA) and the driver stops. The numbers go to
-   eval/size_guard.json either way.
+   heartbeat says "paused: P7-VAA" (gate P7-VAA) and the driver stops. The numbers, and long.toml's
+   vaa_sigma beside sigma_EMA, go to eval/size_guard.json either way.
 6. `blink sweep choose` (rule prior) records the floor, VRAM and p99 facts in eval/sweep.json.
 7. long.toml's vaa_reference = "size-m"; the flagship is relaunched detached (`ops launch --name
    p7-long -- supervise -- train ... --max-steps P --resume`) and the priority keeper restarted. P is the
    30% check (blink.train.vaa.check_steps), where the plan's P7 pauses the long run for the 3 GPU-h
-   preview (size-m is its reference, PR-2 (2); PR-3's parity and soak run on its weights). The driver
-   ends there: its done status names P and the two commands that follow, `train --run long --data DATA
-   --preview-cooldown 3h --from-step P`, then the relaunch without --max-steps.
+   preview (size-m is its reference, PR-2 (2)). The driver is done only once runs/long's heartbeat says
+   running (or "paused: user") past step START, polled for up to 10 minutes of unpaused time; otherwise
+   it fails with the supervisor's state.
 
-Stdlib only: it imports nothing from the repo, so code changes cannot reach it mid-run. A rerun (after a
-reboot, say) picks up where the files say it stopped: checkpoints, size-m's final row, the state file.
-It never calibrates once leg 1 has a checkpoint, refuses a plan other than the recorded one from then on
-(rerun it with the first launch's flags), and does nothing once the flagship was launched.
+After the driver, PR-6 sets the flagship's length: it trains whenever Itay does not need the GPU (always
+at night) and pauses when he asks (Pause Blink / Resume Blink; Blink Status shows the state). At each
+pause, or at least daily, `blink eval strength --run long` scores the latest EMA checkpoint on the first
+2,000 DeepMind puzzles beside DM-9M's 86.6% and the earlier checks; PR-3's parity and soak run at the
+first check after 24 training hours (the command says when), not at the 30% preview. When Itay says the
+level is good enough, `python tools\\p7_finish.py` re-plans the run: the final 20% 1-sqrt cooldown
+branches from the current step as run long-final. long.toml's steps (PR-5's 120 h) stay the upper bound.
+
+Stdlib only (with psutil): it imports nothing from the repo, so code changes cannot reach it mid-run
+(tools/p7_machine.py and tools/p7_guard.py are loaded at its start). A rerun (after a reboot, say)
+picks up where the files say it stopped: checkpoints, size-m's final row, the state file. It never
+calibrates once leg 1 has a checkpoint, refuses a plan other than the recorded one from then on (rerun
+it with the first launch's flags), and does nothing once the flagship was launched.
 """
 
 import argparse
 import json
 import math
-import os
 import re
-import statistics
-import subprocess
 import sys
 import time
 import tomllib
@@ -63,27 +79,50 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from p7_guard import PAUSED_VAA, check_sigma, final_full_row, guard, guard_verdict, mark_paused  # noqa: F401
+from p7_machine import (  # noqa: F401 - the tests and p7_finish read these from here
+    EXIT_USER_PAUSE,
+    KEEPER,
+    PAUSED_USER,
+    RESUMER_ENV,
+    Host,
+    LockHeld,
+    StepFailed,
+    acquire_lock,
+    checkpoint_name,
+    checkpoint_steps,
+    flag_path,
+    parse_number,
+    read_json,
+    read_json_or_empty,
+    read_rows,
+    release_lock,
+    run_processes,
+    run_state,
+    set_train_string,
+    train_literal,
+    train_table,
+    user_paused,
+    wait_while_flagged,
+    write_atomic,
+)
+
 EXIT_DONE, EXIT_FAILED, EXIT_REFUSED, EXIT_PAUSED = 0, 1, 2, 3
 CALIBRATE = ("train", "calibrate")
 BUSY = re.compile(r"blink\.cli\s+(train|supervise|sweep)\b")
-CHECKPOINT = re.compile(r"^ckpt_(\d+)\.pt$")
 RATE = re.compile(r"\bR[_ ]?true\b[^0-9\n]{0,24}([0-9][0-9,]*(?:\.[0-9]+)?)", re.IGNORECASE)
 N_STAR = re.compile(r"^N\* = (\S+)", re.MULTILINE)
+CALIB_RUN = re.compile(r"\bas run (\S+)")  # blink train calibrate's first line names its run
 FIRST_CHECK = 0.05  # the flagship's first check (blink.train.vaa.CHECK_FRACS)
 PREVIEW_CHECK = 0.30  # the check the long run pauses at for the 3 GPU-h preview (plan P7)
 PR2_RUNG_STEPS = 59_126  # EVAL.md PR-2: size-m is a 59,126-step M run, branched at 47,301
 PLAN_STEPS = ("batch", "long_steps", "rung_steps", "rung_cooldown", "rung_start", "first_check",
               "preview_step")  # the plan's numbers a rerun must keep  # fmt: skip
-TOLERANCE = 1e-9  # float slack for a pre-registered comparison (blink.train.nstar)
-PAUSED_VAA = "paused: P7-VAA"  # blink.train.supervise's pause status: gate P7-VAA
-KEEPER = "keep_training_priority.ps1"
-DETACHED = 0x00000008 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-
-class StepFailed(RuntimeError):
-    def __init__(self, step: str, detail: str) -> None:
-        super().__init__(f"{step}: {detail}")
-        self.step, self.detail = step, detail
+MAX_CALIBRATIONS = 20  # calibrations a row of user pauses may cost before the driver gives up
+VERIFY_S = 600.0  # unpaused seconds the relaunched flagship has to train past the rung start
+PROCESS_GRACE_S = 60.0  # after the launch, a runs/long with no process at all has lost its supervisor
+VERIFY_POLL_S = 10.0
+ENDED = ("finished", "stopped", "paused")  # supervisor.json states after which nothing trains
 
 
 @dataclass(frozen=True)
@@ -197,13 +236,6 @@ def make_plan(
                 rate_rung_steps=derived)  # fmt: skip
 
 
-def parse_number(text: str) -> tuple[float, float]:
-    """'2,621.44' -> (2621.44, 0.005): the value and half its last printed digit."""
-    digits = text.replace(",", "")
-    decimals = len(digits.split(".", 1)[1]) if "." in digits else 0
-    return float(digits), 0.5 * 10.0**-decimals
-
-
 def read_rate(output: str) -> tuple[float, float] | None:
     """The last R_true a calibration printed, with its printed precision, or None."""
     found = RATE.findall(output)
@@ -228,65 +260,7 @@ def pinned_rate(rate: float, steps: int, hours: float, batch: int) -> float:
     return min(max(rate, low), high)
 
 
-# ---------------------------------------------------------------- files
-
-
-def train_table(path: Path, seen: tuple[Path, ...] = ()) -> dict[str, Any]:
-    """A config's [train] table with its `base` chain resolved (blink.model.config.read_tables)."""
-    path = path.resolve()
-    if path in seen:
-        raise ValueError(f"config base cycle at {path}")
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    base = train_table(path.parent / str(data["base"]), (*seen, path)) if "base" in data else {}
-    return {**base, **data.get("train", {})}
-
-
-def set_train_string(path: Path, key: str, value: str) -> None:
-    """Set [train] key = "value" in place, keeping comments and line endings; the file must then parse to
-    exactly that one change."""
-    with open(path, encoding="utf-8", newline="") as handle:
-        text = handle.read()
-    before = tomllib.loads(text)
-    pattern = re.compile(rf'^([ \t]*{re.escape(key)}[ \t]*=[ \t]*)"[^"\r\n]*"', re.MULTILINE)
-    new, count = pattern.subn(lambda m: m.group(1) + json.dumps(value), text, count=1)
-    after = tomllib.loads(new)
-    if count != 1 or after != {**before, "train": {**before.get("train", {}), key: value}}:
-        raise ValueError(f"{path} has no single [train] {key} string to set")
-    write_atomic(path, new)
-
-
-def write_atomic(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as handle:
-        handle.write(text)
-    for attempt in range(5):  # a reader holding the file blocks os.replace on Windows
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == 4:
-                raise
-            time.sleep(0.2)
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def read_rows(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-
-def checkpoint_steps(run_dir: Path) -> list[int]:
-    if not run_dir.is_dir():
-        return []
-    return sorted(int(m.group(1)) for p in run_dir.iterdir() if (m := CHECKPOINT.match(p.name)))
-
-
-def checkpoint_name(step: int) -> str:
-    return f"ckpt_{step:09d}.pt"
+# ---------------------------------------------------------------- state
 
 
 def status(s: Settings, state: str, step: str, detail: str = "") -> None:
@@ -303,98 +277,15 @@ def save_state(s: Settings, state: dict[str, Any]) -> None:
     write_atomic(s.path(".state.json"), json.dumps(state, indent=1) + "\n")
 
 
-# ---------------------------------------------------------------- the guard
+def begin(s: Settings, host, step: str, detail: str = "") -> None:
+    """Start a step, once BLINK_HOME/PAUSE is gone: while it is up the status says so and nothing starts."""
 
+    def waiting() -> None:
+        status(s, PAUSED_USER, step, f"BLINK_HOME/{flag_path(s.home).name} is up: {step} starts once "
+                                     "Resume Blink removes it")  # fmt: skip
 
-def guard_verdict(branch_vaa: float, arm_vaas: list[float], sigma_factor: float = 2.0) -> dict[str, Any]:
-    """PR-2 (3): Delta = the branch's final EMA VAA - the arms' mean; it fails when Delta < -2 sigma_EMA,
-    sigma_EMA being the arms' sample standard deviation."""
-    mean, sigma = statistics.fmean(arm_vaas), statistics.stdev(arm_vaas)
-    delta, threshold = branch_vaa - mean, -sigma_factor * sigma
-    return {"mean": mean, "sigma_ema": sigma, "delta": delta, "threshold": threshold,
-            "passed": delta >= threshold - TOLERANCE}  # fmt: skip
-
-
-def final_full_row(run_dir: Path) -> dict[str, Any]:
-    """A run's full-valprobe EMA VAA row at its last planned step."""
-    planned = int(read_json(run_dir / "config.json")["config"]["steps"])
-    rows = [r for r in read_rows(run_dir / "evals.jsonl") if r.get("vaa_set") == "full" and "ema_vaa" in r]
-    if not rows or rows[-1]["step"] != planned:
-        raise ValueError(f"{run_dir.name} has no full-valprobe EMA VAA at its last step {planned:,}")
-    return rows[-1]
-
-
-def guard(s: Settings) -> dict[str, Any]:
-    """The guard's inputs from ablations.json, the arms' evals and the branch's, and its verdict."""
-    arms = read_json(s.home / "eval" / "ablations.json").get("arms", {})
-    rows = {}
-    for name in s.arms:
-        entry = arms.get(name) or {}
-        if not str(entry.get("status", "")).startswith("finished") or not entry.get("run"):
-            raise ValueError(f"arm {name} has not finished in ablations.json")
-        rows[name] = final_full_row(s.runs / entry["run"])
-    branch = final_full_row(s.runs / s.branch)
-    probes = {row.get("vaa_n") for row in (*rows.values(), branch)}
-    if len(probes) != 1:
-        raise ValueError(f"the final rows scored different valprobes ({sorted(map(str, probes))} roots)")
-    verdict = guard_verdict(branch["ema_vaa"], [rows[a]["ema_vaa"] for a in s.arms], s.sigma_factor)
-    picked = {a: {"step": r["step"], "ema_vaa": r["ema_vaa"]} for a, r in rows.items()}
-    return {
-        "rule": "PR-2 (3): Delta = size-m final EMA VAA - mean final EMA VAA of a01-a03; pause if "
-        f"Delta < -{s.sigma_factor:g} sigma_EMA (their sample sd); not equal GPU-hours, no scaling law",
-        "branch": {"run": s.branch, "step": branch["step"], "ema_vaa": branch["ema_vaa"]},
-        "arms": picked,
-        "vaa_n": branch.get("vaa_n"),
-        **verdict,
-    }
-
-
-def mark_paused(run_dir: Path, detail: str) -> None:
-    """Gate P7-VAA as the supervisor sets it: `blink status` then reports the run as paused."""
-    path = run_dir / "heartbeat.json"
-    beat = read_json(path) if path.is_file() else {}
-    record = {**beat, "state": "paused", "stopped": PAUSED_VAA, "detail": detail, "time": time.time()}
-    write_atomic(path, json.dumps(record))
-
-
-# ---------------------------------------------------------------- the machine
-
-
-class Host:
-    """The real machine: blink commands as children, process listings and detached starts."""
-
-    def __init__(self, s: Settings) -> None:
-        self.s = s
-        self.env = {**os.environ, "BLINK_HOME": str(s.home), "PYTHONUTF8": "1"}
-
-    def run(self, step: str, blink_args: list[str]) -> tuple[int, str]:
-        out_path, err_path = self.s.path(f"-{step}.out"), self.s.path(f"-{step}.err")
-        argv = [str(self.s.python), "-m", "blink.cli", *blink_args]
-        with open(out_path, "w", encoding="utf-8") as out, open(err_path, "w", encoding="utf-8") as err:
-            code = subprocess.run(argv, cwd=self.s.repo, env=self.env, stdout=out, stderr=err).returncode
-        return code, out_path.read_text(encoding="utf-8", errors="replace")
-
-    def command_lines(self) -> list[str]:
-        """Every python.exe and powershell.exe command line (Windows has no pgrep)."""
-        query = (
-            "Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'python.exe','powershell.exe' } | "
-            "ForEach-Object { $_.CommandLine }"
-        )
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", query], capture_output=True, text=True)
-        return [line for line in out.stdout.splitlines() if line.strip()]
-
-    def stop_endgame_screen(self) -> None:
-        """Kill any `blink eval endgames` tree (its Stockfish children too); it resumes from its cache."""
-        query = (
-            "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-            r"Where-Object { $_.CommandLine -match 'blink\.cli\s+eval\s+endgames' } | "
-            "ForEach-Object { taskkill /PID $_.ProcessId /T /F }"
-        )
-        subprocess.run(["powershell", "-NoProfile", "-Command", query], capture_output=True, text=True)
-
-    def start_keeper(self, script: Path) -> None:
-        args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"]
-        subprocess.Popen([*args, str(script)], cwd=script.parent, creationflags=DETACHED)
+    wait_while_flagged(s.home, host, waiting)
+    status(s, "running", step, detail)
 
 
 def busy_commands(lines: list[str]) -> list[str]:
@@ -441,12 +332,18 @@ def preview_args(s: Settings, plan: Plan) -> list[str]:
 
 
 def after_launch(s: Settings, plan: Plan) -> str:
-    """What follows the driver: the flagship stops at the 30% check, the preview runs, the run resumes."""
+    """What follows the driver: PR-6's pauses, strength checks and finish; the 30% preview if reached."""
     blink = "python -m blink.cli"
+    pr6 = (
+        f"it trains under PR-6: pause it with Pause Blink, check it with `{blink} eval strength --run "
+        f"{s.run}` at each pause, and when the level is good enough re-plan it with `python "
+        "tools\\p7_finish.py`"
+    )
+    preview = f"`{blink} {' '.join(preview_args(s, plan))}`"
     return (
-        f"it stops at the 30% check, step {plan.preview_step:,}: run the 3 GPU-h preview `{blink} "
-        f"{' '.join(preview_args(s, plan))}` (PR-3's parity and soak on its weights), then resume without "
-        f"--max-steps: `{blink} {' '.join(launch_args(s))}`"
+        f"{pr6}. If it reaches the 30% check, step {plan.preview_step:,}, it stops: run the 3 GPU-h preview "
+        f"{preview}, then resume without --max-steps: `{blink} {' '.join(launch_args(s))}` (refused once "
+        f"p7_finish closes runs/{s.run}: its finish is final)"
     )
 
 
@@ -481,13 +378,14 @@ def choose_n_star(s: Settings, host, step: str, extra: list[str]) -> str:
 
 
 def preflight(s: Settings, host) -> None:
-    status(s, "running", "preflight")
+    begin(s, host, "preflight")
     busy = busy_commands(host.command_lines())
     if busy:
         raise StepFailed("preflight", f"a blink process holds the GPU, so nothing started: {busy[0][:200]}")
     rule = tomllib.loads((s.repo / s.sweep_config).read_text(encoding="utf-8")).get("choose", {}).get("rule")
     if rule != "prior":
         raise StepFailed("preflight", f"{s.sweep_config} rule is {rule!r}, not 'prior': P6 v2 is not merged")
+    check_sigma(s)
     _, text = host.run("probe-branch", ["train", "--help"])
     if "--preview-steps" not in text or "--preview-name" not in text:
         raise StepFailed("preflight", "`blink train` has no --preview-steps/--preview-name: merge p7prep")
@@ -514,8 +412,32 @@ def calibrate_supported(help_text: str) -> bool:
     return named and "--write" in help_text
 
 
+def calibration_run(s: Settings, out: str) -> Path | None:
+    """The calibration's run directory, from the first line `blink train calibrate` prints."""
+    named = CALIB_RUN.findall(out)
+    return s.runs / named[0] if named else None
+
+
+def refusal(run_dir: Path | None) -> dict[str, Any]:
+    """Why blink train calibrate refused its run (its calibration.json), or {}."""
+    return {} if run_dir is None else read_json_or_empty(run_dir / "calibration.json").get("refused") or {}
+
+
+def calibration_paused(s: Settings, code: int, out: str) -> bool:
+    """A user pause (or a restart) inside the calibration: it exited 75, or its run's calibration.json
+    refused it for one, or its heartbeat or metrics rows show one (two trainer sessions)."""
+    run_dir = calibration_run(s, out)
+    if code == EXIT_USER_PAUSE or run_dir is None:
+        return code == EXIT_USER_PAUSE
+    sessions = {row.get("session") for row in read_rows(run_dir / "metrics.jsonl")}
+    beat, _ = run_state(run_dir)
+    paused = refusal(run_dir).get("kind") in ("pause", "restart")
+    return paused or len(sessions) > 1 or beat.get("state") == PAUSED_USER
+
+
 def run_calibration(s: Settings, host) -> tuple[float, float]:
-    """PR-5's 2,000-step calibration through `blink train calibrate`; R_true from its output."""
+    """PR-5's 2,000-step calibration through `blink train calibrate`; R_true from its output. One with a
+    user pause inside is never used: a fresh one runs once the flag is gone."""
     code, text = host.run("probe-calibrate", [*CALIBRATE, "--help"])
     if code != 0 or not calibrate_supported(text):
         raise StepFailed(
@@ -525,19 +447,27 @@ def run_calibration(s: Settings, host) -> tuple[float, float]:
         )
     args = [*CALIBRATE, "--config", s.config, "--steps", str(s.calib_steps), "--write"]
     args += ["--data", str(s.data)] if "--data" in text else []
-    host.stop_endgame_screen()  # PR-4: the screen never runs during a calibration
-    code, out = host.run("calibrate", args)
-    if code != 0:
-        raise StepFailed("calibrate", f"exit {code}: see p7v2-calibrate.out and .err")
-    found = read_rate(out)
-    if found is None:
-        raise StepFailed("calibrate", "no R_true in p7v2-calibrate.out: pass --rate R_true from it")
-    return found
+    for attempt in range(1, MAX_CALIBRATIONS + 1):
+        begin(s, host, "calibrate", f"attempt {attempt}" if attempt > 1 else "")
+        host.stop_endgame_screen()  # PR-4: the screen never runs during a calibration
+        code, out = host.run("calibrate", args, env={RESUMER_ENV: "1"})  # this loop reruns a paused one
+        if calibration_paused(s, code, out):
+            why = "a user pause landed inside the calibration, which is never used: a fresh one runs"
+            status(s, PAUSED_USER, "calibrate", f"{why} once Blink is resumed")
+            continue
+        if code != 0:
+            why = refusal(calibration_run(s, out)).get("detail") or "see p7v2-calibrate.out and .err"
+            raise StepFailed("calibrate", f"exit {code}: {why}")
+        found = read_rate(out)
+        if found is None:
+            raise StepFailed("calibrate", "no R_true in p7v2-calibrate.out: pass --rate R_true from it")
+        return found
+    raise StepFailed("calibrate", f"{MAX_CALIBRATIONS} calibrations in a row had a user pause in them")
 
 
 def calibrated(s: Settings, host, state: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     """R_true: --rate, else the recorded calibration, else a new one (never once leg 1 has started)."""
-    status(s, "running", "calibrate")
+    begin(s, host, "calibrate")
     if s.rate is not None:
         rate, eps = s.rate, s.rate_eps
     elif "rate" in state:
@@ -591,7 +521,7 @@ def leg_one(s: Settings, host, plan: Plan) -> None:
     steps = checkpoint_steps(s.runs / s.run)
     if steps and steps[-1] >= plan.rung_start:
         return
-    status(s, "running", "leg1", f"to step {plan.rung_start:,} ({plan.hours(plan.rung_start):.2f} h)")
+    begin(s, host, "leg1", f"to step {plan.rung_start:,} ({plan.hours(plan.rung_start):.2f} h)")
     code, _ = host.run("leg1", leg_one_args(s, plan, resume=bool(steps)))
     if code != 0:
         raise StepFailed("leg1", f"supervise exit {code}: see p7v2-leg1.out and runs/{s.run}/supervisor.json")
@@ -604,12 +534,8 @@ def branch(s: Settings, host, plan: Plan) -> None:
         return
     if not (s.runs / s.run / checkpoint_name(plan.rung_start)).is_file():
         raise StepFailed("branch", f"runs/{s.run} no longer has {checkpoint_name(plan.rung_start)} to branch")
-    status(
-        s,
-        "running",
-        "branch",
-        f"{plan.rung_cooldown:,} cooldown steps ({plan.hours(plan.rung_cooldown):.2f} h)",
-    )
+    hours = plan.hours(plan.rung_cooldown)
+    begin(s, host, "branch", f"{plan.rung_cooldown:,} cooldown steps ({hours:.2f} h)")
     code, _ = host.run("branch", branch_args(s, plan, resume=bool(checkpoint_steps(s.runs / s.branch))))
     if code != 0:
         raise StepFailed(
@@ -621,28 +547,71 @@ def branch(s: Settings, host, plan: Plan) -> None:
         )
 
 
-def run_guard(s: Settings, plan: Plan) -> dict[str, Any]:
-    status(s, "running", "guard")
+def run_guard(s: Settings, host, plan: Plan) -> dict[str, Any]:
+    begin(s, host, "guard")
     try:
         verdict = guard(s)
     except (OSError, ValueError, KeyError) as exc:
         raise StepFailed("guard", str(exc)) from exc
     rung = {"steps": plan.rung_steps, "start": plan.rung_start, "cooldown": plan.rung_cooldown,
             "rule": plan.rung_rule, "rate_steps": plan.rate_rung_steps}  # fmt: skip
-    write_atomic(s.home / "eval" / "size_guard.json", json.dumps({**verdict, "rung": rung}, indent=1) + "\n")
+    record = {**verdict, "rung": rung, "vaa_sigma": check_sigma(s)}
+    write_atomic(s.home / "eval" / "size_guard.json", json.dumps(record, indent=1) + "\n")
     return verdict
 
 
-def relaunch(s: Settings, host, state: dict[str, Any], plan: Plan) -> None:
-    status(s, "running", "launch")
+def relaunch(s: Settings, host, state: dict[str, Any], plan: Plan) -> float:
+    """The flagship relaunched detached; returns when (the clock) it was launched."""
+    begin(s, host, "launch")
     if train_table(s.config_path).get("vaa_reference", "") != s.branch:
         set_train_string(s.config_path, "vaa_reference", s.branch)
+    launched_at = host.clock()
     code, out = host.run("launch", launch_args(s, plan))
     if code != 0:
         raise StepFailed("launch", f"ops launch exit {code}: see p7v2-launch.out and .err")
     launched = next((line for line in out.splitlines() if line.startswith("launched")), "launched")
     save_state(s, {**state, "launched": launched})
     ensure_keeper(s, host)
+    return launched_at
+
+
+def since(record: dict[str, Any], key: str, launched_at: float) -> dict[str, Any]:
+    """A record written since the launch, else {}: leg 1's heartbeat and supervisor.json never count."""
+    return record if float(record.get(key) or 0) >= launched_at - 1 else {}
+
+
+def trains_past(beat: dict[str, Any], start: int) -> bool:
+    step = beat.get("step")
+    return beat.get("state") in ("running", PAUSED_USER) and isinstance(step, int) and step > start
+
+
+def verify_resumed(s: Settings, host, plan: Plan, launched_at: float) -> str:
+    """Done only once runs/long trains again: its heartbeat running (or paused by the user) past the rung
+    start, within VERIFY_S seconds that were not paused by the user. Paused means a heartbeat or
+    supervisor.json since the launch says so, never the flag alone; and PROCESS_GRACE_S after the
+    launch, a runs/long that no process serves fails at once (its supervisor died at startup)."""
+    status(s, "running", "verify", f"waiting for runs/{s.run} to train past step {plan.rung_start:,}")
+    counted, last = 0.0, host.clock()
+    logs = f"runs/{s.run}/supervisor.json and logs/{s.launch_name}.err"
+    while True:
+        found = run_state(s.runs / s.run)
+        beat, record = since(found[0], "time", launched_at), since(found[1], "started", launched_at)
+        if trains_past(beat, plan.rung_start):
+            return f"runs/{s.run} is {beat['state']} at step {beat['step']:,}"
+        if record.get("state") in ENDED:
+            raise StepFailed("verify", f"runs/{s.run}'s supervisor is {record.get('status')}: see {logs}")
+        now = host.clock()
+        if now - launched_at >= PROCESS_GRACE_S and not any(run_processes(host, s.run)):
+            why = f"no process serves runs/{s.run} {now - launched_at:.0f} s after the launch"
+            raise StepFailed("verify", f"{why}: its supervisor died at startup; see {logs}")
+        counted += 0.0 if user_paused(beat, record) else now - last
+        last = now
+        if counted >= VERIFY_S:
+            said = f"supervisor {record.get('status') or 'silent since the launch'}"
+            where = f"heartbeat {beat.get('state', 'none')} at step {beat.get('step')}"
+            why = f"did not train past step {plan.rung_start:,} in {VERIFY_S / 60:.0f} minutes"
+            raise StepFailed("verify", f"runs/{s.run} {why}: {said}, {where}; see {logs}")
+        host.sleep(VERIFY_POLL_S)
 
 
 def rung_line(plan: Plan) -> str:
@@ -666,10 +635,10 @@ SCREEN_NOTE = (
 )
 
 
-def finished(s: Settings, state: dict[str, Any], plan: Plan, verdict: dict[str, Any]) -> str:
+def finished(s: Settings, state: dict[str, Any], plan: Plan, verdict: dict[str, Any], resumed: str) -> str:
     screen = SCREEN_NOTE if state.get("screen_stopped") else ""
-    resumed = f"flagship resumed with vaa_reference {s.branch!r}; {after_launch(s, plan)}"
-    return f"{resumed}. {describe(plan, verdict)}.{screen}"
+    flagship = f"flagship resumed with vaa_reference {s.branch!r} ({resumed}); {after_launch(s, plan)}"
+    return f"{flagship}. {describe(plan, verdict)}.{screen}"
 
 
 def drive(s: Settings, host) -> int:
@@ -686,7 +655,7 @@ def drive(s: Settings, host) -> int:
         save_state(s, state := locked_plan(s, state, plan))
         leg_one(s, host, plan)
         branch(s, host, plan)
-        verdict = run_guard(s, plan)
+        verdict = run_guard(s, host, plan)
         if not verdict["passed"]:
             detail = (
                 f"P6 v2 guard failed, flagship paused at step {plan.rung_start:,}: {describe(plan, verdict)}"
@@ -694,9 +663,9 @@ def drive(s: Settings, host) -> int:
             mark_paused(s.runs / s.run, detail)
             status(s, "paused", "guard", detail)
             return EXIT_PAUSED
-        status(s, "running", "choose")
+        begin(s, host, "choose")
         choose_n_star(s, host, "choose", [])
-        relaunch(s, host, state, plan)
+        resumed = verify_resumed(s, host, plan, relaunch(s, host, state, plan))
     except StepFailed as exc:
         status(s, "failed", exc.step, exc.detail)
         return EXIT_FAILED
@@ -704,7 +673,7 @@ def drive(s: Settings, host) -> int:
         step = read_json(s.path(".status.json")).get("step", "?") if s.path(".status.json").is_file() else "?"
         status(s, "failed", step, f"{type(exc).__name__}: {exc}")
         raise
-    status(s, "done", "launch", finished(s, state, plan, verdict))
+    status(s, "done", "launch", finished(s, state, plan, verdict, resumed))
     return EXIT_DONE
 
 
@@ -736,6 +705,8 @@ def dry_run(s: Settings) -> int:
                        ("launch", launch_args(s, plan)), ("then the preview", preview_args(s, plan)),
                        ("then the resume", launch_args(s))):  # fmt: skip
         print(f"  {name}: python -m blink.cli {' '.join(args)}")
+    print(f"  under PR-6: python -m blink.cli eval strength --run {s.run} at each pause; when the level is "
+          "good enough, python tools\\p7_finish.py (the final 20% cooldown from that step)")  # fmt: skip
     return EXIT_DONE
 
 
@@ -782,7 +753,15 @@ def main(argv: list[str] | None = None) -> int:
     if is_dry:
         return dry_run(s)
     s.logs.mkdir(parents=True, exist_ok=True)
-    return drive(s, Host(s))
+    try:
+        lock = acquire_lock(s.path(".lock"))
+    except LockHeld as exc:
+        print(f"p7v2: {exc}; nothing started", file=sys.stderr)
+        return EXIT_REFUSED
+    try:
+        return drive(s, Host(s.repo, s.python, s.home, s.logs))
+    finally:
+        release_lock(lock)
 
 
 if __name__ == "__main__":

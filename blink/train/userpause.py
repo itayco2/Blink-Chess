@@ -11,12 +11,13 @@ spill, and a throughput stop is final for an arm). A trainer, supervisor or swee
 while the flag is up waits first, before it takes any GPU memory. Heartbeats say "paused: user"
 meanwhile, which `blink status` and `blink ops ps` show.
 
-Only a trainer whose supervisor says so (RESUMER_ENV, set by a supervisor watching the flag) stops
-mid-run. Anything else trains on through a pause: a plain `blink train` (a calibration, a job run by
-hand) would fail its caller with exit 75, a resumed calibration would time the pause into its rate, and
-an older supervisor would count exit 75 as a crash. The Pause button names such a process as one that
-could not free the GPU. The P7-VAA pause is another thing entirely: a pending gate only Itay clears,
-which removing this flag never lifts.
+Only a trainer whose resumer says so (RESUMER_ENV, set by a supervisor watching the flag, or by the P6
+v2 driver for the calibration it reruns as a fresh run after a pause) stops mid-run. Anything else
+trains on through a pause: a plain `blink train` (a calibration or a job run by hand) would fail its
+caller with exit 75, a resumed calibration would time the pause into its rate, and an older supervisor
+would count exit 75 as a crash. The Pause button names such a process as one that could not free the
+GPU. The P7-VAA pause is another thing entirely: a pending gate only Itay clears, which removing this
+flag never lifts.
 
 The trainer asks at every step, so the check is throttled: one os.path.exists (77 us on D: while a run
 trains) at most every few seconds, and a clock read (about 50 ns) otherwise. Torch-free.
@@ -34,7 +35,7 @@ from blink import paths
 FLAG_NAME = "PAUSE"
 PAUSED_USER = "paused: user"  # the heartbeat state (and supervisor.json state) of a user pause
 POLL_S = 5.0  # how often a paused process looks for the flag again
-RESUMER_ENV = "BLINK_PAUSE_RESUMER"  # "1": this process's supervisor resumes it after a user pause
+RESUMER_ENV = "BLINK_PAUSE_RESUMER"  # "1": this process's resumer restarts it after a user pause
 # A resumed run needs the free VRAM it measured at its start less this. abl-a01..a05 measured 6.95 GB
 # free at micro-batch 1024 (peak 5.85 GB): 1 GB less still leaves micro-batch 512, above P5's
 # throughput floor, and normal desktop drift fits in it, while a game holds several GB. nvidia-smi
@@ -49,8 +50,9 @@ def flag_path(home: Path | None = None) -> Path:
 
 
 def resumer_present(environ: Mapping[str, str] | None = None) -> bool:
-    """Whether this process runs under a supervisor that restarts it with --resume after a user pause:
-    only then may a trainer stop for the flag mid-run."""
+    """Whether this process runs under a resumer: a supervisor that restarts it with --resume after a user
+    pause, or the P6 v2 driver that reruns its calibration. Only then may a trainer stop for the flag
+    mid-run."""
     return (os.environ if environ is None else environ).get(RESUMER_ENV) == "1"
 
 

@@ -72,6 +72,16 @@ def test_a_path_selector_loads_that_checkpoint(home):
     )
 
 
+def test_a_run_selector_pinned_to_its_checkpoint_loads_the_same_weights(home):
+    """`blink eval puzzles` resolves run:<name>:ema once and loads that file (pinned_selector)."""
+    path, which = loading.resolve_selector("run:tiny:ema")
+    pinned = loading.pinned_selector(path, which)
+    assert loading.resolve_selector(pinned) == (path, "ema") and pinned.endswith(".pt:ema")
+    assert loading.resolve_selector(loading.pinned_selector(path, "model")) == (path, "model")
+    ema = loading.load_evaluator(pinned, device="cpu").evaluate(_codes()).policy_logits
+    np.testing.assert_allclose(ema, _reference("ema", home), atol=1e-6)
+
+
 def test_ship_and_release_selectors_resolve_under_blink_home(home):
     source = latest_checkpoint(home / "runs" / "tiny")
     ship = home / "ship" / loading.WEIGHTS_FILE

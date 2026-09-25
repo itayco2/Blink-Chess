@@ -77,6 +77,61 @@ def test_r_true_refuses_rows_without_time_stamps_or_out_of_order_and_a_run_too_s
         calibrate.true_rate(_rows(last=500), BATCH)
 
 
+def _slowed(rows: list[dict], at: int, seconds: float) -> list[dict]:
+    """The rows with the window that ends at step `at` taking `seconds` longer (every later row shifts)."""
+    return [{**row, "time": row["time"] + (seconds if row["step"] >= at else 0.0)} for row in rows]
+
+
+def test_a_counted_interval_over_3x_the_median_seconds_per_step_refuses_the_calibration():
+    """A window of 50 steps normally takes 19.7 s at 2,600/s: 3x is 59.1 s, so 40 s more refuses."""
+    window = 50 * BATCH / 2600.0
+    assert (
+        calibrate.true_rate(_slowed(_rows(), 1250, 2 * window - 0.01), BATCH).intervals == 28
+    )  # 3x - a hair
+    with pytest.raises(calibrate.Refused, match="1,200-1,250") as refused:
+        calibrate.true_rate(_slowed(_rows(), 1250, 2 * window + 0.01), BATCH)
+    assert refused.value.kind == "slow interval" and "3x the median" in str(refused.value)
+
+
+def _two_sessions(rows: list[dict], from_step: int) -> list[dict]:
+    """The rows as two trainer processes wrote them: a pause (or a crash restart) before `from_step`."""
+    return [{**row, "session": 2.0 if row["step"] >= from_step else 1.0} for row in rows]
+
+
+def test_a_restart_inside_the_counted_span_refuses_the_calibration_and_one_before_it_does_not():
+    with pytest.raises(calibrate.Refused, match="steps 1,150 and 1,200") as refused:
+        calibrate.true_rate(_two_sessions(_rows(), 1200), BATCH)
+    assert refused.value.kind == "restart"
+    assert calibrate.true_rate(_two_sessions(_rows(), 350), BATCH).intervals == 28  # inside the first 500
+
+
+def test_a_user_pause_the_supervisor_recorded_inside_the_span_refuses_the_calibration():
+    rows = _rows()
+    middle = next(row["time"] for row in rows if row["step"] == 1200) - 1.0
+    with pytest.raises(calibrate.Refused, match="user_pause") as refused:
+        calibrate.true_rate(rows, BATCH, events=[{"time": middle, "event": "user_pause"}])
+    assert refused.value.kind == "pause"
+    early = [{"time": rows[0]["time"], "event": "start"}, {"time": middle, "event": "job"}]
+    assert calibrate.true_rate(rows, BATCH, events=early).intervals == 28
+
+
+def window_s(step: int) -> float:
+    """The 50-step train window of _rows() that ends at `step`, at 2,600/s."""
+    return 50 * BATCH / 2600.0 * (3.0 if step <= 500 else 1.0)
+
+
+def test_training_seconds_count_train_windows_and_leave_out_a_pause_between_two_trainers():
+    """Training hours (PR-6 reports them): every train-phase interval from the first row on, never the
+    eval and checkpoint windows, and never the one whose rows two trainer processes wrote."""
+    plain = _rows()
+    whole = calibrate.training_seconds(plain)
+    span = plain[-1]["time"] - plain[0]["time"]
+    assert whole == pytest.approx(span - (window_s(1000) + 15.0) - (window_s(1500) + 1.5))
+    paused = _two_sessions(_slowed(plain, 1200, 8 * 3600.0), 1200)  # the PC was Itay's for 8 hours
+    assert calibrate.training_seconds(paused) == pytest.approx(whole - window_s(1200))
+    assert [i.later for i in calibrate.train_intervals(paused) if i.restarted] == [1200]
+
+
 def test_everything_that_depends_on_steps_is_derived_from_it_at_run_time():
     facts = calibrate.derived(1_105_860, 0.2)
     assert facts["checks"] == {label: step for step, label in vaa.check_steps(1_105_860).items()}
@@ -234,15 +289,90 @@ def test_calibrate_runs_the_real_trainer_on_cuda(home, shards, tmp_path):
     assert rows[-1]["step"] == 600 and np.isfinite(calibrate.true_rate(rows, 16).samples_per_s)
 
 
-def test_calibrate_waits_for_a_user_pause_to_start_but_never_pauses_mid_run(
+def _calibration(run_dir) -> dict:
+    return json.loads((run_dir / "calibration.json").read_text(encoding="utf-8"))
+
+
+def test_a_refused_calibration_records_why_and_its_write_writes_nothing(home, tmp_path, capsys):
+    """--from-run of a run a pause interrupted: the rows of two trainer processes refuse it."""
+    config = tmp_path / "long.toml"
+    config.write_text(TINY, encoding="utf-8")
+    run_dir = home / "runs" / "calib-p"
+    run_dir.mkdir(parents=True)
+    rows = _two_sessions(_rows(), 1200)
+    (run_dir / "metrics.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    argv = ["train", "calibrate", "--config", str(config), "--from-run", "calib-p", "--write"]
+    assert cli.main(argv) == 2
+    assert "two trainer processes" in capsys.readouterr().err
+    assert config.read_text(encoding="utf-8") == TINY
+    record = _calibration(run_dir)
+    assert record["written"] is False and record["refused"]["kind"] == "restart"
+    assert "steps 1,150 and 1,200" in record["refused"]["detail"] and "steps" not in record
+
+
+def test_a_supervised_run_s_recorded_user_pause_inside_the_span_refuses_it(home, tmp_path, capsys):
+    config = tmp_path / "long.toml"
+    config.write_text(TINY, encoding="utf-8")
+    run_dir = home / "runs" / "calib-s"
+    run_dir.mkdir(parents=True)
+    rows = _rows()
+    (run_dir / "metrics.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    events = [{"time": rows[30]["time"] - 1.0, "event": "user_pause"}]
+    (run_dir / "supervisor.json").write_text(json.dumps({"events": events}), encoding="utf-8")
+    assert cli.main(["train", "calibrate", "--config", str(config), "--from-run", "calib-s"]) == 2
+    assert _calibration(run_dir)["refused"]["kind"] == "pause" and "user_pause" in capsys.readouterr().err
+
+
+def test_a_user_pause_during_a_calibration_its_caller_reruns_exits_75_and_writes_nothing(
     home, shards, tmp_path, monkeypatch
 ):
-    """Nothing resumes a calibration, so it must not exit for BLINK_HOME/PAUSE: it only waits to start while
-    the flag is up (before any metrics row), and R_true never covers a pause."""
-    from blink.train import loop, userpause
+    """The P6 v2 driver reruns a paused calibration and says so (userpause.RESUMER_ENV), so the Pause button
+    frees the GPU mid-calibration: the run checkpoints and stops, nothing is written, and calibration.json
+    says why (the driver waits for Resume and calibrates again as a fresh run)."""
+    from blink.train import loop, supervise, userpause
+
+    monkeypatch.setenv(userpause.RESUMER_ENV, "1")
+    monkeypatch.setattr(loop, "PAUSE_CHECK_S", 0.0)
+    real_after = loop._after_step
+
+    def after(run, window, lr, end):
+        real_after(run, window, lr, end)
+        if run.step == 120:
+            userpause.flag_path().touch()
+
+    monkeypatch.setattr(loop, "_after_step", after)
+    config = tmp_path / "long.toml"
+    config.write_text(TINY, encoding="utf-8")
+    argv = ["train", "calibrate", "--config", str(config), "--steps", "600", "--data", str(shards)]
+    assert cli.main([*argv, "--device", "cpu", "--run", "calib-u", "--write"]) == supervise.EXIT_USER_PAUSE
+    record = _calibration(home / "runs" / "calib-u")
+    assert record["refused"]["kind"] == "pause" and "step 120" in record["refused"]["detail"]
+    assert record["written"] is False and config.read_text(encoding="utf-8") == TINY
+
+
+def test_the_prescribed_command_calibrates_a_throwaway_run_on_blink_home_s_v1_pack(home, shards, tmp_path):
+    """EVAL.md PR-5's own line: no --run and no --data, so BLINK_HOME/data/v1 and calib-<stem>-<time>."""
+    shutil.copytree(shards, home / "data" / "v1")
+    config = tmp_path / "long.toml"
+    config.write_text(TINY, encoding="utf-8")
+    argv = ["train", "calibrate", "--config", str(config), "--steps", "600", "--device", "cpu"]
+    assert cli.main(argv) == 0
+    made = sorted((home / "runs").glob("calib-long-*"))
+    assert len(made) == 1 and (made[0] / "calibration.json").is_file()
+    record = _calibration(made[0])
+    assert record["written"] is False and record["intervals"] > 0 and load_config(config).steps == 100000
+
+
+def _spec_of_calibration(shards, tmp_path, monkeypatch):
+    """The RunSpec `blink train calibrate` hands the trainer (which is not run)."""
+    from types import SimpleNamespace
+
+    from blink.train import loop
 
     seen = {}
-    monkeypatch.setattr(loop, "train", lambda cfg, spec, *a, **k: seen.update(spec=spec))
+    monkeypatch.setattr(
+        loop, "train", lambda cfg, spec, *a, **k: seen.update(spec=spec) or SimpleNamespace(paused=False)
+    )
     monkeypatch.setattr(
         calibrate, "true_rate", lambda *a, **k: (_ for _ in ()).throw(ValueError("stop here"))
     )
@@ -250,4 +380,28 @@ def test_calibrate_waits_for_a_user_pause_to_start_but_never_pauses_mid_run(
     config.write_text(TINY, encoding="utf-8")
     argv = ["train", "calibrate", "--config", str(config), "--steps", "600", "--data", str(shards)]
     cli.main([*argv, "--device", "cpu", "--run", "calib-p"])
-    assert seen["spec"].pause_flag == userpause.flag_path() and seen["spec"].pause_exits is False
+    return seen["spec"]
+
+
+def test_a_calibration_run_by_hand_waits_for_a_user_pause_to_start_but_never_pauses_mid_run(
+    home, shards, tmp_path, monkeypatch
+):
+    """Nothing resumes a calibration run by hand, so it must not exit for BLINK_HOME/PAUSE: it only waits
+    to start while the flag is up (before any metrics row), and R_true never covers a pause."""
+    from blink.train import userpause
+
+    monkeypatch.delenv(userpause.RESUMER_ENV, raising=False)
+    spec = _spec_of_calibration(shards, tmp_path, monkeypatch)
+    assert spec.pause_flag == userpause.flag_path() and spec.pause_exits is False
+
+
+def test_a_calibration_whose_caller_reruns_it_stops_for_a_user_pause_mid_run(
+    home, shards, tmp_path, monkeypatch
+):
+    """The P6 v2 driver sets userpause.RESUMER_ENV for the calibration it reruns after a pause: then the
+    Pause button frees the GPU at the next step, as it does for a supervised trainer."""
+    from blink.train import userpause
+
+    monkeypatch.setenv(userpause.RESUMER_ENV, "1")
+    spec = _spec_of_calibration(shards, tmp_path, monkeypatch)
+    assert spec.pause_flag == userpause.flag_path() and spec.pause_exits is True
