@@ -323,11 +323,15 @@ def test_a_supervised_run_s_recorded_user_pause_inside_the_span_refuses_it(home,
     assert _calibration(run_dir)["refused"]["kind"] == "pause" and "user_pause" in capsys.readouterr().err
 
 
-def test_a_user_pause_during_the_calibration_exits_75_and_writes_nothing(home, shards, tmp_path, monkeypatch):
-    """The Pause button frees the GPU mid-calibration: the run checkpoints and stops, nothing is written,
-    and calibration.json says why (the driver waits for Resume and calibrates again as a fresh run)."""
+def test_a_user_pause_during_a_calibration_its_caller_reruns_exits_75_and_writes_nothing(
+    home, shards, tmp_path, monkeypatch
+):
+    """The P6 v2 driver reruns a paused calibration and says so (userpause.RESUMER_ENV), so the Pause button
+    frees the GPU mid-calibration: the run checkpoints and stops, nothing is written, and calibration.json
+    says why (the driver waits for Resume and calibrates again as a fresh run)."""
     from blink.train import loop, supervise, userpause
 
+    monkeypatch.setenv(userpause.RESUMER_ENV, "1")
     monkeypatch.setattr(loop, "PAUSE_CHECK_S", 0.0)
     real_after = loop._after_step
 
@@ -357,3 +361,47 @@ def test_the_prescribed_command_calibrates_a_throwaway_run_on_blink_home_s_v1_pa
     assert len(made) == 1 and (made[0] / "calibration.json").is_file()
     record = _calibration(made[0])
     assert record["written"] is False and record["intervals"] > 0 and load_config(config).steps == 100000
+
+
+def _spec_of_calibration(shards, tmp_path, monkeypatch):
+    """The RunSpec `blink train calibrate` hands the trainer (which is not run)."""
+    from types import SimpleNamespace
+
+    from blink.train import loop
+
+    seen = {}
+    monkeypatch.setattr(
+        loop, "train", lambda cfg, spec, *a, **k: seen.update(spec=spec) or SimpleNamespace(paused=False)
+    )
+    monkeypatch.setattr(
+        calibrate, "true_rate", lambda *a, **k: (_ for _ in ()).throw(ValueError("stop here"))
+    )
+    config = tmp_path / "long.toml"
+    config.write_text(TINY, encoding="utf-8")
+    argv = ["train", "calibrate", "--config", str(config), "--steps", "600", "--data", str(shards)]
+    cli.main([*argv, "--device", "cpu", "--run", "calib-p"])
+    return seen["spec"]
+
+
+def test_a_calibration_run_by_hand_waits_for_a_user_pause_to_start_but_never_pauses_mid_run(
+    home, shards, tmp_path, monkeypatch
+):
+    """Nothing resumes a calibration run by hand, so it must not exit for BLINK_HOME/PAUSE: it only waits
+    to start while the flag is up (before any metrics row), and R_true never covers a pause."""
+    from blink.train import userpause
+
+    monkeypatch.delenv(userpause.RESUMER_ENV, raising=False)
+    spec = _spec_of_calibration(shards, tmp_path, monkeypatch)
+    assert spec.pause_flag == userpause.flag_path() and spec.pause_exits is False
+
+
+def test_a_calibration_whose_caller_reruns_it_stops_for_a_user_pause_mid_run(
+    home, shards, tmp_path, monkeypatch
+):
+    """The P6 v2 driver sets userpause.RESUMER_ENV for the calibration it reruns after a pause: then the
+    Pause button frees the GPU at the next step, as it does for a supervised trainer."""
+    from blink.train import userpause
+
+    monkeypatch.setenv(userpause.RESUMER_ENV, "1")
+    spec = _spec_of_calibration(shards, tmp_path, monkeypatch)
+    assert spec.pause_flag == userpause.flag_path() and spec.pause_exits is True

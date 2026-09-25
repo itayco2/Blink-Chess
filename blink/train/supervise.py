@@ -19,9 +19,13 @@ backoff. From the moment the supervisor sees the flag (or that exit) until it go
 evaluated, the wall-clock deadline stops counting (it is extended by exactly the paused time), and the
 heartbeat and supervisor.json say "paused: user"; a child still running `pause_kill_s` after the flag
 appeared is ended, keeping its checkpoints. Once the flag is gone the child restarts with --resume, a
-child that never stopped gets a fresh startup grace, and the throughput window restarts. A flag up when
-supervision starts holds the first child the same way. A failed VAA check still ends supervision with
-"paused: P7-VAA" even when the child exits for a user pause: removing the flag never lifts that gate.
+child that never stopped gets a fresh startup grace, and the throughput window restarts; but while the
+GPU has less free memory than the run measured at its start, less userpause.RESUME_SLACK_GB (a game
+still open), the restart waits, still paused, and the paused heartbeat says what it needs. A flag up
+when supervision starts holds the first child the same way. The child's environment carries
+userpause.RESUMER_ENV only when this supervisor watches the flag: a trainer stops mid-run for the flag
+only then. A failed VAA check still ends supervision with "paused: P7-VAA" even when the child exits
+for a user pause: removing the flag never lifts that gate.
 
 A stop terminates the child's whole process tree and writes 'stopped: <rule>, <number>' into
 heartbeat.json (state "stopped" or "paused", so `blink status` exits non-zero) and a STATUS-style
@@ -44,11 +48,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import psutil
-
 from blink import heartbeat
+from blink.train import userpause
 from blink.train.atomic import write_text_atomic
 from blink.train.preview import preview_name
+from blink.train.proctree import bind_children_to_this_process, kill_tree
 from blink.train.userpause import PAUSED_USER
 
 EXIT_FINISHED, EXIT_STOPPED, EXIT_REFUSED, EXIT_PAUSED = 0, 1, 2, 3
@@ -332,89 +336,6 @@ def child_argv(blink_args: Sequence[str]) -> list[str]:
     return [sys.executable, "-m", "blink.cli", *blink_args]
 
 
-def kill_tree(pid: int, timeout_s: float) -> None:
-    """Terminate a process and all its descendants (Windows has no process groups to signal)."""
-    try:
-        parent = psutil.Process(pid)
-        procs = parent.children(recursive=True) + [parent]
-    except psutil.NoSuchProcess:
-        return
-    for proc in procs:
-        try:
-            proc.terminate()
-        except psutil.NoSuchProcess:
-            continue
-    _, alive = psutil.wait_procs(procs, timeout=timeout_s)
-    for proc in alive:
-        try:
-            proc.kill()
-        except psutil.NoSuchProcess:
-            continue
-    psutil.wait_procs(alive, timeout=timeout_s)
-
-
-_JOB_HANDLE: list[int] = []  # the kill-on-close job this process sits in; its handle is never closed
-JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
-
-
-def _job_limit_structure():
-    import ctypes
-    from ctypes import wintypes
-
-    class Basic(ctypes.Structure):
-        _fields_ = [
-            ("PerProcessUserTimeLimit", ctypes.c_int64),
-            ("PerJobUserTimeLimit", ctypes.c_int64),
-            ("LimitFlags", wintypes.DWORD),
-            ("MinimumWorkingSetSize", ctypes.c_size_t),
-            ("MaximumWorkingSetSize", ctypes.c_size_t),
-            ("ActiveProcessLimit", wintypes.DWORD),
-            ("Affinity", ctypes.c_size_t),
-            ("PriorityClass", wintypes.DWORD),
-            ("SchedulingClass", wintypes.DWORD),
-        ]
-
-    class Extended(ctypes.Structure):
-        _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_uint64 * 6)] + [
-            (name, ctypes.c_size_t)
-            for name in ("ProcessMemoryLimit", "JobMemoryLimit", "PeakProcessMemoryUsed", "PeakJobMemoryUsed")
-        ]
-
-    return Extended
-
-
-def bind_children_to_this_process() -> str:
-    """Windows: put this process in a kill-on-close job, so every child it starts dies with it.
-
-    A supervisor that is killed must never leave its trainer running with no stop rule watching.
-    Children inherit the job; the only handle to it is held here, so when this process exits for any
-    reason Windows closes the handle and terminates the trainer too. Returns what happened.
-    """
-    if _JOB_HANDLE:
-        return "bound: already in a kill-on-close job"
-    if sys.platform != "win32":
-        return "not bound: kill-on-close jobs are a Windows feature"
-    import ctypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-    job = kernel32.CreateJobObjectW(None, None)
-    limits = _job_limit_structure()()
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-    size = ctypes.sizeof(limits)
-    configured = job and kernel32.SetInformationJobObject(
-        ctypes.c_void_p(job), JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), size
-    )
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    if not configured or not kernel32.AssignProcessToJobObject(
-        ctypes.c_void_p(job), ctypes.c_void_p(kernel32.GetCurrentProcess())
-    ):
-        return f"not bound: Windows error {ctypes.get_last_error()}"
-    _JOB_HANDLE.append(job)
-    return "bound: children die with this supervisor"
-
-
 # ---------------------------------------------------------------- the supervisor
 
 
@@ -431,8 +352,9 @@ class _Child:
 class Supervisor:
     """Live supervision state. Mutable by nature: it owns a child process and counts its restarts.
 
-    `pause_flag` is BLINK_HOME/PAUSE (None: no user pause). `clock`, `sleep` and `spawn` stand for
-    time.time, time.sleep and subprocess.Popen, which tests replace with fakes."""
+    `pause_flag` is BLINK_HOME/PAUSE (None: no user pause). `clock`, `sleep`, `spawn` and `gpu_free`
+    stand for time.time, time.sleep, subprocess.Popen and nvidia-smi's free memory, which tests replace
+    with fakes."""
 
     def __init__(
         self,
@@ -445,11 +367,12 @@ class Supervisor:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
         spawn: Callable[..., Any] = subprocess.Popen,
+        gpu_free: Callable[[], float | None] = userpause.gpu_free_gb,
     ):
         self.cfg, self.run_dir, self.argv, self.log = cfg, Path(run_dir), list(argv), log
         self.launch_command = launch
         self.pause_flag = None if pause_flag is None else Path(pause_flag)
-        self.clock, self.sleep, self.spawn = clock, sleep, spawn
+        self.clock, self.sleep, self.spawn, self.gpu_free = clock, sleep, spawn, gpu_free
         self.lr_scale = lr_scale_of(argv)
         self.restarts = self.rollbacks = 0
         self.started = clock()
@@ -461,6 +384,7 @@ class Supervisor:
         self.paused_s = 0.0  # seconds paused by the user so far, which the deadline does not count
         self.pause_since: float | None = None  # when the current user pause began
         self.rules_since = -math.inf  # throughput rows from before the last user pause do not count
+        self.gpu_short: str | None = None  # why the restart after a user pause waits for GPU memory
 
     def _path(self, name: str) -> Path:
         return self.run_dir / name
@@ -529,10 +453,17 @@ class Supervisor:
         self.baseline_nan = nan_steps(read_jsonl(self._path("metrics.jsonl")))
         self.baseline_vaa = vaa_steps(read_jsonl(self._path("evals.jsonl")))
         argv = restart_argv(self.argv, resume, self.lr_scale)
-        proc = self.spawn(argv, env={**os.environ, "PYTHONUTF8": "1"})
+        proc = self.spawn(argv, env=self._child_env())
         self.child = _Child(proc, argv, self.clock())
         self._event("start", pid=proc.pid, resume=resume, from_step=cut, lr_scale=self.lr_scale)
         self._write_record("running", "running")
+
+    def _child_env(self) -> dict[str, str]:
+        """UTF-8, and userpause.RESUMER_ENV only when this supervisor watches the flag: its trainer then
+        stops for a user pause, since this supervisor resumes it. An inherited RESUMER_ENV is dropped."""
+        inherited = {k: v for k, v in os.environ.items() if k != userpause.RESUMER_ENV}
+        resumer = {} if self.pause_flag is None else {userpause.RESUMER_ENV: "1"}
+        return {**inherited, "PYTHONUTF8": "1", **resumer}
 
     # ------------------------------------------------------------ the user pause (BLINK_HOME/PAUSE)
 
@@ -566,11 +497,29 @@ class Supervisor:
         self._beat_paused()
 
     def _wait_or_resume(self, now: float) -> None:
-        if self._flagged():
+        """While the child is held: keep beating "paused: user" while the flag is up or the GPU lacks the
+        memory the run needs (a game still holds it), then restart it."""
+        flagged = self._flagged()
+        short = None if flagged else self._gpu_short()
+        if short is not None and self.gpu_short is None:
+            self._event("user_resume_waits_for_gpu", why=short)
+        self.gpu_short = short
+        if flagged or short is not None:
             self._beat_paused()
             return
         self._pause_ends(now)
         self._start(resume="--resume" in self.argv or bool(checkpoint_steps(self.run_dir)))
+
+    def _gpu_short(self) -> str | None:
+        """Why the restart must wait: less free GPU memory than userpause.resume_need_gb. None to go
+        ahead, also when the run measured no VRAM or nvidia-smi cannot be read."""
+        need = userpause.resume_need_gb(self.run_dir)
+        if need is None:
+            return None
+        free = self.gpu_free()
+        if free is None or free >= need:
+            return None
+        return f"{free:.2f} GB of GPU memory free and the run needs {need:.2f} GB: close the game"
 
     def _pause_ends(self, now: float) -> None:
         paused = now - self.pause_since
@@ -584,12 +533,16 @@ class Supervisor:
     def _beat_paused(self) -> None:
         """heartbeat.json says "paused: user" and stays fresh, so a watcher tells the pause from a stall."""
         beat = heartbeat.read(self._path("heartbeat.json")) or {}
-        kept = {k: v for k, v in beat.items() if k not in ("stopped", "error", "time")}
+        dropped = ("stopped", "error", "time", "resume_needs_gpu_gb", "waiting_for_gpu")
+        kept = {k: v for k, v in beat.items() if k not in dropped}
+        need = userpause.resume_need_gb(self.run_dir)  # what Resume Blink compares with the free memory
         payload = {
             **kept,
             "state": PAUSED_USER,
             "supervisor_pid": os.getpid(),
             "paused_since": self.pause_since,
+            **({} if need is None else {"resume_needs_gpu_gb": round(need, 3)}),
+            **({} if self.gpu_short is None else {"waiting_for_gpu": self.gpu_short}),
         }
         heartbeat.beat_once(self._path("heartbeat.json"), payload)
 

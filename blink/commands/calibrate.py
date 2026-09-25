@@ -11,11 +11,13 @@ it prints R_true and steps = floor(120 x 3600 x R_true / 1024) with everything t
 the config file. --from-run recomputes the same numbers from a finished calibration run's metrics (and its
 supervisor.json events, when it was supervised).
 
-A calibration that was paused, restarted or shared is never used: the user pause flag (BLINK_HOME/PAUSE)
-stops the run at its next step and the command exits with supervise.EXIT_USER_PAUSE (75), and a run whose
-counted span holds a restart, a pause or a window over 3x the median seconds per step is refused (exit
-2). Either way --write writes nothing and calibration.json records the reason; calibrate again as a fresh
-run.
+A calibration that was paused, restarted or shared is never used. It waits to start while the user pause
+flag (BLINK_HOME/PAUSE) is up. A caller that reruns a paused calibration says so with
+userpause.RESUMER_ENV (the P6 v2 driver does): then the flag stops the run at its next step, freeing the
+GPU, and the command exits with supervise.EXIT_USER_PAUSE (75). Run by hand, with nothing to rerun it, it
+trains on through the flag, as a plain `blink train` does. A run whose counted span holds a restart, a
+pause or a window over 3x the median seconds per step is refused (exit 2). Either way --write writes
+nothing and calibration.json records the reason; calibrate again as a fresh run.
 """
 
 import argparse
@@ -88,7 +90,10 @@ def _train(args: argparse.Namespace, cfg: TrainConfig, config: Path) -> tuple[Pa
         data=plan.description,
         games10k=plan.games10k,
         mateset=plan.mateset,
+        # waits to start while BLINK_HOME/PAUSE is up; stops mid-run for it only when the caller reruns a
+        # paused calibration (userpause.RESUMER_ENV, set by tools/p7_v2_driver.py)
         pause_flag=userpause.flag_path(),
+        pause_exits=userpause.resumer_present(),
     )
     result = loop.train(trained, spec, plan.source, plan.val, probe=plan.probe)
     return run_dir, result.step if result.paused else None
