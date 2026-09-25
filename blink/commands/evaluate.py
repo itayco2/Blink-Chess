@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from blink import paths
+from blink.commands import strength as strength_command
 from blink.eval import (
     books,
     endgames,
@@ -84,6 +85,20 @@ def _fast_refused(prefix: str, args: argparse.Namespace) -> bool:
     return refusal is not None
 
 
+def _weights_line(model: str) -> str | None:
+    """Which checkpoint a run selector scores (the run's latest when the scoring starts), so a check of a
+    run that is still training can name the step it scored (blink.eval.strength reads this line)."""
+    if not model.startswith("run:"):
+        return None
+    from blink.model.loading import resolve_selector
+
+    try:
+        path, which = resolve_selector(model)
+    except (FileNotFoundError, ValueError):
+        return None
+    return f"weights {path} ({which})"
+
+
 def _cmd_puzzles(args: argparse.Namespace) -> int:
     source = puzzles.resolve_set(args.set)
     if _missing(source, "puzzle set") or _fast_refused("blink eval puzzles", args):
@@ -95,7 +110,9 @@ def _cmd_puzzles(args: argparse.Namespace) -> int:
     out_dir = args.out or paths.home() / "eval" / "puzzles"
     # The published value-mode score is the shipped configuration's: E2b's epsilon unless told otherwise.
     epsilon = args.epsilon if args.epsilon is not None else match.read_epsilon(args.results_dir)
-    illegal = 0
+    illegal, weights = 0, _weights_line(args.model)
+    if weights:
+        print(weights, flush=True)
     for mode, agent in _puzzle_agents(args, epsilon):
         started = time.perf_counter()
         tie = epsilon if mode == "value" else None
@@ -198,6 +215,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     fastmode.add_arguments(pz)
     pz.add_argument("--out", type=Path, default=None, help="folder (default BLINK_HOME/eval/puzzles)")
     pz.set_defaults(func=factory.friendly(_cmd_puzzles))
+    strength_command.register(ev_sub)
 
     sc = ev_sub.add_parser(
         "signcheck", help="value-mode top-1 with the true child sign against a flipped one"
