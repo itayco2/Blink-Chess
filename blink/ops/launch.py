@@ -30,6 +30,7 @@ import psutil
 from blink import heartbeat, paths
 from blink.train.atomic import write_text_atomic
 from blink.train.status import list_runs, valid_run_name
+from blink.train.supervise import run_of
 
 UV_CACHE_DIR = r"D:\uv-cache"
 # Blink commands that hold the GPU or start runs that do (blink ops ps, gpu_users)
@@ -127,11 +128,29 @@ def _check_safe(args: Iterable[str]) -> None:
             )
 
 
-def heartbeat_of(blink_args: Sequence[str], home: Path) -> Path | None:
-    """The heartbeat a launched command writes: runs/<run>/heartbeat.json, or a probe's --out file."""
-    args = list(blink_args)
-    if "--run" in args[:-1]:
-        return home / "runs" / args[args.index("--run") + 1] / "heartbeat.json"
+def served_run(args: Sequence[str]) -> str | None:
+    """The run a Blink command writes, or None: a supervise command's own --run, else its train
+    command's (blink.train.supervise.run_of: a branch writes its --preview-name, else <--run>-preview,
+    and only reads the --run it names), else the command's --run."""
+    args = list(args)
+    split = args.index("--") if args[:1] == ["supervise"] and "--" in args else None
+    if split is not None:
+        own, args = args[:split], args[split + 1 :]
+        if "--run" in own[:-1]:
+            return own[own.index("--run") + 1]
+    try:
+        return run_of(args, None)
+    except ValueError:
+        return None
+
+
+def heartbeat_of(args: Sequence[str], home: Path) -> Path | None:
+    """The heartbeat a launched command (its Blink arguments, or a whole command line) writes:
+    runs/<the run it writes>/heartbeat.json, so a branch's is the branch's own, or a probe's --out file."""
+    args = list(args)
+    run = served_run(blink_args(args) or args)
+    if run is not None:
+        return home / "runs" / run / "heartbeat.json"
     if "heartbeat-probe" in args and "--out" in args[:-1]:
         return Path(args[args.index("--out") + 1])
     return None
@@ -312,7 +331,7 @@ def ps_rows(
         if not is_blink(cmdline):
             continue
         beat = heartbeat_of(cmdline, Path(home))
-        run = cmdline[cmdline.index("--run") + 1] if "--run" in cmdline[:-1] else ""
+        run = served_run(blink_args(cmdline) or cmdline) or ""
         rows.append(
             {
                 "pid": proc["pid"],
