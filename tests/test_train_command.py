@@ -379,6 +379,55 @@ def test_a_named_branch_resumes_in_its_own_run_and_refuses_another_step_count(ho
     assert (beat["state"], beat["step"]) == ("finished", 26)
 
 
+def test_a_named_branch_resumes_after_its_parent_has_pruned_the_step_it_was_cut_from(home, raw, tmp_path):
+    """A branch cut from a --max-steps stop (not a check step, not a 12-hourly keep) loses that parent
+    checkpoint once the parent resumes and saves keep_last newer ones; a resume reads only the branch's
+    own checkpoints, so it must still continue (under supervise every restart is such a resume)."""
+    pruning = tmp_path / "pruning.toml"
+    pruning.write_text(
+        CONFIG.replace("ckpt_every_steps = 15", "ckpt_every_steps = 5\nkeep_last = 1"), encoding="utf-8"
+    )
+    base, _ = _main_run_at_step_15(home, pruning, raw)
+    branch = [*base, "--from-step", "15", "--preview-steps", "11", "--preview-name", "size-m"]
+    assert cli.main([*branch, "--max-steps", "20"]) == 0  # an attempt that ended at step 20
+    assert cli.main([*base, "--config", str(pruning), "--resume"]) == 0  # the parent moves on to 30
+    assert not (home / "runs" / "long" / "ckpt_000000015.pt").exists()
+    assert cli.main([*branch, "--resume"]) == 0
+    beat = json.loads((home / "runs" / "size-m" / "heartbeat.json").read_text(encoding="utf-8"))
+    assert (beat["state"], beat["step"]) == ("finished", 26)
+
+
+@pytest.mark.parametrize(
+    ("run", "from_step", "length"),
+    [
+        ("long", "10", "16"),  # the same plan length (26) from another step of the parent
+        ("other", "15", "11"),  # the same step of another run
+    ],
+)
+def test_a_resumed_branch_refuses_a_branch_point_it_was_not_cut_from(
+    home, config, raw, capsys, run, from_step, length
+):
+    base, _ = _main_run_at_step_15(home, config, raw)
+    branch = [*base, "--from-step", "15", "--preview-steps", "11", "--preview-name", "size-m"]
+    assert cli.main([*branch, "--max-steps", "20"]) == 0
+    capsys.readouterr()
+    moved = [a if a != "long" else run for a in base]
+    moved += ["--from-step", from_step, "--preview-steps", length, "--preview-name", "size-m", "--resume"]
+    assert cli.main(moved) == 2
+    assert "branched from long step 15" in capsys.readouterr().err
+    assert [p.name for p in (home / "runs" / "size-m").glob("ckpt_*.pt")] == ["ckpt_000000020.pt"]
+
+
+def test_resuming_a_run_that_is_not_a_branch_as_a_branch_is_refused(home, config, raw, capsys):
+    base, _ = _main_run_at_step_15(home, config, raw)
+    plain = [a if a != "long" else "plain" for a in base]
+    assert cli.main([*plain, "--config", str(config), "--max-steps", "20"]) == 0
+    capsys.readouterr()
+    as_branch = [*base, "--from-step", "15", "--preview-steps", "15", "--preview-name", "plain", "--resume"]
+    assert cli.main(as_branch) == 2
+    assert "plain is not a branch" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "flags",
     [

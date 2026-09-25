@@ -6,7 +6,10 @@ blink train --config configs/s.toml --run NAME (--data DIR | --source-raw PATH [
 blink train --run NAME --data DIR --preview-cooldown 3h --from-step N    (writes runs/NAME-preview)
 blink train --run NAME --data DIR --preview-steps K --from-step N [--preview-name BRANCH]
             (exactly K cooldown steps, written to runs/BRANCH; `blink supervise -- train ...` watches
-            runs/BRANCH, so a branch crash-resumes like any run)
+            runs/BRANCH, so a branch crash-resumes like any run. A resumed branch reads only its own
+            checkpoints, so the parent may move on once the branch has one; but a branch point that is
+            not a check step, such as a --max-steps stop, is pruned once the parent resumes and saves
+            keep_last newer checkpoints, so start every branch from it before resuming the parent)
 blink train calibrate --config configs/long.toml [--steps 2000] [--write]    (PR-5: blink.commands.calibrate)
 
 A v1 pack directory holds train_r*.bin roots, train_c*.bin children, val_roots.bin, valprobe.npz
@@ -86,18 +89,41 @@ def _check_flags(args: argparse.Namespace) -> None:
         raise CommandError("--config is required (a preview takes its config from the checkpoint)")
 
 
-def _saved_branch_config(args: argparse.Namespace, saved: Path) -> TrainConfig:
-    """A resumed branch keeps the plan it was started with; an exact length must still be that plan."""
+def _branch_point(args: argparse.Namespace, record: dict, name: str) -> Path:
+    """The parent checkpoint a saved branch was cut from, which --run and --from-step must name."""
+    from blink.train.checkpoint import step_of
+
+    if not record.get("branched_from"):
+        raise CommandError(f"{name} is not a branch (its config.json names no parent checkpoint)")
+    source = Path(record["branched_from"])
+    parent, step = source.parent.name, step_of(source)
+    if (parent, step) != (args.run, args.from_step):
+        raise CommandError(
+            f"{name} was branched from {parent} step {step:,}; "
+            f"--run {args.run} --from-step {args.from_step:,} names another branch point"
+        )
+    return source
+
+
+def _saved_branch(args: argparse.Namespace, saved: Path) -> tuple[TrainConfig, Path]:
+    """A resumed branch keeps the plan it was started with; an exact length must still be that plan.
+
+    It continues from its own checkpoints only, so the parent's checkpoint it was cut from need not
+    exist any more: a --max-steps stop is neither a check step nor a kept one, and the parent prunes
+    it once it resumes and saves keep_last newer checkpoints.
+    """
     import json
 
-    cfg = config_from_dict(json.loads(saved.read_text(encoding="utf-8"))["config"])
+    record = json.loads(saved.read_text(encoding="utf-8"))
+    source = _branch_point(args, record, saved.parent.name)
+    cfg = config_from_dict(record["config"])
     if args.preview_steps is not None and cfg.steps != args.from_step + args.preview_steps:
         planned = cfg.steps - args.from_step
         raise CommandError(
             f"{saved.parent.name} was branched for {planned:,} cooldown steps from step {args.from_step:,}; "
             f"--preview-steps {args.preview_steps:,} would change its plan"
         )
-    return cfg
+    return cfg, source
 
 
 def _branch_steps(args: argparse.Namespace, main_dir: Path, batch_size: int) -> int:
@@ -124,17 +150,17 @@ def _branch_steps(args: argparse.Namespace, main_dir: Path, batch_size: int) -> 
 
 
 def _preview_config(args: argparse.Namespace, main_dir: Path, preview_dir: Path) -> tuple[TrainConfig, Path]:
-    """(the preview's config, the main run's checkpoint it branches from)."""
+    """(the preview's config, the main run's checkpoint it branches from: a resume never reads it)."""
     from blink.train import preview
     from blink.train.checkpoint import checkpoint_name, list_checkpoints, load_checkpoint, step_of
 
+    saved = preview_dir / "config.json"
+    if args.resume and saved.is_file():
+        return _saved_branch(args, saved)
     source = main_dir / checkpoint_name(args.from_step)
     if not source.is_file():
         steps = [step_of(p) for p in list_checkpoints(main_dir)]
         raise CommandError(f"{main_dir.name} has no checkpoint at step {args.from_step} (it has {steps})")
-    saved = preview_dir / "config.json"
-    if args.resume and saved.is_file():
-        return _saved_branch_config(args, saved), source
     main_cfg = config_from_dict(load_checkpoint(source)["config"])
     if args.config is not None and load_config(args.config) != main_cfg:
         raise CommandError(f"--config differs from the config {main_dir.name} was trained with")
