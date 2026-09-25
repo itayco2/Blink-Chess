@@ -24,6 +24,7 @@ SPEC.loader.exec_module(driver)
 RATE = "2621.3"  # a true M rate (PR-5 expects about 2,621 samples/s at micro 256)
 ARMS = {"a01": 0.55115, "a02": 0.5529, "a03": 0.5536}  # final full-valprobe EMA VAA of the seeds
 VALPROBE = 20_000
+PR2 = {"rung": 59_126, "start": 47_301, "cooldown": 11_825}  # EVAL.md PR-2 (adopted): size-m's steps
 
 
 def exact_steps(hours: float, rate: str, batch: int = 1024) -> int:
@@ -34,6 +35,11 @@ def exact_plan(rate: str) -> dict[str, int]:
     rung, total = exact_steps(6, rate), exact_steps(120, rate)
     cooldown = round(Fraction(rung) / 5)
     return {"long": total, "rung": rung, "cooldown": cooldown, "start": rung - cooldown}
+
+
+def thirty_percent(total: int) -> int:
+    """The 30% check step as blink.train.vaa.check_steps computes it (in floats, as the trainer does)."""
+    return max(1, math.floor(0.30 * total + 0.5))
 
 
 # ---------------------------------------------------------------- the arithmetic
@@ -84,8 +90,11 @@ def test_pr2_s_literal_rung_can_be_kept_whatever_the_true_rate():
     assert literal.long_steps == derived.long_steps and literal.rung_start < literal.first_check
 
 
-def test_the_driver_branches_at_pr2_s_literal_numbers_when_told_to(tmp_path):
-    s = _settings(tmp_path, rung_steps=59_126)
+def test_the_documented_launch_branches_at_pr2_s_literal_numbers_whatever_the_true_rate(tmp_path):
+    """EVAL.md PR-2 (adopted 2026-09-25): the flagship branches size-m at step 47,301 and cools it over
+    11,825 steps. The docstring's launch passes no rung flag, so that is the default, not 6 h at R_true."""
+    assert driver.settings_from([])[0].rung_steps == PR2["rung"]
+    s = _settings(tmp_path)
     host = FakeHost(s)
     assert driver.drive(s, host) == driver.EXIT_DONE
     assert host.args("leg1")[-2:] == ["--max-steps", "47301"]
@@ -94,6 +103,32 @@ def test_the_driver_branches_at_pr2_s_literal_numbers_when_told_to(tmp_path):
         branch[branch.index("--from-step") + 1] == "47301"
         and branch[branch.index("--preview-steps") + 1] == "11825"
     )
+
+
+def test_the_rate_derived_rung_is_an_explicit_choice(tmp_path):
+    assert driver.settings_from(["--rung-from-rate"])[0].rung_steps is None
+    assert driver.settings_from(["--rung-steps", "60000"])[0].rung_steps == 60_000
+    with pytest.raises(SystemExit):
+        driver.settings_from(["--rung-from-rate", "--rung-steps", "59126"])
+    s = _settings(tmp_path, rung_steps=None)
+    host = FakeHost(s)
+    assert driver.drive(s, host) == driver.EXIT_DONE
+    plan = exact_plan(RATE)
+    assert host.args("leg1")[-2:] == ["--max-steps", str(plan["start"])]
+    recorded = driver.load_state(s)["plan"]
+    assert recorded["rung_rule"] == "6 h at R_true" and recorded["rung_steps"] == plan["rung"]
+
+
+def test_the_rung_choice_and_its_rate_cross_check_go_to_the_state_and_size_guard_json(tmp_path):
+    s = _settings(tmp_path)
+    assert driver.drive(s, FakeHost(s)) == driver.EXIT_DONE
+    derived = exact_plan(RATE)["rung"]  # 6 h at R_true: printed beside PR-2's number, never used
+    recorded = driver.load_state(s)["plan"]
+    assert recorded["rung_rule"] == "EVAL.md PR-2's 59,126 steps" and recorded["rate_rung_steps"] == derived
+    rung = json.loads((s.home / "eval" / "size_guard.json").read_text(encoding="utf-8"))["rung"]
+    assert rung == {"steps": PR2["rung"], "start": PR2["start"], "cooldown": PR2["cooldown"],
+                    "rule": "EVAL.md PR-2's 59,126 steps", "rate_steps": derived}  # fmt: skip
+    assert f"6 h at R_true would be {derived:,}" in _status(s)["detail"]
 
 
 def test_the_plan_refuses_a_rung_that_reaches_the_first_check_or_starts_in_the_warmup():
@@ -350,16 +385,17 @@ def test_the_driver_runs_the_v2_sequence_and_hands_the_flagship_size_m_as_its_re
     plan = exact_plan(RATE)
     assert host.args("leg1") == [
         "supervise", "--bench-size", "m", "--", "train", "--config", "configs/long.toml", "--run", "long",
-        "--data", str(s.data), "--max-steps", str(plan["start"]),
+        "--data", str(s.data), "--max-steps", str(PR2["start"]),
     ]  # fmt: skip
     assert host.args("branch") == [
         "supervise", "--bench-size", "m", "--", "train", "--run", "long", "--data", str(s.data),
-        "--from-step", str(plan["start"]), "--preview-steps", str(plan["cooldown"]),
+        "--from-step", str(PR2["start"]), "--preview-steps", str(PR2["cooldown"]),
         "--preview-name", "size-m",
     ]  # fmt: skip
     assert host.args("launch") == [
         "ops", "launch", "--name", "p7-long", "--", "supervise", "--bench-size", "m", "--", "train",
-        "--config", "configs/long.toml", "--run", "long", "--data", str(s.data), "--resume",
+        "--config", "configs/long.toml", "--run", "long", "--data", str(s.data),
+        "--max-steps", str(thirty_percent(plan["long"])), "--resume",
     ]  # fmt: skip
     assert host.args("calibrate") == [
         "train", "calibrate", "--config", "configs/long.toml", "--steps", "2000", "--write",
@@ -368,11 +404,25 @@ def test_the_driver_runs_the_v2_sequence_and_hands_the_flagship_size_m_as_its_re
     references = {entry[1]: entry[3] for entry in host.log if entry[0] == "run"}
     assert references["leg1"] == references["branch"] == references["calibrate"] == ""
     assert references["launch"] == "size-m" and driver.train_table(s.config_path)["steps"] == plan["long"]
-    assert (
-        _status(s)["state"] == "done" and f"{plan['start']:,} + {plan['cooldown']:,}" in _status(s)["detail"]
-    )
+    assert _status(s)["state"] == "done" and "47,301 + 11,825" in _status(s)["detail"]
     guard = json.loads((s.home / "eval" / "size_guard.json").read_text(encoding="utf-8"))
-    assert guard["passed"] and guard["branch"]["step"] == plan["rung"]
+    assert guard["passed"] and guard["branch"]["step"] == PR2["rung"]
+
+
+def test_the_relaunch_stops_at_the_30_percent_check_and_the_status_names_the_preview(tmp_path):
+    """Plan P7: at 30% the long run pauses for the 3 GPU-h preview (PR-2 (2): size-m is its reference;
+    PR-3's parity and soak run on its weights), so the relaunch trains only to the 30% check."""
+    s = _settings(tmp_path)
+    host = FakeHost(s)
+    assert driver.drive(s, host) == driver.EXIT_DONE
+    preview = thirty_percent(exact_plan(RATE)["long"])
+    launch = host.args("launch")
+    assert launch[launch.index("--max-steps") + 1] == str(preview) and launch[-1] == "--resume"
+    assert driver.load_state(s)["plan"]["preview_step"] == preview
+    detail = _status(s)["detail"]
+    assert f"stops at the 30% check, step {preview:,}" in detail
+    assert f"--preview-cooldown 3h --from-step {preview}" in detail
+    assert "then resume without --max-steps" in detail
 
 
 def test_the_endgame_screen_stops_before_the_calibration_and_the_keeper_restarts(tmp_path):
@@ -430,7 +480,7 @@ def test_a_rounded_printed_rate_is_pinned_to_the_written_steps():
 
 
 def test_the_plan_follows_long_toml_s_steps_when_the_printed_rate_is_rounded(tmp_path):
-    s = _settings(tmp_path)
+    s = _settings(tmp_path, rung_steps=None)  # the rung from R_true, so it shows the pinned rate
     exact = "2621.4437"
     host = FakeHost(s, rate=exact)  # prints 2,621.44 and writes the exact rate's steps
     assert driver.drive(s, host) == driver.EXIT_DONE
@@ -476,7 +526,7 @@ def test_a_failed_guard_pauses_the_flagship_at_the_rung_s_start_and_sets_gate_p7
     beat = json.loads((s.runs / "long" / "heartbeat.json").read_text(encoding="utf-8"))
     assert beat["state"] == "paused" and beat["stopped"] == "paused: P7-VAA"
     status = _status(s)
-    assert status["state"] == "paused" and f"step {exact_plan(RATE)['start']:,}" in status["detail"]
+    assert status["state"] == "paused" and f"step {PR2['start']:,}" in status["detail"]
     assert driver.train_table(s.config_path)["vaa_reference"] == ""
     assert json.loads((s.home / "eval" / "size_guard.json").read_text(encoding="utf-8"))["passed"] is False
 
@@ -491,6 +541,32 @@ def test_a_rerun_after_a_reboot_in_leg_1_resumes_it_without_calibrating_again(tm
     assert "calibrate" not in again.steps() and again.args("leg1")[-1] == "--resume"
 
 
+def test_a_rerun_with_other_rung_settings_is_refused_once_leg_1_has_a_checkpoint(tmp_path):
+    """The first launch's plan holds for the whole choreography: a rerun under other flags must not move
+    leg 1's stop or the branch point."""
+    s = _settings(tmp_path)
+    assert driver.drive(s, FakeHost(s, leg1=1)) == driver.EXIT_FAILED  # planned to --max-steps 47301
+    (s.runs / "long" / driver.checkpoint_name(30_000)).write_bytes(b"")
+    other = driver.Settings(**{**s.__dict__, "rung_steps": None})  # 6 h at R_true: 44,2xx
+    again = FakeHost(other)
+    assert driver.drive(other, again) == driver.EXIT_FAILED
+    status = _status(s)
+    assert status["step"] == "plan" and "leg1" not in again.steps() and "branch" not in again.steps()
+    assert "47,301" in status["detail"] and "rung_start" in status["detail"]
+    assert driver.load_state(s)["plan"]["rung_start"] == PR2["start"]  # the recorded plan is kept
+    same = FakeHost(s)
+    assert driver.drive(s, same) == driver.EXIT_DONE and same.args("leg1")[-3:-1] == ["--max-steps", "47301"]
+
+
+def test_a_plan_may_change_while_leg_1_has_no_checkpoint(tmp_path):
+    s = _settings(tmp_path)
+    assert driver.drive(s, FakeHost(s, leg1=1)) == driver.EXIT_FAILED
+    other = driver.Settings(**{**s.__dict__, "rung_steps": None})
+    again = FakeHost(other)
+    assert driver.drive(other, again) == driver.EXIT_DONE
+    assert again.args("leg1")[-2:] == ["--max-steps", str(exact_plan(RATE)["start"])]
+
+
 def test_checkpoints_without_a_recorded_rate_are_never_recalibrated(tmp_path):
     s = _settings(tmp_path)
     (s.runs / "long").mkdir()
@@ -503,21 +579,21 @@ def test_checkpoints_without_a_recorded_rate_are_never_recalibrated(tmp_path):
 def test_a_crashed_branch_is_resumed_and_a_branch_of_another_plan_is_refused(tmp_path):
     s = _settings(tmp_path)
     assert driver.drive(s, FakeHost(s, branch=1)) == driver.EXIT_FAILED
-    plan = exact_plan(RATE)
     (s.runs / "size-m").mkdir(exist_ok=True)
-    (s.runs / "size-m" / driver.checkpoint_name(plan["start"] + 500)).write_bytes(b"")
+    (s.runs / "size-m" / driver.checkpoint_name(PR2["start"] + 500)).write_bytes(b"")
     again = FakeHost(s)
     assert driver.drive(s, again) == driver.EXIT_DONE and again.args("branch")[-1] == "--resume"
     assert "leg1" not in again.steps()  # leg 1 already reached the rung's start
     other = _settings(tmp_path / "other")
-    _run(other.runs, "size-m", 59_126, 0.58)
+    derived = exact_plan(RATE)["rung"]  # a branch cut for 6 h at R_true, not PR-2's 59,126 steps
+    _run(other.runs, "size-m", derived, 0.58)
     (other.runs / "long").mkdir()
-    (other.runs / "long" / driver.checkpoint_name(plan["start"])).write_bytes(b"")
+    (other.runs / "long" / driver.checkpoint_name(PR2["start"])).write_bytes(b"")
     driver.save_state(other, {"rate": 2621.3, "rate_eps": 0.05})
     host = FakeHost(other)
     host._calibrate([])  # long.toml's steps as the recorded calibration wrote them
     assert driver.drive(other, host) == driver.EXIT_FAILED
-    assert "branched for 59,126 steps" in _status(other)["detail"]
+    assert f"branched for {derived:,} steps" in _status(other)["detail"]
 
 
 def test_a_calibration_without_r_true_or_with_other_steps_fails_clearly(tmp_path):
@@ -568,4 +644,7 @@ def test_the_dry_run_prints_the_plan_and_the_commands(tmp_path, capsys):
     assert driver.main(argv) == driver.EXIT_DONE
     out = capsys.readouterr().out
     assert "59,126" in out and "47,301" in out and "11,825" in out and "--preview-name size-m" in out
+    assert "EVAL.md PR-2's 59,126 steps; 6 h at R_true would be 59,126" in out
+    preview = thirty_percent(exact_steps(120, "2803.05"))
+    assert f"--max-steps {preview} --resume" in out and f"--preview-cooldown 3h --from-step {preview}" in out
     assert not s.path(".status.json").exists()

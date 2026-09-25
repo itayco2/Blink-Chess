@@ -1,8 +1,8 @@
 # P6 v2 (EVAL.md PR-2, only with Itay's OK): N* = M by the research prior, overridden only by the epoch
-# floor and VRAM; no size runs at 6 h, so `blink sweep sizes` plans nothing. M's 6 h rung is a cooldown
-# branched from the flagship at its 6 h cooldown start (tools/p7_v2_driver.py), and `blink sweep choose`
-# records the floor, VRAM and p99 facts without sweep.json. P6 v1 was sizes s, m, m12 (l conditional)
-# with rule "vaa" (best 6 h VAA, 2 sigma tie to M); nstar.py keeps that rule for the record.
+# floor and VRAM; no size runs at 6 h, so `blink sweep sizes` plans nothing. M's 6 h rung, PR-2's 59,126
+# steps, is a cooldown branched from the flagship at step 47,301 (tools/p7_v2_driver.py), and `blink
+# sweep choose` records the floor, VRAM and p99 facts without sweep.json. P6 v1 was sizes s, m, m12 (l
+# conditional) with rule "vaa" (best 6 h VAA, 2 sigma tie to M); nstar.py keeps that rule for the record.
 
 [sizes]
 sizes = []                    # v1: ["s", "m", "m12"]

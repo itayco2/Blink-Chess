@@ -1,14 +1,15 @@
 """P6 v2's flagship choreography (EVAL.md PR-2), run detached: calibrate, leg 1, the size-m branch, the
 guard, the N* record, then the flagship resumed with size-m as its reference.
 
-Run it ONLY with Itay's OK to P6 v2, after P5 has ended, the recipe is frozen and EVAL.md v1 is tagged,
-from the worktree the flagship trains in (it must hold the p6v2 and p7prep merges). Launch it through
-WMI so it outlives the agent session (PF38), for example:
+Run it ONLY after P5 has ended (PR-2 was adopted on 2026-09-25), the recipe is frozen and EVAL.md v1 is
+tagged, from the worktree the flagship trains in (it must hold the p6v2 and p7prep merges). Launch it
+through WMI so it outlives the agent session (PF38), for example:
 
     powershell -NoProfile -Command "Invoke-CimMethod -ClassName Win32_Process -MethodName Create
       -Arguments @{CommandLine='C:\\dev\\blink-chess\\.venv\\Scripts\\python.exe tools\\p7_v2_driver.py';
       CurrentDirectory='C:\\dev\\blink-run'}"
 
+With no flags it branches size-m at PR-2's step 47,301 over 11,825 steps; rerun it with the same flags.
 `--dry-run --rate R` prints the plan and every command and runs nothing. Each step logs to
 <home>/logs/p7v2-<step>.out|err; the state goes to p7v2.status.json (and p7v2.state.json):
 
@@ -19,13 +20,14 @@ WMI so it outlives the agent session (PF38), for example:
    train calibrate --config configs/long.toml --steps 2000 --write` measures R_true and writes
    long.toml's steps = floor(120 x 3600 x R_true / 1024). The driver reads R_true from its output
    and checks those steps; it fails clearly when the command is missing.
-2. plan, from R_true alone: M's 6 h rung is N6 = floor(6 x 3600 x R_true / 1024) steps (as `blink
-   sweep sizes` sizes a run), cooling down over round(0.2 x N6) steps from N6 - round(0.2 x N6)
-   (blink.train.schedule). At the bench's 2,803.05 samples/s that is the analysis's 59,126 / 11,825 /
-   47,301 (PR-2's numbers); at a true ~2,621 samples/s it is 55,296 / 11,059 / 44,237 (4.80 + 1.20 h).
-   `--rung-steps 59126` keeps PR-2's literal numbers instead. The cooldown start must fall inside the
-   flagship's stable phase and before its 5% check (it does whenever 6 h is 5% of T_long), and
-   vaa_reference must be "" until the guard.
+2. plan: size-m is PR-2's literal 59,126-step M run (adopted 2026-09-25: "branched from the flagship at
+   step 47,301"), cooling down over round(0.2 x 59,126) = 11,825 steps from 47,301
+   (blink.train.schedule), whatever R_true is. 6 h at R_true, floor(6 x 3600 x R_true / 1024) steps
+   (as `blink sweep sizes` sizes a run), is only printed beside it: 59,126 at the bench's 2,803.05
+   samples/s, 55,296 at a true ~2,621. `--rung-from-rate` uses that instead and `--rung-steps N` any
+   other length; the choice goes to p7v2.state.json and eval/size_guard.json. The cooldown start must
+   fall inside the flagship's stable phase and before its 5% check, and vaa_reference must be "" until
+   the guard.
 3. leg 1: `supervise -- train --config configs/long.toml --run long --data DATA --max-steps START`.
 4. branch: `supervise -- train --run long --data DATA --from-step START --preview-steps COOLDOWN
    --preview-name size-m`; it inherits vaa_reference "" so its end check is skipped.
@@ -35,11 +37,16 @@ WMI so it outlives the agent session (PF38), for example:
    eval/size_guard.json either way.
 6. `blink sweep choose` (rule prior) records the floor, VRAM and p99 facts in eval/sweep.json.
 7. long.toml's vaa_reference = "size-m"; the flagship is relaunched detached (`ops launch --name
-   p7-long -- supervise -- train ... --resume`) and the priority keeper restarted.
+   p7-long -- supervise -- train ... --max-steps P --resume`) and the priority keeper restarted. P is the
+   30% check (blink.train.vaa.check_steps), where the plan's P7 pauses the long run for the 3 GPU-h
+   preview (size-m is its reference, PR-2 (2); PR-3's parity and soak run on its weights). The driver
+   ends there: its done status names P and the two commands that follow, `train --run long --data DATA
+   --preview-cooldown 3h --from-step P`, then the relaunch without --max-steps.
 
 Stdlib only: it imports nothing from the repo, so code changes cannot reach it mid-run. A rerun (after a
 reboot, say) picks up where the files say it stopped: checkpoints, size-m's final row, the state file.
-It never calibrates once leg 1 has a checkpoint, and does nothing once the flagship was launched.
+It never calibrates once leg 1 has a checkpoint, refuses a plan other than the recorded one from then on
+(rerun it with the first launch's flags), and does nothing once the flagship was launched.
 """
 
 import argparse
@@ -63,6 +70,10 @@ CHECKPOINT = re.compile(r"^ckpt_(\d+)\.pt$")
 RATE = re.compile(r"\bR[_ ]?true\b[^0-9\n]{0,24}([0-9][0-9,]*(?:\.[0-9]+)?)", re.IGNORECASE)
 N_STAR = re.compile(r"^N\* = (\S+)", re.MULTILINE)
 FIRST_CHECK = 0.05  # the flagship's first check (blink.train.vaa.CHECK_FRACS)
+PREVIEW_CHECK = 0.30  # the check the long run pauses at for the 3 GPU-h preview (plan P7)
+PR2_RUNG_STEPS = 59_126  # EVAL.md PR-2: size-m is a 59,126-step M run, branched at 47,301
+PLAN_STEPS = ("batch", "long_steps", "rung_steps", "rung_cooldown", "rung_start", "first_check",
+              "preview_step")  # the plan's numbers a rerun must keep  # fmt: skip
 TOLERANCE = 1e-9  # float slack for a pre-registered comparison (blink.train.nstar)
 PAUSED_VAA = "paused: P7-VAA"  # blink.train.supervise's pause status: gate P7-VAA
 KEEPER = "keep_training_priority.ps1"
@@ -90,7 +101,7 @@ class Settings:
     calib_steps: int = 2000
     long_hours: float = 120.0  # T_long (PR-5)
     rung_hours: float | None = None  # None: configs/sweep.toml [sizes] hours
-    rung_steps: int | None = None  # None: floor(rung_hours x 3600 x R_true / batch)
+    rung_steps: int | None = PR2_RUNG_STEPS  # None: floor(rung_hours x 3600 x R_true / batch)
     sigma_factor: float = 2.0
     bench_size: str = "m"  # supervise's throughput benchmark; "" turns the rule off
     keeper: Path | None = None
@@ -119,10 +130,14 @@ class Plan:
     rate: float  # R_true, samples/s
     batch: int
     long_steps: int  # the flagship: floor(T_long x 3600 x R_true / batch)
-    rung_steps: int  # M's 6 h run: floor(6 x 3600 x R_true / batch)
+    rung_steps: int  # size-m's total: PR-2's 59,126 unless the settings say otherwise
     rung_cooldown: int
     rung_start: int  # leg 1 stops here; the branch cools down from here
     first_check: int  # the flagship's 5% check
+    preview_step: int  # the flagship's 30% check: the relaunch stops there for the preview
+    rung_rule: str  # where rung_steps came from
+    rung_hours: float  # M's rung in hours at R_true (configs/sweep.toml [sizes] hours)
+    rate_rung_steps: int  # floor(rung_hours x 3600 x R_true / batch): the cross-check beside a fixed rung
 
     def hours(self, steps: int) -> float:
         return steps * self.batch / self.rate / 3600
@@ -147,16 +162,25 @@ def check_step(frac: float, total: int) -> int:
     return max(1, math.floor(frac * total + 0.5))
 
 
+def rung_rule(rung_steps: int | None, rung_hours: float) -> str:
+    if rung_steps is None:
+        return f"{rung_hours:g} h at R_true"
+    if rung_steps == PR2_RUNG_STEPS:
+        return f"EVAL.md PR-2's {rung_steps:,} steps"
+    return f"--rung-steps {rung_steps:,}"
+
+
 def make_plan(
     rate: float, train: dict[str, Any], long_hours: float, rung_hours: float, rung_steps: int | None = None
 ) -> Plan:
-    """The flagship's steps and M's 6 h rung, from the calibrated rate and the config's schedule.
+    """The flagship's steps and size-m's rung, from the calibrated rate and the config's schedule.
 
-    `rung_steps` replaces the rung's derived length (PR-2's literal 59,126, say); its cooldown and start
-    still follow from the schedule."""
+    `rung_steps` (PR-2's literal 59,126, say) replaces the rung's length at `rung_hours` of R_true, which
+    is then only a cross-check; its cooldown and start still follow from the schedule."""
     batch, frac = int(train["batch_size"]), float(train["cooldown_frac"])
     long_steps = steps_for(long_hours, rate, batch)
-    rung = rung_steps if rung_steps is not None else steps_for(rung_hours, rate, batch)
+    derived = steps_for(rung_hours, rate, batch)
+    rung = rung_steps if rung_steps is not None else derived
     start = cooldown_start(rung, frac)
     first = check_step(FIRST_CHECK, long_steps)
     if start <= int(train["warmup_steps"]):
@@ -167,7 +191,10 @@ def make_plan(
         raise ValueError(
             f"the rung's cooldown start {start:,} is not before the flagship's 5% check {first:,}"
         )
-    return Plan(rate, batch, long_steps, rung, rung - start, start, first)
+    return Plan(rate=rate, batch=batch, long_steps=long_steps, rung_steps=rung, rung_cooldown=rung - start,
+                rung_start=start, first_check=first, preview_step=check_step(PREVIEW_CHECK, long_steps),
+                rung_rule=rung_rule(rung_steps, rung_hours), rung_hours=rung_hours,
+                rate_rung_steps=derived)  # fmt: skip
 
 
 def parse_number(text: str) -> tuple[float, float]:
@@ -399,9 +426,47 @@ def branch_args(s: Settings, plan: Plan, resume: bool) -> list[str]:
     return [*supervise(s), *args, *(["--resume"] if resume else [])]
 
 
-def launch_args(s: Settings) -> list[str]:
-    train = ["train", "--config", s.config, "--run", s.run, "--data", str(s.data), "--resume"]
-    return ["ops", "launch", "--name", s.launch_name, "--", *supervise(s), *train]
+def launch_args(s: Settings, plan: Plan | None = None) -> list[str]:
+    """The flagship relaunched detached: to the 30% check with the plan (the preview pause), to the end
+    without one (the resume after the preview)."""
+    train = ["train", "--config", s.config, "--run", s.run, "--data", str(s.data)]
+    stop = ["--max-steps", str(plan.preview_step)] if plan is not None else []
+    return ["ops", "launch", "--name", s.launch_name, "--", *supervise(s), *train, *stop, "--resume"]
+
+
+def preview_args(s: Settings, plan: Plan) -> list[str]:
+    """Plan P7's 3 GPU-h preview cooldown from the 30% checkpoint (p7prep's configs/long.toml, step 2)."""
+    return ["train", "--run", s.run, "--data", str(s.data), "--preview-cooldown", "3h",
+            "--from-step", str(plan.preview_step)]  # fmt: skip
+
+
+def after_launch(s: Settings, plan: Plan) -> str:
+    """What follows the driver: the flagship stops at the 30% check, the preview runs, the run resumes."""
+    blink = "python -m blink.cli"
+    return (
+        f"it stops at the 30% check, step {plan.preview_step:,}: run the 3 GPU-h preview `{blink} "
+        f"{' '.join(preview_args(s, plan))}` (PR-3's parity and soak on its weights), then resume without "
+        f"--max-steps: `{blink} {' '.join(launch_args(s))}`"
+    )
+
+
+def locked_plan(s: Settings, state: dict[str, Any], plan: Plan) -> dict[str, Any]:
+    """The state with this plan, which must be the recorded one once leg 1 has a checkpoint: a rerun under
+    other flags would otherwise move leg 1's stop and the branch point."""
+    recorded = state.get("plan")
+    if recorded and checkpoint_steps(s.runs / s.run):
+        current = asdict(plan)
+        differ = [key for key in PLAN_STEPS if recorded.get(key) != current[key]]
+        if differ:
+            was = f"size-m {recorded.get('rung_steps', 0):,} = {recorded.get('rung_start', 0):,} + "
+            was += f"{recorded.get('rung_cooldown', 0):,} ({recorded.get('rung_rule', '?')})"
+            raise StepFailed(
+                "plan",
+                f"runs/{s.run} was started under the recorded plan, {was}, flagship "
+                f"{recorded.get('long_steps', 0):,}; this command's plan differs in {', '.join(differ)}: "
+                "rerun with the first launch's --rung-steps/--rung-from-rate/--rung-hours/--long-hours",
+            )
+    return {**state, "plan": asdict(plan)}
 
 
 def choose_n_star(s: Settings, host, step: str, extra: list[str]) -> str:
@@ -562,15 +627,17 @@ def run_guard(s: Settings, plan: Plan) -> dict[str, Any]:
         verdict = guard(s)
     except (OSError, ValueError, KeyError) as exc:
         raise StepFailed("guard", str(exc)) from exc
-    write_atomic(s.home / "eval" / "size_guard.json", json.dumps(verdict, indent=1) + "\n")
+    rung = {"steps": plan.rung_steps, "start": plan.rung_start, "cooldown": plan.rung_cooldown,
+            "rule": plan.rung_rule, "rate_steps": plan.rate_rung_steps}  # fmt: skip
+    write_atomic(s.home / "eval" / "size_guard.json", json.dumps({**verdict, "rung": rung}, indent=1) + "\n")
     return verdict
 
 
-def relaunch(s: Settings, host, state: dict[str, Any]) -> None:
+def relaunch(s: Settings, host, state: dict[str, Any], plan: Plan) -> None:
     status(s, "running", "launch")
     if train_table(s.config_path).get("vaa_reference", "") != s.branch:
         set_train_string(s.config_path, "vaa_reference", s.branch)
-    code, out = host.run("launch", launch_args(s))
+    code, out = host.run("launch", launch_args(s, plan))
     if code != 0:
         raise StepFailed("launch", f"ops launch exit {code}: see p7v2-launch.out and .err")
     launched = next((line for line in out.splitlines() if line.startswith("launched")), "launched")
@@ -578,9 +645,16 @@ def relaunch(s: Settings, host, state: dict[str, Any]) -> None:
     ensure_keeper(s, host)
 
 
+def rung_line(plan: Plan) -> str:
+    rung = f"size-m {plan.rung_steps:,} = {plan.rung_start:,} + {plan.rung_cooldown:,} cooldown"
+    if plan.rung_rule == rung_rule(None, plan.rung_hours):
+        return f"{rung} ({plan.rung_rule})"
+    return f"{rung} ({plan.rung_rule}; {plan.rung_hours:g} h at R_true would be {plan.rate_rung_steps:,})"
+
+
 def describe(plan: Plan, verdict: dict[str, Any]) -> str:
     flagship = f"flagship {plan.long_steps:,} steps (5% check {plan.first_check:,})"
-    rung = f"size-m {plan.rung_steps:,} = {plan.rung_start:,} + {plan.rung_cooldown:,} cooldown"
+    rung = rung_line(plan)
     guarded = f"guard Delta {verdict['delta']:+.4f} vs {verdict['threshold']:+.4f}"
     sigma = f"sigma_EMA {verdict['sigma_ema']:.4f}"
     return f"R_true {plan.rate:,.2f} samples/s: {flagship}; {rung}; {guarded} ({sigma})"
@@ -594,7 +668,8 @@ SCREEN_NOTE = (
 
 def finished(s: Settings, state: dict[str, Any], plan: Plan, verdict: dict[str, Any]) -> str:
     screen = SCREEN_NOTE if state.get("screen_stopped") else ""
-    return f"flagship resumed with vaa_reference {s.branch!r}; {describe(plan, verdict)}.{screen}"
+    resumed = f"flagship resumed with vaa_reference {s.branch!r}; {after_launch(s, plan)}"
+    return f"{resumed}. {describe(plan, verdict)}.{screen}"
 
 
 def drive(s: Settings, host) -> int:
@@ -608,7 +683,7 @@ def drive(s: Settings, host) -> int:
         ensure_keeper(s, host)  # the calibration measures the rate the flagship will train at
         rate, state = calibrated(s, host, state)
         plan = planned(s, rate)
-        save_state(s, state := {**state, "plan": asdict(plan)})
+        save_state(s, state := locked_plan(s, state, plan))
         leg_one(s, host, plan)
         branch(s, host, plan)
         verdict = run_guard(s, plan)
@@ -621,7 +696,7 @@ def drive(s: Settings, host) -> int:
             return EXIT_PAUSED
         status(s, "running", "choose")
         choose_n_star(s, host, "choose", [])
-        relaunch(s, host, state)
+        relaunch(s, host, state, plan)
     except StepFailed as exc:
         status(s, "failed", exc.step, exc.detail)
         return EXIT_FAILED
@@ -650,13 +725,16 @@ def dry_run(s: Settings) -> int:
     hours = {name: plan.hours(steps) for name, steps in (("long", plan.long_steps), ("leg1", plan.rung_start),
                                                              ("branch", plan.rung_cooldown))}  # fmt: skip
     print(f"plan at R_true {plan.rate:,.2f} samples/s (batch {plan.batch}):")
-    print(f"  flagship {plan.long_steps:,} steps ({hours['long']:.1f} h); 5% check at {plan.first_check:,}")
-    print(f"  size-m {plan.rung_steps:,} steps: leg 1 to {plan.rung_start:,} ({hours['leg1']:.2f} h), branch "
-          f"{plan.rung_cooldown:,} ({hours['branch']:.2f} h)")  # fmt: skip
+    print(f"  flagship {plan.long_steps:,} steps ({hours['long']:.1f} h); 5% check at {plan.first_check:,}, "
+          f"30% check (the preview pause) at {plan.preview_step:,}")  # fmt: skip
+    print(f"  {rung_line(plan)}")
+    print(f"  leg 1 to {plan.rung_start:,} ({hours['leg1']:.2f} h), branch {plan.rung_cooldown:,} "
+          f"({hours['branch']:.2f} h)")  # fmt: skip
     calibrate = [*CALIBRATE, "--config", s.config, "--steps", str(s.calib_steps), "--write"]
     for name, args in (("calibrate", calibrate), ("leg1", leg_one_args(s, plan, False)),
                        ("branch", branch_args(s, plan, False)), ("choose", ["sweep", "choose"]),
-                       ("launch", launch_args(s))):  # fmt: skip
+                       ("launch", launch_args(s, plan)), ("then the preview", preview_args(s, plan)),
+                       ("then the resume", launch_args(s))):  # fmt: skip
         print(f"  {name}: python -m blink.cli {' '.join(args)}")
     return EXIT_DONE
 
@@ -671,12 +749,12 @@ def settings_from(argv: list[str] | None = None) -> tuple[Settings, bool]:
     p.add_argument(
         "--rate", type=parse_number, help="a calibrated R_true (samples/s) to use instead of calibrating"
     )
-    p.add_argument("--rung-hours", type=float, help="default: configs/sweep.toml [sizes] hours")
-    p.add_argument(
-        "--rung-steps",
-        type=int,
-        help="size-m's total steps instead of the rung hours at R_true (PR-2: 59126)",
-    )
+    p.add_argument("--rung-hours", type=float, help="M's rung at R_true (default: sweep.toml [sizes] hours)")
+    rung = p.add_mutually_exclusive_group()
+    rung.add_argument("--rung-steps", type=int, default=PR2_RUNG_STEPS,
+                      help=f"size-m's steps (default: PR-2's {PR2_RUNG_STEPS}, from 47301)")  # fmt: skip
+    rung.add_argument("--rung-from-rate", action="store_true",
+                      help="size-m is the rung hours at R_true (departs from PR-2)")  # fmt: skip
     p.add_argument("--long-hours", type=float, default=120.0, help="T_long (PR-5)")
     p.add_argument("--bench-size", default="m", help="supervise's throughput benchmark ('' turns it off)")
     p.add_argument("--dry-run", action="store_true", help="print the plan and the commands, run nothing")
@@ -692,7 +770,7 @@ def settings_from(argv: list[str] | None = None) -> tuple[Settings, bool]:
         rate=rate,
         rate_eps=eps,
         rung_hours=args.rung_hours,
-        rung_steps=args.rung_steps,
+        rung_steps=None if args.rung_from_rate else args.rung_steps,
         long_hours=args.long_hours,
         bench_size=args.bench_size,
     )
