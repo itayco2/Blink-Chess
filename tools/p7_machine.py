@@ -293,12 +293,12 @@ class Host:
         self.repo, self.python, self.home, self.logs = Path(repo), Path(python), Path(home), Path(logs)
         self.env = {**os.environ, "BLINK_HOME": str(home), "PYTHONUTF8": "1"}
 
-    def run(self, step: str, blink_args: list[str], env: dict[str, str] | None = None) -> tuple[int, str]:
+    def run(self, step: str, args: list[str], env: dict[str, str] | None = None) -> tuple[int, str]:
         """`python -m blink.cli ARGS` from the repo, with `env` added to its environment; stdout and
         stderr go to logs/p7v2-<step>.out|err. An inherited RESUMER_ENV is dropped: only a command whose
         caller reruns it after a user pause (the calibration) is told so."""
         out_path, err_path = self.logs / f"p7v2-{step}.out", self.logs / f"p7v2-{step}.err"
-        argv = [str(self.python), "-m", "blink.cli", *blink_args]
+        argv = [str(self.python), "-m", "blink.cli", *args]
         child_env = {**{k: v for k, v in self.env.items() if k != RESUMER_ENV}, **(env or {})}
         with open(out_path, "w", encoding="utf-8") as out, open(err_path, "w", encoding="utf-8") as err:
             code = subprocess.run(argv, cwd=self.repo, env=child_env, stdout=out, stderr=err).returncode

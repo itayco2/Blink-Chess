@@ -339,6 +339,15 @@ def test_the_served_run_is_read_as_blink_supervise_reads_it():
     assert p7_finish.blink_args(["python.exe", "tools/p7_v2_driver.py"]) == []
 
 
+def test_the_served_run_is_blink_ops_own_for_every_train_and_supervise_command():
+    from blink.ops import launch
+
+    commands = [SUPERVISOR, TRAINER, SIZE_M, PREVIEW, [*PYTHON, "supervise", "--run", "x", "--", "train"]]
+    for command in commands:
+        args = p7_finish.blink_args(command)
+        assert p7_finish.served_run(args) == launch.served_run(args) is not None
+
+
 def test_the_hours_are_blink_s_training_seconds_to_the_step():
     from blink.train.calibrate import training_seconds
 
