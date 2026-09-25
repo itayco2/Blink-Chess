@@ -136,6 +136,18 @@ def test_the_status_text_shows_the_phase_clip_and_vaa_with_a_failed_check(tmp_pa
     assert "VAA 0.31 (ema 0.33, full)" in text and "check 5% FAILED" in text
 
 
+def test_a_skipped_check_says_skipped_with_its_reason_never_passed(tmp_path):
+    """P6 v2 skips the flagship's 5% check (vaa_reference is "" until the guard): the trainer's log says
+    so, and `blink status` must say the same."""
+    run_dir = _run(tmp_path)
+    heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 60, "steps": 100}, now=1.0)
+    row = {"step": 5, "check": "5%", "vaa": 0.31, "ema_vaa": 0.33, "vaa_set": "full"}
+    row |= {"check_skipped": "no reference run"}
+    (run_dir / "evals.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    text = status.format_status(status.run_status(run_dir, now=2.0))
+    assert "check 5% skipped (no reference run)" in text and "passed" not in text
+
+
 def test_the_status_text_shows_a_subset_eval_s_ema_vaa(tmp_path):
     run_dir = _run(tmp_path)
     heartbeat.write(run_dir / "heartbeat.json", {"state": "running", "step": 60, "steps": 100}, now=1.0)

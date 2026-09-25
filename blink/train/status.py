@@ -140,8 +140,18 @@ def _format_eval(e: dict[str, Any]) -> str:
     elif "ema_vaa" in e:
         text += f", VAA ema {e.get('ema_vaa')} ({e.get('vaa_set', 'subset')} of {e.get('vaa_n')})"
     if "check" in e:
-        text += f", check {e['check']} {'FAILED' if 'vaa_check_failed' in e else 'passed'}"
+        text += f", check {e['check']} {_check_verdict(e)}"
     return text
+
+
+def _check_verdict(e: dict[str, Any]) -> str:
+    """As the trainer's log says it (blink.train.evals): a skipped check (the 5% one under P6 v2, whose
+    reference is set only by the guard) never reads as passed."""
+    if "vaa_check_failed" in e:
+        return "FAILED"
+    if "check_skipped" in e:
+        return f"skipped ({e['check_skipped']})"
+    return "passed"
 
 
 # ---------------------------------------------------------------- the speed WARN (P4)
