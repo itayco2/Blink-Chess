@@ -79,6 +79,7 @@
   "schema_version": 1,
   "shipped": {
     "agent": "Blink-M",
+    "epsilon": null,
     "mode": "value",
     "sha": "0123abcd"
   },
@@ -148,7 +149,7 @@
       "params_non_gab": 21878256,
       "params_total": 22550000,
       "positions_seen": 573400000,
-      "reproduce": "uv run blink rate --model ship",
+      "reproduce": "uv run blink rate --pgn-list results/final_slice_pgns.txt --anchors configs/anchors.csv",
       "sf_nodes_equiv": 4096,
       "training_positions": 398100000
     },
@@ -173,7 +174,7 @@
       "params_non_gab": 21878256,
       "params_total": 22550000,
       "positions_seen": 573400000,
-      "reproduce": "uv run blink rate --model ship --mode policy",
+      "reproduce": "uv run blink rate --pgn-list results/final_slice_pgns.txt --anchors configs/anchors.csv",
       "sf_nodes_equiv": 1024,
       "training_positions": 398100000
     },

@@ -569,13 +569,20 @@ def cmd_lichess_config(args: argparse.Namespace) -> int:
     spec = config.BotSpec(args.model, args.mode, args.sha, args.casual_model)
     kinds = (args.only,) if args.only else config.KINDS
     try:
-        written = config.generate(spec, Path(args.out_dir), kinds=kinds, templates=Path(args.templates))
+        written = config.generate(
+            spec,
+            Path(args.out_dir),
+            kinds=kinds,
+            templates=Path(args.templates),
+            results_dir=args.results_dir,
+        )
     except (config.ConfigError, FileNotFoundError) as exc:
         return _refuse("config", exc)
     for kind, path in written.items():
         stamp = config.load_config(path)["blink"]
         sha = f", sha256 {stamp['sha'][:12]}" if stamp.get("sha") else ""
-        _say(f"{kind}: {path} (model {stamp['model']}, mode {stamp['mode']}{sha})")
+        tie = f", epsilon {stamp['epsilon']!r}" if "epsilon" in stamp else ""
+        _say(f"{kind}: {path} (model {stamp['model']}, mode {stamp['mode']}{sha}{tie})")
     _say("check them with `blink lichess check-config --config <file>`; the token is never written")
     return 0
 
@@ -723,6 +730,12 @@ def _register_lichess_config(actions: argparse._SubParsersAction) -> None:
     gen.add_argument("--only", choices=config.KINDS, help="write just one of the two configs")
     gen.add_argument("--out-dir", default=str(config.DEFAULT_OUT_DIR))
     gen.add_argument("--templates", default=str(config.TEMPLATE_DIR), help="default: deploy/lichess")
+    gen.add_argument(
+        "--results-dir",
+        type=Path,
+        default=config.DEFAULT_RESULTS_DIR,
+        help="where E2b wrote epsilon.json: a rated value-mode bot plays with that epsilon (default results)",
+    )
     gen.set_defaults(func=cmd_lichess_config)
     chk = actions.add_parser("check-config", help="check a generated config against the plan")
     chk.add_argument("--config", required=True)

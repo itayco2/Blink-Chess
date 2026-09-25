@@ -129,6 +129,12 @@ config that points at anything but the evaluated model fails. `--results none` s
 results.json comparison, on purpose, and says so. `--sha <sha>` makes the generator refuse a weights
 file with a different hash.
 
+In value mode the rated config also plays the R4 tie window E2b chose: `blink lichess config` copies
+`results/epsilon.json` (run it from the repo root, or pass `--results-dir`) into `engine_options.epsilon`,
+because every rated game behind the published Elo was played with it and blink-uci's own default is 0.
+It refuses a value-mode rated config when that file is missing, and `check-config` compares the
+epsilon with the one results.json records for the shipped model.
+
 The rated config also passes the sha to every engine (`engine_options.sha`, which lichess-bot hands
 to blink-uci as `--sha=<sha>`). Each blink-uci hashes its weights file before the UCI handshake and
 exits 2 on any other hash, so an overwritten `ship` file stops the bot at lichess-bot's startup

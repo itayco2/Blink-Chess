@@ -13,6 +13,7 @@ from blink.report import results_schema as rs
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "report"
 GENERATED_AT = "2026-10-07T12:00:00+03:00"
+RATE = "uv run blink rate --pgn-list results/final_slice_pgns.txt --anchors configs/anchors.csv"
 
 
 def strength_rows() -> tuple[rs.StrengthRow, ...]:
@@ -47,7 +48,7 @@ def strength_rows() -> tuple[rs.StrengthRow, ...]:
         ),
         rs.StrengthRow(
             "Blink-M (value)",
-            reproduce="uv run blink rate --model ship",
+            reproduce=RATE,
             gpu_hours=120.3,
             evals_per_move_median=35,
             evals_per_move_max=219,
@@ -64,7 +65,7 @@ def strength_rows() -> tuple[rs.StrengthRow, ...]:
         ),
         rs.StrengthRow(
             "Blink-M (policy)",
-            reproduce="uv run blink rate --model ship --mode policy",
+            reproduce=RATE,
             gpu_hours=120.3,
             evals_per_move_median=1,
             evals_per_move_max=1,

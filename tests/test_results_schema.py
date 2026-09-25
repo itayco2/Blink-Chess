@@ -12,7 +12,7 @@ def a_strength_row(**overrides) -> rs.StrengthRow:
     base = dict(
         agent="Blink-M (value)",
         kind="blink",
-        reproduce="uv run blink rate --model ship",
+        reproduce="uv run blink rate --pgn-list results/final_slice_pgns.txt --anchors configs/anchors.csv",
         params_total=22_550_000,
         elo=1850.0,
         elo_ci95=35.0,

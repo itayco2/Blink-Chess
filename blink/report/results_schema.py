@@ -132,6 +132,7 @@ class Shipped:
     agent: str
     mode: str
     sha: str
+    epsilon: float | None = None  # value mode: the R4 tie window every rated game was played with (E2b)
 
 
 @dataclass(frozen=True)

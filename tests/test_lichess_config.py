@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "deploy" / "lichess" / "config.template.yml"
 CASUAL_TEMPLATE = ROOT / "deploy" / "lichess" / "config.casual.yml"
 SHA = hashlib.sha256(b"blink weights").hexdigest()
+EPSILON = 1 / 256  # E2b's choice in these tests
 
 
 def load_template(path: Path = TEMPLATE) -> dict:
@@ -44,6 +45,14 @@ def fake_weights(tmp_path: Path) -> Path:
     return path
 
 
+def e2b_results(tmp_path: Path, epsilon: float = EPSILON) -> Path:
+    """A results folder holding E2b's epsilon.json, as `blink eval all` leaves it."""
+    folder = tmp_path / "results"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "epsilon.json").write_text(json.dumps({"epsilon": epsilon}), encoding="utf-8")
+    return folder
+
+
 def generate(tmp_path: Path, **overrides) -> dict[str, dict]:
     weights = fake_weights(tmp_path)
     spec = botconfig.BotSpec(
@@ -52,7 +61,10 @@ def generate(tmp_path: Path, **overrides) -> dict[str, dict]:
         sha=overrides.pop("sha", None),
         casual_model=overrides.pop("casual_model", "run:long:ema"),
     )
-    written = botconfig.generate(spec, tmp_path / "bot", resolve=lambda selector: weights, **overrides)
+    results_dir = overrides.pop("results_dir", None) or e2b_results(tmp_path)
+    written = botconfig.generate(
+        spec, tmp_path / "bot", resolve=lambda selector: weights, results_dir=results_dir, **overrides
+    )
     return {kind: json.loads(path.read_text(encoding="utf-8")) for kind, path in written.items()}
 
 
@@ -415,7 +427,9 @@ def test_two_engines_started_at_once_from_the_rated_flags_write_two_whole_logs(t
 def rated_file(tmp_path: Path) -> tuple[Path, Path]:
     weights = fake_weights(tmp_path)
     spec = botconfig.BotSpec(str(weights), "value", SHA)
-    written = botconfig.generate(spec, tmp_path / "bot", kinds=("rated",), resolve=lambda s: weights)
+    written = botconfig.generate(
+        spec, tmp_path / "bot", kinds=("rated",), resolve=lambda s: weights, results_dir=e2b_results(tmp_path)
+    )
     return written["rated"], weights
 
 
@@ -438,7 +452,7 @@ def check(path: Path, weights: Path | None, results: Path | None = None, exe: bo
 
 def test_a_rated_check_passes_only_against_the_shipped_model_in_results_json(tmp_path):
     path, weights = rated_file(tmp_path)
-    shipped = results_schema.Shipped(agent="Blink-M", mode="value", sha=SHA)
+    shipped = results_schema.Shipped(agent="Blink-M", mode="value", sha=SHA, epsilon=EPSILON)
     assert check(path, weights, results_file(tmp_path, shipped)).problems == ()
 
 
@@ -462,7 +476,10 @@ def test_a_rated_check_fails_when_the_weights_file_cannot_be_found(tmp_path):
 def test_check_config_fails_when_the_engine_exe_does_not_exist(tmp_path, kind):
     weights = fake_weights(tmp_path)
     spec = botconfig.BotSpec(str(weights), "value", SHA)
-    path = botconfig.generate(spec, tmp_path / "bot", kinds=(kind,), resolve=lambda s: weights)[kind]
+    folder = e2b_results(tmp_path)
+    path = botconfig.generate(
+        spec, tmp_path / "bot", kinds=(kind,), resolve=lambda s: weights, results_dir=folder
+    )[kind]
     found = check(path, weights, exe=False).problems
     assert any("blink-uci.exe" in p and "does not exist" in p for p in found), found
 
@@ -565,3 +582,44 @@ def test_the_casual_smoke_engine_keeps_to_one_thread_at_below_normal_priority(tm
         broken["engine"]["engine_options"][key] = value
         found = botconfig.problems(broken, "casual", frozenset())
         assert any(p.startswith(f"engine.engine_options.{key}") for p in found), found
+
+
+# ---------------------------------------------------------------- the rated value bot plays E2b's epsilon
+# Every rated game behind the published Elo was played with the epsilon E2b chose (E5 under fastchess
+# with --epsilon, E6-E8 in process), and blink-uci's own default is 0: the bot must play the same one.
+
+
+def test_the_rated_value_bot_plays_with_the_epsilon_e2b_chose(tmp_path):
+    configs = generate(tmp_path)
+    rated = configs["rated"]
+    options = rated["engine"]["engine_options"]
+    assert options["epsilon"] == rated["blink"]["epsilon"] == EPSILON
+    assert uci.build_parser().parse_args(lichess_bot_flags(options)).epsilon == EPSILON
+    assert botconfig.problems(rated, "rated", frozenset(), epsilon=EPSILON) == []
+    assert "epsilon" not in configs["casual"]["engine"]["engine_options"]  # the preview smoke is exempt
+    policy = generate(tmp_path, mode="policy")["rated"]  # policy mode never breaks a value tie
+    assert "epsilon" not in policy["engine"]["engine_options"]
+    assert botconfig.problems(policy, "rated", frozenset()) == []
+
+
+def test_a_rated_value_config_without_e2bs_epsilon_is_refused(tmp_path):
+    empty = tmp_path / "no-results"
+    empty.mkdir()
+    with pytest.raises(botconfig.ConfigError, match="epsilon"):
+        generate(tmp_path, results_dir=empty)
+    rated = copy.deepcopy(generate(tmp_path)["rated"])
+    del rated["engine"]["engine_options"]["epsilon"]
+    found = botconfig.problems(rated, "rated", frozenset())
+    assert any(p.startswith("engine.engine_options.epsilon") for p in found), found
+
+
+def test_check_config_refuses_an_epsilon_other_than_the_one_the_shipped_model_was_rated_at(tmp_path):
+    path, weights = rated_file(tmp_path)
+    other = results_schema.Shipped(agent="Blink-M", mode="value", sha=SHA, epsilon=1 / 128)
+    found = check(path, weights, results_file(tmp_path, other)).problems
+    assert any("rated at" in p for p in found), found
+    unrecorded = results_schema.Shipped(agent="Blink-M", mode="value", sha=SHA)
+    found = check(path, weights, results_file(tmp_path, unrecorded)).problems
+    assert any("unverified" in p for p in found), found  # no epsilon in results.json, none beside it
+    (tmp_path / "epsilon.json").write_text(json.dumps({"epsilon": EPSILON}), encoding="utf-8")
+    assert check(path, weights, results_file(tmp_path, unrecorded)).problems == ()
