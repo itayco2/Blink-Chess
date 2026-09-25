@@ -106,6 +106,12 @@ def _user_paused(report: RunStatus) -> bool:
     return report.state == PAUSED_USER and age is not None and age <= LIVE_WITHIN_S
 
 
+def active(report: RunStatus) -> bool:
+    """Training now, or waiting out a user pause under a supervisor that still beats: what `blink status
+    --live` (and the Blink Status button) shows."""
+    return report.live or _user_paused(report)
+
+
 def exit_code(report: RunStatus) -> int:
     if _has_nan(report.last_metrics):
         return 1

@@ -16,7 +16,8 @@ A v1 pack directory holds train_r*.bin roots, train_c*.bin children, val_roots.b
 and manifest.json (with the rebalancing weights), plus mateset.npz, which the checks score with
 games10k (BLINK_HOME/data/games10k.npy unless --games10k names another); the P1 skeleton layout
 (train_000.bin, val.bin) still works for roots-only configs. `blink status --run NAME` prints the
-run's state and exits 1 when the run is stale, crashed or has a NaN loss. `blink train` honours the
+run's state and exits 1 when the run is stale, crashed or has a NaN loss; `blink status --live` prints
+every run that trains or waits out a user pause. `blink train` honours the
 user pause flag BLINK_HOME/PAUSE (blink.train.userpause): it waits to start while the flag is up, and
 when the flag goes up mid-run it checkpoints the step and exits with supervise.EXIT_USER_PAUSE (75).
 Torch is imported only when a command runs, so `blink --help` stays fast and works on the torch-free
@@ -229,7 +230,22 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def _live_status() -> int:
+    """Every run that trains or waits out a user pause; none is no error (the PC may be Itay's)."""
+    runs = [run for run in status.list_runs(paths.home() / "runs") if status.active(run)]
+    if not runs:
+        print(f"no live run under {paths.home() / 'runs'}")
+    for run in runs:
+        print(status.format_status(run))
+    return max((status.exit_code(run) for run in runs), default=0)
+
+
 def cmd_status(args: argparse.Namespace) -> int:
+    if args.live:
+        return _live_status()
+    if args.run is None:
+        print("blink status: name a run with --run NAME, or --live for every live run", file=sys.stderr)
+        return EXIT_REFUSED
     if not status.valid_run_name(args.run):
         print(f"blink status: bad run name {args.run!r}", file=sys.stderr)
         return EXIT_REFUSED
@@ -291,5 +307,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     train.set_defaults(func=cmd_train)
 
     run_status = sub.add_parser("status", help="a run's state; exits 1 when stale, crashed or NaN")
-    run_status.add_argument("--run", required=True)
+    which = run_status.add_mutually_exclusive_group()
+    which.add_argument("--run")
+    which.add_argument("--live", action="store_true", help="every run that trains or waits out a user pause")
     run_status.set_defaults(func=cmd_status)

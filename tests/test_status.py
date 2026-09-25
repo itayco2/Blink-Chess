@@ -194,3 +194,27 @@ def test_blink_status_prints_the_speed_warning_but_keeps_its_exit_code(tmp_path,
     (run_dir / "metrics.jsonl").write_text(lines.splitlines(keepends=True)[0], encoding="utf-8")
     assert cli.main(["status", "--run", "spill"]) == 0
     assert "WARN" not in capsys.readouterr().out
+
+
+def test_blink_status_live_prints_every_run_that_trains_or_waits_out_a_user_pause(
+    tmp_path, monkeypatch, capsys
+):
+    """The Blink Status button's first block: runs whose heartbeat is fresh, running or paused by the
+    user; a run that stopped long ago is left out, and none live is no error."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    now = time.time()
+    beats = {
+        "long": ("running", now),
+        "size-m": ("paused: user", now - 3),
+        "abl-a01": ("finished", now - 9e4),
+    }
+    for name, (state, at) in beats.items():
+        heartbeat.write(_run(tmp_path / "runs", name) / "heartbeat.json", {"state": state, "step": 5}, now=at)
+    assert cli.main(["status", "--live"]) == 0
+    out = capsys.readouterr().out
+    assert "long: LIVE" in out and "size-m: PAUSED: USER" in out and "abl-a01" not in out
+    (tmp_path / "runs" / "long" / "heartbeat.json").unlink()
+    (tmp_path / "runs" / "size-m" / "heartbeat.json").unlink()
+    assert cli.main(["status", "--live"]) == 0
+    assert "no live run" in capsys.readouterr().out
+    assert cli.main(["status"]) == 2  # a run name, or --live

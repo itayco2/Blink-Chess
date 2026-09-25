@@ -3,7 +3,7 @@
 
 blink ops launch --name NAME -- <blink args>    a fully detached job (Win32_Process.Create), prints its PID
 blink ops ps                                    Blink processes and launched jobs, with their heartbeats
-blink ops install-pause-buttons [--to DIR]      Pause Blink.cmd and Resume Blink.cmd onto the Desktop
+blink ops install-pause-buttons [--to DIR]      the Pause, Resume and Status buttons onto the Desktop
 blink supervise --run NAME -- train ...         the trainer as a child, every P7 stop rule enforced
 blink bench throughput|loader|play              measured rates into bench.json (plan P4)
 blink bench parity                              a fast play mode's moves against fp32's, on val roots
@@ -80,7 +80,7 @@ def cmd_install_pause_buttons(args: argparse.Namespace) -> int:
     from blink.ops import buttons
 
     target = Path(args.to) if args.to else buttons.default_target()
-    names = " and ".join(buttons.BUTTONS)
+    names = ", ".join(buttons.BUTTONS)
     if args.dry_run:
         _say(f"would copy {names} from {buttons.BUTTONS_DIR} to {target}")
         return 0
@@ -237,7 +237,7 @@ def _register_ops(sub: argparse._SubParsersAction) -> None:
     ps.add_argument("--recent", type=int, default=5, help="how many launch records to show")
     ps.set_defaults(func=cmd_ps)
     buttons = actions.add_parser(
-        "install-pause-buttons", help="copy Pause Blink.cmd and Resume Blink.cmd onto the Desktop"
+        "install-pause-buttons", help="copy the Pause, Resume and Blink Status buttons onto the Desktop"
     )
     buttons.add_argument("--to", help="the folder to copy them into (default: the user's Desktop)")
     buttons.add_argument("--dry-run", action="store_true", help="say where they would go and stop")
