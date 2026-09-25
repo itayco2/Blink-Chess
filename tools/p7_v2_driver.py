@@ -340,7 +340,8 @@ def after_launch(s: Settings, plan: Plan) -> str:
     preview = f"`{blink} {' '.join(preview_args(s, plan))}`"
     return (
         f"{pr6}. If it reaches the 30% check, step {plan.preview_step:,}, it stops: run the 3 GPU-h preview "
-        f"{preview}, then resume without --max-steps: `{blink} {' '.join(launch_args(s))}`"
+        f"{preview}, then resume without --max-steps: `{blink} {' '.join(launch_args(s))}` (refused once "
+        f"p7_finish closes runs/{s.run}: its finish is final)"
     )
 
 

@@ -238,6 +238,67 @@ def test_the_final_cooldown_must_end_inside_long_toml_s_120_hour_upper_bound(tmp
     assert "upper bound" in capsys.readouterr().err
 
 
+def _gate(s, where: str) -> None:
+    """runs/long left at gate P7-VAA: by its supervisor (supervisor.json), or by the guard (heartbeat)."""
+    run = s.runs / "long"
+    if where == "supervisor":
+        record = {"state": "paused", "status": "paused: P7-VAA", "pending_gate": "P7-VAA", "started": 1.0}
+        (run / "supervisor.json").write_text(json.dumps(record), encoding="utf-8")
+    else:
+        beat = {"state": "paused", "stopped": "paused: P7-VAA", "step": C, "time": 1.0}
+        (run / "heartbeat.json").write_text(json.dumps(beat), encoding="utf-8")
+
+
+@pytest.mark.parametrize("where", ["supervisor", "guard"])
+def test_finish_refuses_while_runs_long_waits_at_the_p7_vaa_gate(tmp_path, capsys, where):
+    """Only Itay clears that gate (EVAL.md): the finish does not step past it on its own."""
+    _home(tmp_path, supervisor_state="stopped", flag=False)
+    s = _settings(tmp_path)
+    _gate(s, where)
+    machine = FakeMachine(s, [])
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_REFUSED
+    assert "P7-VAA" in capsys.readouterr().err and machine.runs == []
+
+
+def test_the_p7_vaa_gate_is_passed_only_when_itay_says_he_cleared_it(tmp_path):
+    _home(tmp_path, supervisor_state="stopped", flag=False)
+    s = _settings(tmp_path, vaa_gate_cleared=True)
+    _gate(s, "supervisor")
+    assert p7_finish.finish(s, FakeMachine(s, [])) == p7_finish.EXIT_DONE
+    assert "cleared by Itay" in _record(s)["vaa_gate"]
+    assert p7_finish.settings_from(["--vaa-gate-cleared"]).vaa_gate_cleared is True
+
+
+def test_the_finish_closes_runs_long_so_nothing_resumes_it_beside_long_final(tmp_path):
+    """runs/long keeps its checkpoints and logs; one file says it is finished, which blink train and
+    blink supervise honour (blink.train.finished)."""
+    from blink.train import finished
+
+    s = _settings(tmp_path)
+    before = sorted(p.name for p in (s.runs / "long").iterdir())
+    assert p7_finish.finish(s, FakeMachine(s, [_supervisor(41)])) == p7_finish.EXIT_DONE
+    after = sorted(p.name for p in (s.runs / "long").iterdir())
+    assert after == sorted([*before, finished.MARKER]) and p7_finish.FINISHED_MARKER == finished.MARKER
+    marker = finished.finished_by(s.runs / "long")
+    assert marker["at_step"] == C and marker["branch"] == "long-final" and "p7_finish" in marker["by"]
+    assert finished.refusal(s.runs / "long") and finished.refusal(s.runs / "long-final") is None
+
+
+def test_nothing_that_refuses_the_launch_closes_runs_long(tmp_path):
+    s = _settings(tmp_path)
+    machine = FakeMachine(s, [_supervisor(41), {"pid": 55, "ppid": 1, "cmdline": PREVIEW}])
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_REFUSED
+    assert not (s.runs / "long" / p7_finish.FINISHED_MARKER).exists()
+
+
+def test_the_record_says_the_flagship_s_film_ends_at_the_finish_step(tmp_path):
+    """long-final trains with film off (blink.train.preview.preview_config): the flagship's film stops at
+    c, and its frames planned past c never come. The record says so, for the published write-up."""
+    s = _settings(tmp_path)
+    assert p7_finish.finish(s, FakeMachine(s, [_supervisor(41)])) == p7_finish.EXIT_DONE
+    assert f"ends at step {C:,}" in _record(s)["film"] and "film off" in _record(s)["film"]
+
+
 def test_a_second_finish_refuses_once_long_final_exists_and_says_how_to_resume_it(tmp_path, capsys):
     s = _settings(tmp_path)
     (s.runs / "long-final").mkdir()
@@ -254,13 +315,17 @@ def test_the_dry_run_prints_the_plan_and_the_command_and_changes_nothing(tmp_pat
     out = capsys.readouterr().out
     assert f"step {C:,}" in out and f"{K:,} cooldown steps" in out and f"{C + K:,}" in out
     assert "would stop runs/long's supervisor (pid 41)" in out and "--preview-name long-final" in out
+    assert "closes runs/long (finished_by.json)" in out and f"film ends at step {C:,}" in out
+    assert not (s.runs / "long" / p7_finish.FINISHED_MARKER).exists()
     assert machine.killed == [] and machine.runs == [] and not (s.home / "eval" / "p7_finish.json").exists()
 
 
 def test_a_failed_launch_is_reported_and_leaves_its_record_saying_so(tmp_path, capsys):
     s = _settings(tmp_path)
     assert p7_finish.finish(s, FakeMachine(s, [_supervisor()], launch_code=2)) == p7_finish.EXIT_FAILED
-    assert _record(s)["launched"] is None and "ops launch exit 2" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert _record(s)["launched"] is None and "ops launch exit 2" in err
+    assert "finished_by.json" in err and "run p7_finish again" in err  # runs/long is closed: it says so
 
 
 def test_the_served_run_is_read_as_blink_supervise_reads_it():

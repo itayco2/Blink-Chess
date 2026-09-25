@@ -15,8 +15,8 @@ steps, so the 1-sqrt cooldown is the last 20% of c + ceil(c/4) steps and starts 
 It names no --config: the branch trains with the config runs/long's checkpoint c holds (blink train
 refuses a --config that differs from it, so a later edit of long.toml would stop the branch).
 
-runs/long is never touched: its checkpoints and logs stay as they are. So that nothing but the branch
-trains once Resume Blink removes the flag:
+runs/long's checkpoints and logs stay as they are. So that nothing but the branch trains once Resume
+Blink removes the flag:
 - nothing happens while any other Blink process could take the GPU, paused or not: a train, supervise,
   sweep or benchmark serving another run (a long-preview branch, a sweep arm, a calibration); it is
   looked for again just before the launch;
@@ -25,7 +25,13 @@ trains once Resume Blink removes the flag:
 - runs/long's supervisor is ended only while it holds no trainer and cannot start one: paused by the user
   (BLINK_HOME/PAUSE up and supervisor.json "paused: user"); a supervisor in any other state is refused,
   and one already gone (a stop rule, a reboot) needs nothing;
-- the cooldown must end inside configs/long.toml's steps, PR-5's 120 h upper bound (PR-6).
+- the cooldown must end inside configs/long.toml's steps, PR-5's 120 h upper bound (PR-6);
+- nothing happens while runs/long is held at gate P7-VAA (its supervisor or the guard left it there):
+  only Itay clears that gate, and --vaa-gate-cleared says he has;
+- just before the launch runs/long gets one file, finished_by.json (blink.train.finished): blink train
+  and blink supervise then refuse to resume it (the P6 v2 driver's printed resume command included).
+long-final trains with film off (blink.train.preview.preview_config): the flagship's film ends at c, and
+its frames planned past c are never made; the record says so for the published write-up.
 The branch is supervised like any run: it waits while the flag is up and trains once Resume Blink removes
 it. The finish is done once the branch's trainer has written its config.json (blink train accepted the
 command) or, while the flag is up, once its supervisor waits paused by the user; a crash of the trainer,
@@ -44,6 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from p7_guard import PAUSED_VAA
 from p7_machine import (
     PAUSED_USER,
     Host,
@@ -69,6 +76,8 @@ LIVE_S = 120.0  # a heartbeat this fresh that says "running" means the run train
 # record): building an M run from its parent checkpoint takes a minute or two
 VERIFY_S, VERIFY_POLL_S = 600.0, 5.0
 ENDED = ("finished", "stopped", "paused")  # supervisor.json states after which nothing trains
+FINISHED_MARKER = "finished_by.json"  # blink.train.finished.MARKER: blink train and supervise honour it
+GATE = "P7-VAA"  # blink.train.supervise.PENDING_GATE_VAA
 
 
 @dataclass(frozen=True)
@@ -84,6 +93,7 @@ class Settings:
     launch_name: str = "p7-long-final"
     at_step: int | None = None
     dry_run: bool = False
+    vaa_gate_cleared: bool = False  # Itay cleared runs/long's P7-VAA gate and says the finish may pass it
 
     @property
     def runs(self) -> Path:
@@ -149,7 +159,32 @@ def plan_finish(s: Settings) -> dict[str, Any]:
     return {"at_step": c, "cooldown_steps": k, "total_steps": c + k, "cooldown_frac": k / (c + k),
             "upper_bound_steps": int(train["steps"]),
             "training_hours": training_hours(read_rows(s.runs / s.run / "metrics.jsonl"), c),
+            "vaa_gate": gate_passed(s), "film": film_note(s, c),
             "args": args, "command": "python -m blink.cli " + " ".join(args)}  # fmt: skip
+
+
+def gate_passed(s: Settings) -> str | None:
+    """None when runs/long is not held at gate P7-VAA; StepFailed when it is, unless Itay cleared it
+    (--vaa-gate-cleared), which the record then says. Its supervisor or the guard leaves the gate."""
+    beat, record = run_state(s.runs / s.run)
+    held = record.get("pending_gate") == GATE or PAUSED_VAA in (record.get("status"), beat.get("stopped"))
+    if not held:
+        return None
+    said = f"supervisor.json {record.get('status') or record.get('state')}, heartbeat {beat.get('stopped')}"
+    if s.vaa_gate_cleared:
+        return f"cleared by Itay (--vaa-gate-cleared): runs/{s.run} was held at {GATE} ({said})"
+    why = f"runs/{s.run} is held at gate {GATE} ({said}): only Itay clears it (EVAL.md)"
+    raise StepFailed("finish", f"{why}; once he has, run p7_finish --vaa-gate-cleared")
+
+
+def film_note(s: Settings, c: int) -> str:
+    """The branch trains with film off (blink.train.preview.preview_config), so the flagship's film stops
+    at c: said in the record, for the published write-up."""
+    return (
+        f"runs/{s.run}'s film ends at step {c:,}: runs/{s.branch} trains with film off "
+        f"(blink.train.preview.preview_config), so no frame shows the final cooldown and the frames "
+        f"planned past step {c:,} are never made"
+    )
 
 
 # ---------------------------------------------------------------- runs/long's own processes, and the others
@@ -241,7 +276,9 @@ def describe(s: Settings, plan: dict[str, Any], pids: list[int]) -> list[str]:
         f"  runs/{s.run} has {plan['training_hours']:.1f} training hours up to step {c:,}; {s.config}'s "
         f"upper bound is {plan['upper_bound_steps']:,} steps",
         stop,
+        f"  then closes runs/{s.run} ({FINISHED_MARKER}): blink train and supervise refuse to resume it",
         f"  {plan['command']}",
+        f"  {plan['film']}",
     ]
     if flag_path(s.home).exists():
         lines.append("The branch waits while BLINK_HOME/PAUSE is up and trains once Resume Blink removes it.")
@@ -330,6 +367,21 @@ def finish(s: Settings, host) -> int:
     except StepFailed as exc:
         print(f"p7_finish: {'refused' if exc.step == 'finish' else 'failed'}: {exc.detail}", file=sys.stderr)
         return EXIT_REFUSED if exc.step == "finish" else EXIT_FAILED
+    return launch(s, host, plan, pids)
+
+
+def close_run(s: Settings, plan: dict[str, Any]) -> Path:
+    """runs/long's finished_by.json: its checkpoints and logs stay, but nothing resumes it beside the branch
+    (blink.train.finished)."""
+    marker = s.runs / s.run / FINISHED_MARKER
+    record = {"by": "tools/p7_finish.py (PR-6)", "at_step": plan["at_step"], "branch": s.branch,
+              "time": time.strftime("%Y-%m-%dT%H:%M:%S")}  # fmt: skip
+    write_atomic(marker, json.dumps(record, indent=1) + "\n")
+    return marker
+
+
+def launch(s: Settings, host, plan: dict[str, Any], pids: list[int]) -> int:
+    """Record the plan, close runs/long, launch the branch and wait until it trains (or waits for Resume)."""
     record = {"rule": "PR-6 (EVAL.md section 5): the final 20% 1-sqrt cooldown from the current step",
               "run": s.run, "branch": s.branch, **{k: v for k, v in plan.items() if k != "args"},
               "stopped_supervisor": pids, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -337,10 +389,15 @@ def finish(s: Settings, host) -> int:
     out_path = s.home / "eval" / "p7_finish.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_atomic(out_path, json.dumps(record, indent=1) + "\n")
+    record["closed"] = str(close_run(s, plan))
     launched_at = host.clock()
     code, out = host.run("finish-launch", plan["args"])
+    closed = (
+        f"runs/{s.run} is closed ({FINISHED_MARKER}): run p7_finish again, or remove that file to resume it"
+    )
     if code != 0:
-        print(f"p7_finish: ops launch exit {code}: see logs/p7v2-finish-launch.out and .err", file=sys.stderr)
+        print(f"p7_finish: ops launch exit {code}: see logs/p7v2-finish-launch.out and .err; {closed}",
+              file=sys.stderr)  # fmt: skip
         return EXIT_FAILED
     record["launched"] = next((line for line in out.splitlines() if line.startswith("launched")), "launched")
     write_atomic(out_path, json.dumps(record, indent=1) + "\n")
@@ -349,7 +406,7 @@ def finish(s: Settings, host) -> int:
     except StepFailed as exc:
         record["verified"] = f"failed: {exc.detail}"
         write_atomic(out_path, json.dumps(record, indent=1) + "\n")
-        print(f"p7_finish: failed: {exc.detail}", file=sys.stderr)
+        print(f"p7_finish: failed: {exc.detail}; {closed}", file=sys.stderr)
         return EXIT_FAILED
     record["verified"] = state
     write_atomic(out_path, json.dumps(record, indent=1) + "\n")
@@ -366,11 +423,14 @@ def settings_from(argv: list[str] | None = None) -> Settings:
     p.add_argument("--at-step", type=int, help="branch from this checkpoint (default: runs/long's latest)")
     p.add_argument("--bench-size", default="m", help="supervise's throughput benchmark ('' turns it off)")
     p.add_argument("--dry-run", action="store_true", help="print the plan and the command, change nothing")
+    p.add_argument("--vaa-gate-cleared", action="store_true",
+                   help="Itay cleared runs/long's P7-VAA gate: the finish may pass it")  # fmt: skip
     args = p.parse_args(argv)
     home = Path(args.home)
     data = Path(args.data) if args.data else home / "data" / "v1"
     return Settings(repo=Path(args.repo), python=Path(args.python), home=home, data=data,
-                    bench_size=args.bench_size, at_step=args.at_step, dry_run=args.dry_run)  # fmt: skip
+                    bench_size=args.bench_size, at_step=args.at_step, dry_run=args.dry_run,
+                    vaa_gate_cleared=args.vaa_gate_cleared)  # fmt: skip
 
 
 def main(argv: list[str] | None = None) -> int:

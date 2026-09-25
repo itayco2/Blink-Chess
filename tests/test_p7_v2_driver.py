@@ -458,6 +458,7 @@ def test_the_relaunch_stops_at_the_30_percent_check_and_the_status_names_the_pre
     assert f"--preview-cooldown 3h --from-step {preview}" in detail
     assert "then resume without --max-steps" in detail
     assert "eval strength --run long" in detail and "p7_finish.py" in detail
+    assert "p7_finish closes runs/long" in detail  # its resume command is refused after the finish
 
 
 def test_the_endgame_screen_stops_before_the_calibration_and_the_keeper_restarts(tmp_path):
