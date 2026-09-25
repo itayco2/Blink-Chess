@@ -1,6 +1,6 @@
 """PR-6's finish (EVAL.md section 5): the flagship re-planned so its final 20% 1-sqrt cooldown starts now.
 
-    python tools\\p7_finish.py [--at-step C] [--dry-run]
+    python tools\\p7_finish.py [--at-step C] [--dry-run] [--vaa-gate-cleared]
 
 Run it when Itay says the level is good enough (the strength checks, `blink eval strength --run long`,
 show it beside DM-9M), from the worktree the flagship trains in, usually while he has Blink paused. At

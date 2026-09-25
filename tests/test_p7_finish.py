@@ -412,6 +412,12 @@ def test_a_run_that_starts_after_the_stop_blocks_the_launch(tmp_path, capsys):
     assert machine.runs == [] and not (s.home / "eval" / "p7_finish.json").exists()
 
 
+def test_the_gate_names_are_the_supervisor_s_own():
+    from blink.train import supervise
+
+    assert p7_finish.GATE == supervise.PENDING_GATE_VAA and p7_finish.PAUSED_VAA == supervise.PAUSED_VAA
+
+
 def test_the_gpu_work_is_every_command_blink_ops_counts_and_every_sweep_action():
     from blink.ops.launch import GPU_COMMANDS, gpu_command
 
