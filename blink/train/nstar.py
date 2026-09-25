@@ -1,12 +1,19 @@
-"""Choosing N* after the size sweep (plan P6), by the pre-registered precedence: epoch floor
-(>= 1,658 samples/s, one epoch of training roots in T_long = 96 h) > best 6 h VAA > default M (a best
-VAA within 2 sigma of M's means M; if M fails the floor, the largest passing size). A size must also
-fit the VRAM budget at micro-batch >= 256.
+"""Choosing N* (plan P6) by one of two pre-registered rules, named in configs/sweep.toml [choose] rule.
 
-Latency never changes N* (EVAL.md PR-3): the value-mode p99 at L+1 rows is reported beside each size,
-with a note when it is over p99_ms_max or not measured. The p99 is read only from bench play rows timed
-in the one play mode the rules name (p99_precision, p99_compile; blink.play.fastmode). The defaults,
-fp32 uncompiled, are the plan's play runtime.
+"vaa" (P6 v1, kept for the record): epoch floor (>= 1,658 samples/s, one epoch of training roots in
+T_long = 96 h) > best 6 h VAA > default M (a best VAA within 2 sigma of M's means M; if M fails the
+floor, the largest passing size).
+
+"prior" (P6 v2, EVAL.md PR-2): N* = the default, M, by the research prior; only the epoch floor and VRAM
+override it. If M fails the floor, N* is the largest candidate size that passes; if M has no measured
+micro-batch >= 256 inside the VRAM budget, there is no N* and gate P6-N* is set (a measurement to redo,
+never a reason to shrink). No 6 h VAA takes part, and sweep.json may be absent.
+
+In both rules a size must fit the VRAM budget at micro-batch >= 256, and the epoch floor is read at the
+compile mode the long run trains in. Latency never changes N* (EVAL.md PR-3): the value-mode p99 at L+1
+rows is reported beside each size, with a note when it is over p99_ms_max or not measured. The p99 is
+read only from bench play rows timed in the one play mode the rules name (p99_precision, p99_compile;
+blink.play.fastmode). The defaults, fp32 uncompiled, are the plan's play runtime.
 """
 
 import dataclasses
@@ -20,11 +27,15 @@ from blink.play import fastmode
 from blink.train.bench import best_rates, play_mode
 
 SIZE_ORDER = ("t", "s", "m", "m12", "l")
+RULES = ("vaa", "prior")
 TOLERANCE = 1e-9  # float slack for every pre-registered comparison (the sweep's too)
+GATE = "P6-N*"
 
 
 @dataclass(frozen=True)
 class ChooseRules:
+    rule: str = "vaa"  # "vaa": best 6 h VAA (P6 v1); "prior": the default unless floor or VRAM (P6 v2)
+    candidates: tuple[str, ...] = ("s", "m", "m12", "l")  # the sizes the prior rule judges and falls back to
     epoch_floor: float = 1658.0  # samples/s: one epoch of training roots in T_long hours
     t_long_hours: float = 96.0
     train_roots: int = 401_000_000
@@ -38,6 +49,8 @@ class ChooseRules:
     sigma_factor: float = 2.0
 
     def __post_init__(self) -> None:
+        if self.rule not in RULES:
+            raise ValueError(f"rule must be one of {RULES}, got {self.rule!r}")
         if self.p99_precision not in fastmode.PRECISIONS:
             raise ValueError(
                 f"p99_precision must be one of {fastmode.PRECISIONS}, got {self.p99_precision!r}"
@@ -129,12 +142,26 @@ def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: Ch
 
 
 def choose(
-    bench: Mapping, sizes: Mapping[str, Mapping], sigma: float, rules: ChooseRules, compile: str | None = None
+    bench: Mapping,
+    sizes: Mapping[str, Mapping],
+    sigma: float | None,
+    rules: ChooseRules,
+    compile: str | None = None,
 ) -> dict[str, Any]:
-    """N* by the pre-registered precedence: epoch floor > best 6 h VAA > default M.
+    """N* by the rules' pre-registered rule (`rules.rule`).
 
-    `compile` is the mode the long run will train in; its rates decide the epoch floor.
+    `compile` is the mode the long run will train in; its rates decide the epoch floor. `sigma` (the
+    a01-a03 noise floor) decides the vaa rule's 2 sigma tie; the prior rule only records it.
     """
+    if rules.rule == "prior":
+        return _choose_prior(bench, sizes, sigma, rules, compile)
+    return _choose_vaa(bench, sizes, sigma, rules, compile)
+
+
+def _choose_vaa(
+    bench: Mapping, sizes: Mapping[str, Mapping], sigma: float, rules: ChooseRules, compile: str | None
+) -> dict[str, Any]:
+    """P6 v1: epoch floor > best 6 h VAA > default M."""
     best = best_rates(bench, compile=compile)
     ordered = sorted(sizes, key=lambda s: _order(s, best))
     entries = {
@@ -158,3 +185,28 @@ def choose(
     if top != rules.default and margin <= rules.sigma_factor * sigma + TOLERANCE:
         return {**result, "n_star": rules.default, "reason": f"{top} is within 2 sigma of M ({margin:+.4f})"}
     return {**result, "n_star": top, "reason": f"best 6 h VAA ({entries[top]['vaa']:.4f})"}
+
+
+def _choose_prior(
+    bench: Mapping, sizes: Mapping[str, Mapping], sigma: float | None, rules: ChooseRules, compile: str | None
+) -> dict[str, Any]:
+    """P6 v2 (PR-2): the default unless it fails the epoch floor (then the largest candidate that passes)
+    or VRAM (then no N*). A 6 h VAA, where sweep.json holds one, is reported and decides nothing."""
+    best = best_rates(bench, compile=compile)
+    names = sorted({*rules.candidates, *sizes, rules.default}, key=lambda s: _order(s, best))
+    entries = {
+        s: _constraints(best.get(s), sizes.get(s, {}).get("vaa"), p99_of(bench, s, rules), rules)
+        for s in names
+    }
+    result = {"sigma": sigma, "rules": dataclasses.asdict(rules), "sizes": entries}
+    default = entries[rules.default]
+    if default["eligible"]:
+        why = f"P6 v2 prior: {rules.default} passes the epoch floor and VRAM"
+        return {**result, "n_star": rules.default, "reason": why}
+    passing = [s for s in names if entries[s]["eligible"]]
+    if default["failed"] == "floor" and passing:
+        why = f"{rules.default} fails the epoch floor: the largest size that passes"
+        return {**result, "n_star": passing[-1], "reason": why}
+    failed = {"vram": "VRAM", "floor": "the epoch floor"}[default["failed"]]
+    why = f"{rules.default} fails {failed} ({default['reason']}) and nothing replaces it: gate {GATE}"
+    return {**result, "n_star": None, "reason": why}
