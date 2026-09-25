@@ -1,21 +1,28 @@
 # The flagship run (P7) template. Before launch:
 #   - point base at the N* size config chosen by `blink sweep choose` (M is the plan's default);
-#   - set steps = T_long * N*'s measured samples/s / 1024 (T_long = 120 h: 661,078 at M's 1,567);
+#   - set steps by PR-5 (EVAL.md section 5): steps = floor(120 x 3600 x R_true / 1024), with R_true from
+#     a 2,000-step calibration of this file just before launch (a throwaway run, never a bench row):
+#       blink train calibrate --config configs/long.toml --steps 2000 --write
+#     It rewrites only the steps line. The check steps (5/25/30/50/100%), the 30% preview's --from-step,
+#     the cooldown start and the 21 film frames all follow from steps at run time, and it prints them;
 #   - set vaa_reference to N*'s 6 h sweep run name and vaa_sigma to the a01-a03 noise floor: the
 #     3-seed sigma of ema_vaa in their 100% check rows (full valprobe). The same rows hold
 #     ema_vaa_subset; its 3-seed sigma is vaa_sigma_subset. With it set, the 5% rule meets N*'s last
 #     stable 2k-step subset row; left at 0 it meets N*'s last stable full-valprobe check (its 50%).
 # blink supervise -- train --config configs/long.toml --run long --data D:\blink\data\v1
-# The 30% pause for the preview cooldown (P7). The 30% check step is round(0.3 * steps), 198,323 at
-# 661,078 steps (blink.train.vaa.check_steps); the check writes a kept checkpoint there. So:
-#   1. train the main run with --max-steps 198323: it stops at the 30% check, checkpoint written;
-#   2. blink train --run long --data D:\blink\data\v1 --preview-cooldown 3h --from-step 198323
+# The 30% pause for the preview cooldown (P7). The 30% check step P is round(0.3 * steps)
+# (blink.train.vaa.check_steps; `blink train calibrate` prints it); the check writes a kept checkpoint
+# there, and a resume keeps it even if steps changes. So:
+#   1. train the main run with --max-steps P: it stops at the 30% check, checkpoint written;
+#   2. blink train --run long --data D:\blink\data\v1 --preview-cooldown 3h --from-step P
 #      (writes runs/long-preview only; its end is checked against the reference's final VAA);
 #   3. resume the main run: the same command with --resume and without --max-steps.
 base = "m.toml"
 
 [train]
-steps = 661078
+steps = 661078          # replaced by `blink train calibrate --write` (661,078: 120 h at M's eager 1,567/s)
+eval_every = 4000       # PR-5: the EMA subset VAA every 4,000 steps (not 2,000); the checks, the preview,
+                        # 30-minute checkpoints, metrics every 50 steps and every stop rule are unchanged
 film = true             # 21 frames under runs/long/film/
 vaa_checks = true       # 5%: >= the reference at equal samples - 2 sigma; 25%, 50%: >= previous - 2 sigma
 vaa_sigma = 0.01        # replace with the measured 3-seed sigma (a fraction: 0.01 is 1 point)

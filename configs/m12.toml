@@ -10,4 +10,8 @@ n_heads = 16
 
 [train]
 peak_lr = 7e-4
+micro_batch = 256      # pinned (schedule review, 2026-09-25): the trainer's eager VRAM probe picks 256
+                       # anyway, and 512 compiled was projected to peak ~7.0 GB in the real trainer
+                       # against a 6.15 GB budget (a spill runs at 4-8% speed). The size sweep, N* and
+                       # the supervisor plan and police this size at bench.json's micro-256 row.
 steps = 23646

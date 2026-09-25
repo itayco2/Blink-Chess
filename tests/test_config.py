@@ -144,6 +144,21 @@ def test_micro_batches_and_the_root_child_split_follow_the_config():
     assert TrainConfig(batch_size=256).roots_per_step == 256
 
 
+def test_a_config_pins_its_micro_batch_unless_it_is_auto(tmp_path):
+    """Planning reads the pin to take the bench row the trainer will really run at."""
+    from blink.model.config import micro_batch_pin, read_tables
+
+    assert micro_batch_pin({"train": {"micro_batch": "auto", "batch_size": 1024}}) is None
+    assert micro_batch_pin({"train": {"micro_batch": 256, "batch_size": 1024}}) == 256
+    assert micro_batch_pin({"train": {"micro_batch": 0, "batch_size": 1024}}) == 1024  # one pass
+    assert micro_batch_pin({"train": {}}) is None  # no key: planned at the fastest row, as before
+    base = tmp_path / "recipe.toml"
+    base.write_text('[train]\nbatch_size = 1024\nmicro_batch = "auto"\n', encoding="utf-8")
+    size = tmp_path / "m.toml"
+    size.write_text('base = "recipe.toml"\n[train]\nmicro_batch = 256\n', encoding="utf-8")
+    assert micro_batch_pin(read_tables(base)) is None and micro_batch_pin(read_tables(size)) == 256
+
+
 def test_the_epoch_floor_is_1658_samples_per_s_at_the_worst_case_96_hours():
     from blink.model.config import epoch_floor_samples_per_s
 

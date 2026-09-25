@@ -29,14 +29,34 @@ def test_size_configs_have_the_planned_shapes_and_learning_rates(repo_root, name
     assert cfg.model.head_dim == 32 and cfg.model.ffn_mult == 2 and cfg.model.gab
 
 
+# M and M12 pin micro-batch 256 (the schedule review of 2026-09-25): the trainer's eager VRAM probe picks
+# 256 anyway, and 512 compiled was projected to peak ~7.0 GB against a 6.15 GB budget. The flagship
+# inherits M's pin. Every other size keeps the recipe's "auto".
+MICRO = {"recipe": "auto", "s": "auto", "m": 256, "m12": 256, "l": "auto", "long": 256}
+EVAL_EVERY = {"long": 4000}  # PR-5: the flagship's subset evals every 4,000 steps; 2,000 elsewhere
+
+
 @pytest.mark.parametrize("name", ["recipe", "s", "m", "m12", "l", "long"])
 def test_every_recipe_config_carries_recipe_d(repo_root, name):
     cfg = load_config(repo_root / "configs" / f"{name}.toml")
     assert (cfg.batch_size, cfg.roots_per_step, cfg.children_per_step) == (1024, 717, 307)
-    assert (cfg.micro_batch, cfg.clip_norm, cfg.rebalance) == ("auto", "auto", True)
+    assert (cfg.micro_batch, cfg.clip_norm, cfg.rebalance) == (MICRO[name], "auto", True)
     assert (cfg.warmup_steps, cfg.cooldown_frac, cfg.weight_decay, cfg.beta2) == (2000, 0.2, 0.1, 0.95)
     assert (cfg.alpha, cfg.tau, cfg.lambda_v, cfg.ema_max) == (0.5, 0.05, 1.0, 0.9999)
-    assert (cfg.eval_every, cfg.vaa_subset, cfg.ckpt_every_minutes) == (2000, 2000, 30.0)
+    assert (cfg.eval_every, cfg.vaa_subset, cfg.ckpt_every_minutes) == (
+        EVAL_EVERY.get(name, 2000),
+        2000,
+        30.0,
+    )
+
+
+def test_the_flagship_keeps_every_check_checkpoint_and_metrics_cadence_pr5_leaves_unchanged(repo_root):
+    """PR-5 changes only the subset-eval cadence: the checks, the 30-minute checkpoints, metrics every
+    50 steps and the stop rules stay as they were."""
+    cfg = load_config(repo_root / "configs" / "long.toml")
+    assert (cfg.metrics_every, cfg.ckpt_every_minutes, cfg.keep_last, cfg.vaa_checks) == (50, 30.0, 3, True)
+    text = (repo_root / "configs" / "long.toml").read_text(encoding="utf-8")
+    assert "PR-5" in text
 
 
 def test_s10m_is_s_on_roots_only_for_about_one_gpu_hour(repo_root):

@@ -469,3 +469,19 @@ def test_the_supervise_benchmark_matches_the_train_configs_compile_mode(
     argv = ["supervise", "--run", "long", "--dry-run", "--bench", str(bench), "--bench-size", "s"]
     assert cli.main([*argv, "--", "train", "--config", str(config), "--run", "long"]) == 0
     assert f"floor {floor} samples/s" in capsys.readouterr().out
+
+
+def test_the_supervise_benchmark_takes_the_row_at_the_train_configs_pinned_micro_batch(
+    tmp_path, monkeypatch, capsys
+):
+    """The flagship trains M at its pinned 256, so it is policed at the 256 row, not the faster 512."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    ok = {"size": "m", "oom": False, "error": None, "compile": "inductor"}
+    rows = [{**ok, "micro": 256, "samples_per_s": 2695.0}, {**ok, "micro": 512, "samples_per_s": 2803.0}]
+    bench = tmp_path / "bench.json"
+    bench.write_text(json.dumps({"throughput": rows}), encoding="utf-8")
+    config = tmp_path / "c.toml"
+    config.write_text('[train]\ncompile = "inductor"\nmicro_batch = 256\n', encoding="utf-8")
+    argv = ["supervise", "--run", "long", "--dry-run", "--bench", str(bench), "--bench-size", "m"]
+    assert cli.main([*argv, "--", "train", "--config", str(config), "--run", "long"]) == 0
+    assert "floor 2,291 samples/s (85% of 2,695, size m in bench.json)" in capsys.readouterr().out

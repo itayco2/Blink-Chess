@@ -81,10 +81,15 @@ def _order(size: str, best: Mapping[str, Mapping]) -> tuple:
     return known, best.get(size, {}).get("parameters") or 0, size
 
 
-def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: ChooseRules) -> dict[str, Any]:
+def _eligibility(
+    row: Mapping | None, vaa: float | None, p99: Mapping, rules: ChooseRules, pin: int | None = None
+) -> dict[str, Any]:
     entry: dict[str, Any] = {"vaa": vaa, "p99_ms": dict(p99), "eligible": False, "failed": None}
     if row is None:
-        return {**entry, "failed": "vram", "reason": "no measured micro-batch >= 256 fits the VRAM budget"}
+        measured = (
+            "no measured micro-batch >= 256" if pin is None else f"no row at its pinned micro-batch {pin}"
+        )
+        return {**entry, "failed": "vram", "reason": f"{measured} fits the VRAM budget"}
     rate = row["samples_per_s"]
     entry = {
         **entry,
@@ -109,16 +114,24 @@ def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: Ch
 
 
 def choose(
-    bench: Mapping, sizes: Mapping[str, Mapping], sigma: float, rules: ChooseRules, compile: str | None = None
+    bench: Mapping,
+    sizes: Mapping[str, Mapping],
+    sigma: float,
+    rules: ChooseRules,
+    compile: str | None = None,
+    pins: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """N* by the pre-registered precedence: epoch floor > best 6 h VAA > default M.
 
-    `compile` is the mode the long run will train in; its rates decide the epoch floor.
+    `compile` is the mode the long run will train in and `pins` the micro-batch each size's config
+    pins (blink.train.size_sweep.size_micro_pin); the rates of those rows decide the epoch floor.
     """
-    best = best_rates(bench, compile=compile)
+    pins = pins or {}
+    best = best_rates(bench, compile=compile, pins=pins)
     ordered = sorted(sizes, key=lambda s: _order(s, best))
     entries = {
-        s: _eligibility(best.get(s), sizes[s].get("vaa"), p99_of(bench, s, rules), rules) for s in ordered
+        s: _eligibility(best.get(s), sizes[s].get("vaa"), p99_of(bench, s, rules), rules, pins.get(s))
+        for s in ordered
     }
     eligible = [s for s in ordered if entries[s]["eligible"]]
     default = entries.get(rules.default)

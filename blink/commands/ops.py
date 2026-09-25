@@ -82,21 +82,39 @@ def _bench_rate(args: argparse.Namespace) -> tuple[float | None, str]:
         return None, "no --bench-rate or --bench-size"
     from blink.train.bench import best_rates
 
-    mode = _train_compile_mode(_rest(args.train_args))
+    mode, pin = _train_compile_mode(_rest(args.train_args)), _train_micro_pin(_rest(args.train_args))
+    pins = None if pin is None else {args.bench_size: pin}
     bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
-    best = best_rates(bench, compile=mode).get(args.bench_size)
+    best = best_rates(bench, compile=mode, pins=pins).get(args.bench_size)
     if best is None:
-        raise ValueError(f"bench.json has no usable throughput row for size {args.bench_size}")
+        at = "" if pin is None else f" at the config's micro-batch {pin}"
+        raise ValueError(f"bench.json has no usable throughput row for size {args.bench_size}{at}")
     return float(best["samples_per_s"]), f"size {args.bench_size} in bench.json"
+
+
+def _train_tables(train_args: list[str]) -> dict | None:
+    """The [model] and [train] tables of the child's `--config`, or None without one."""
+    from blink.model.config import read_tables
+
+    if "--config" not in train_args[:-1]:
+        return None
+    return read_tables(train_args[train_args.index("--config") + 1])
 
 
 def _train_compile_mode(train_args: list[str]) -> str | None:
     """The compile mode of the child's `--config` (None without one: any mode's best row)."""
-    from blink.model.config import compile_mode, read_tables
+    from blink.model.config import compile_mode
 
-    if "--config" not in train_args[:-1]:
-        return None
-    return compile_mode(read_tables(train_args[train_args.index("--config") + 1]))
+    tables = _train_tables(train_args)
+    return None if tables is None else compile_mode(tables)
+
+
+def _train_micro_pin(train_args: list[str]) -> int | None:
+    """The micro-batch the child's `--config` pins (None: "auto", or no config: the fastest row)."""
+    from blink.model.config import micro_batch_pin
+
+    tables = _train_tables(train_args)
+    return None if tables is None else micro_batch_pin(tables)
 
 
 def _supervise_config(args: argparse.Namespace):
@@ -551,6 +569,21 @@ def _sigma(args: argparse.Namespace) -> float:
     return float(noise["vaa"]["sigma"])
 
 
+def _size_pins(sizes, recipe: Path | None) -> dict[str, int]:
+    """The micro-batch each size's repo config pins (M and M12: 256); a size without a config file
+    under configs/ (or with "auto") is judged at its fastest row, as before."""
+    from blink.train import size_sweep, sweep
+
+    arm = sweep.load_arm(recipe) if recipe is not None else None
+    pins = {}
+    for size in sizes:
+        if (sweep.CONFIG_DIR / f"{size}.toml").is_file():
+            pin = size_sweep.size_micro_pin(sweep.CONFIG_DIR, size, arm)
+            if pin is not None:
+                pins[size] = pin
+    return pins
+
+
 def cmd_sweep_choose(args: argparse.Namespace) -> int:
     from blink.model.config import compile_mode, read_tables
     from blink.train import nstar, sweep
@@ -563,7 +596,9 @@ def cmd_sweep_choose(args: argparse.Namespace) -> int:
         rules = nstar.load_rules(config) if config.is_file() else nstar.ChooseRules()
         recipe = sweep.CONFIG_DIR / "recipe.toml"  # the long run trains in the recipe's compile mode
         mode = compile_mode(read_tables(recipe)) if recipe.is_file() else None
-        choice = nstar.choose(bench, state.get("sizes", {}), _sigma(args), rules, compile=mode)
+        sizes = state.get("sizes", {})
+        pins = _size_pins(sizes, recipe if recipe.is_file() else None)
+        choice = nstar.choose(bench, sizes, _sigma(args), rules, compile=mode, pins=pins)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep choose: {exc}", file=sys.stderr)
         return EXIT_REFUSED

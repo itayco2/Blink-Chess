@@ -492,16 +492,23 @@ def update_bench(path: Path, section: str, value: Any, machine: dict[str, Any] |
     return updated
 
 
-def best_rates(data: dict[str, Any], compile: str | None = None) -> dict[str, dict[str, Any]]:
+def best_rates(
+    data: dict[str, Any], compile: str | None = None, pins: Mapping[str, int] | None = None
+) -> dict[str, dict[str, Any]]:
     """Per size, the fastest measured row that fits the VRAM budget at micro-batch >= 256, unspilled.
 
     With `compile`, only rows measured in that mode count: a run is planned and policed at the rate of
-    the mode it actually trains in (PF66).
+    the mode it actually trains in (PF66). Likewise a size in `pins` (its config pins its micro-batch,
+    blink.model.config.micro_batch_pin) counts only its rows at that micro-batch: M pins 256, and its
+    faster 512 row would plan the flagship past its hours at a micro-batch it never trains at.
     """
     budget = (data.get("machine") or {}).get("vram_budget_gb")
+    pins = pins or {}
     best: dict[str, dict[str, Any]] = {}
     for row in data.get("throughput", []):
         if compile is not None and row.get("compile", "off") != compile:
+            continue
+        if row.get("size") in pins and row.get("micro") != pins[row["size"]]:
             continue
         peak = row.get("peak_reserved_gb")
         fits = not row.get("spilled") and (budget is None or peak is None or peak <= budget)
