@@ -225,3 +225,33 @@ def test_the_puzzle_command_names_the_checkpoint_a_run_selector_loads(tmp_path, 
     assert cli.main([*argv, "--epsilon", "0", "--out", str(tmp_path / "out")]) == 0
     weights = strength.WEIGHTS.findall(capsys.readouterr().out)
     assert weights == [(str(tmp_path / "runs" / "long" / "ckpt_000000500.pt"), "ema")]
+
+
+def test_the_puzzle_command_loads_exactly_the_checkpoint_its_weights_line_names(
+    tmp_path, monkeypatch, capsys
+):
+    """The trainer checkpoints between the weights line and the load: the check must still be filed under
+    the step it scored, so the command resolves the run once and loads that file."""
+    pytest.importorskip("torch")
+    from blink.model.loading import resolve_selector
+    from blink.play import factory
+    from blink.play.oracles import RandomLogitEvaluator
+
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    run = tmp_path / "runs" / "long"
+    run.mkdir(parents=True)
+    (run / "ckpt_000000500.pt").write_bytes(b"")
+    loaded = []
+
+    def load(selector, **kwargs):
+        (run / "ckpt_000000600.pt").write_bytes(b"")  # a checkpoint lands after the weights line
+        loaded.append(resolve_selector(selector))
+        return RandomLogitEvaluator()
+
+    monkeypatch.setattr(factory, "load_evaluator", load)
+    source = tmp_path / "set.csv"
+    source.write_text("PuzzleId,Rating,PGN,Moves\ns1,650,1. e4 e5 2. Bc4 Nc6 3. Qh5,g8f6 h5f7\n", "utf-8")
+    argv = ["eval", "puzzles", "--set", str(source), "--model", "run:long:ema", "--device", "cpu"]
+    assert cli.main([*argv, "--epsilon", "0", "--out", str(tmp_path / "out")]) == 0
+    assert strength.WEIGHTS.findall(capsys.readouterr().out) == [(str(run / "ckpt_000000500.pt"), "ema")]
+    assert loaded == [(run / "ckpt_000000500.pt", "ema")]

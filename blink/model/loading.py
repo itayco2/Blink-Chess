@@ -5,6 +5,7 @@
     ship                BLINK_HOME/ship/blink.pt
     release:<tag>       BLINK_HOME/ship/releases/<tag>/blink.pt (a downloaded release asset)
     <path>.pt           that file
+    <path>.pt:ema       that file's EMA weights (a run selector pinned to the checkpoint it resolved to)
 
 A weights file is either a full training checkpoint ({"config": TrainConfig dict, "model", "ema", ...})
 or a slim file ({"config": TrainConfig or ModelConfig dict, "model"}). Files load with
@@ -27,6 +28,7 @@ from blink.train.checkpoint import latest_checkpoint, load_checkpoint
 from blink.train.status import valid_run_name
 
 WEIGHTS_FILE = "blink.pt"
+EMA_SUFFIX = ":ema"
 
 
 def _resolve_run(rest: str) -> tuple[Path, str]:
@@ -53,9 +55,17 @@ def resolve_selector(selector: str) -> tuple[Path, str]:
         return paths.home() / "ship" / "releases" / rest / WEIGHTS_FILE, "model"
     if selector.endswith(".pt"):
         return Path(selector), "model"
+    if selector.endswith(".pt" + EMA_SUFFIX):
+        return Path(selector[: -len(EMA_SUFFIX)]), "ema"
     raise ValueError(
         f"unknown model selector {selector!r}: run:<name>[:ema] | ship | release:<tag> | <path>.pt"
     )
+
+
+def pinned_selector(path: Path, which: str) -> str:
+    """The selector that loads exactly these weights: resolve_selector's (path, which) back, so a run
+    selector resolved once names one checkpoint however many land after it."""
+    return str(path) + (EMA_SUFFIX if which == "ema" else "")
 
 
 def _model_config(config: dict) -> ModelConfig:

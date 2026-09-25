@@ -66,12 +66,13 @@ def _missing(path: Path, what: str) -> bool:
     return True
 
 
-def _puzzle_agents(args: argparse.Namespace, epsilon: float) -> list[tuple[str, Agent]]:
-    """(mode, agent) pairs to score; a DeepMind selector has its one mode, action-value."""
+def _puzzle_agents(args: argparse.Namespace, epsilon: float, selector: str) -> list[tuple[str, Agent]]:
+    """(mode, agent) pairs to score, loading `selector` (args.model, pinned when it names a run); a
+    DeepMind selector has its one mode, action-value."""
     if registry.is_dm(args.model):
         return [(registry.MODE, registry.load_agent(args.model, device=args.device))]
     evaluator = factory.load_evaluator(
-        args.model, device=args.device, precision=args.precision, compile=args.compile
+        selector, device=args.device, precision=args.precision, compile=args.compile
     )
     modes = factory.MODES if args.mode == "both" else (args.mode,)
     return [(mode, factory.make_agent(mode, evaluator, epsilon=epsilon)) for mode in modes]
@@ -85,19 +86,21 @@ def _fast_refused(prefix: str, args: argparse.Namespace) -> bool:
     return refusal is not None
 
 
-def _weights_line(model: str) -> str | None:
-    """Which checkpoint a run selector scores (the run's latest when the scoring starts), so a check of a
-    run that is still training can name the step it scored (blink.eval.strength reads this line). Without
-    torch (a stand-in evaluator on the torch-free leg) there is no checkpoint to name."""
+def _pinned(model: str) -> tuple[str, str | None]:
+    """(the selector to load, its weights line). A run selector is resolved once, to the run's latest
+    checkpoint when the scoring starts, and that very file is loaded, so a check of a run that is still
+    training names the step it scored (blink.eval.strength reads the line) even when the trainer saves
+    another checkpoint meanwhile. Without torch (a stand-in evaluator on the torch-free leg) there is no
+    checkpoint to name, and anything but a run selector loads as given."""
     if not model.startswith("run:"):
-        return None
+        return model, None
     try:
-        from blink.model.loading import resolve_selector
+        from blink.model.loading import pinned_selector, resolve_selector
 
         path, which = resolve_selector(model)
     except (ImportError, FileNotFoundError, ValueError):
-        return None
-    return f"weights {path} ({which})"
+        return model, None
+    return pinned_selector(path, which), f"weights {path} ({which})"
 
 
 def _cmd_puzzles(args: argparse.Namespace) -> int:
@@ -111,10 +114,10 @@ def _cmd_puzzles(args: argparse.Namespace) -> int:
     out_dir = args.out or paths.home() / "eval" / "puzzles"
     # The published value-mode score is the shipped configuration's: E2b's epsilon unless told otherwise.
     epsilon = args.epsilon if args.epsilon is not None else match.read_epsilon(args.results_dir)
-    illegal, weights = 0, _weights_line(args.model)
+    illegal, (selector, weights) = 0, _pinned(args.model)
     if weights:
         print(weights, flush=True)
-    for mode, agent in _puzzle_agents(args, epsilon):
+    for mode, agent in _puzzle_agents(args, epsilon, selector):
         started = time.perf_counter()
         tie = epsilon if mode == "value" else None
         summary = puzzles.run_puzzle_set(
