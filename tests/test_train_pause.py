@@ -174,3 +174,20 @@ def test_blink_train_exits_with_the_user_pause_code_and_resumes_to_the_end(tmp_p
     userpause.flag_path().unlink()
     assert cli.main([*argv, "--resume"]) == 0
     assert heartbeat.read(run_dir / "heartbeat.json")["state"] == "finished"
+
+
+def test_each_trainer_process_stamps_its_metrics_rows_so_a_pause_shows_in_them(tmp_path):
+    """Rows of one trainer process share its session stamp; the resume after a pause starts another, so
+    blink.train.calibrate can leave out (or refuse) the interval that spans the pause."""
+    records = fixture_records()
+    cfg = tiny_train_config(steps=20, warmup_steps=5, batch_size=16, metrics_every=2, eval_every=100)
+    flag, run_dir, quiet = tmp_path / "PAUSE", tmp_path / "run", {"val": None, "log": lambda _: None}
+    source = _flag_at(InMemorySource(records, 16, seed=3).batches, flag, 6)
+    assert loop.train(cfg, _spec(run_dir, flag), source, **quiet).paused
+    flag.unlink()
+    loop.train(cfg, _spec(run_dir, flag, resume=True), InMemorySource(records, 16, seed=3).batches, **quiet)
+    rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    before = {row["session"] for row in rows if row["step"] <= 7}
+    after = {row["session"] for row in rows if row["step"] > 7}
+    assert len(before) == len(after) == 1 and before != after
+    assert [row["step"] for row in rows] == [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]

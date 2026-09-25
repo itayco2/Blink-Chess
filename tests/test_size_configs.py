@@ -93,3 +93,12 @@ def test_parameter_counts_with_and_without_gab(repo_root, name):
     plain = parameter_report(BlinkNet(dataclasses.replace(cfg, gab=False)))
     assert (report["non_gab"], report["total"]) == PARAMETERS[name]
     assert plain["total"] == report["non_gab"]
+
+
+def test_m12_s_pin_comment_gives_m12_s_own_bench_numbers_not_m_s(repo_root):
+    """M12's pin was copied from M's comment; M12 has its own measured rows (bench.json, 2026-09-24):
+    512 compiled peaked at 7.05 GB against the 6.20 GB budget, and 256 runs at 2,290 samples/s."""
+    text = (repo_root / "configs" / "m12.toml").read_text(encoding="utf-8")
+    pin = text[text.index("micro_batch = 256") : text.index("steps =")]
+    assert "7.05 GB" in pin and "6.20 GB" in pin and "2,290" in pin
+    assert "projected" not in pin and "6.15 GB" not in pin

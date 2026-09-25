@@ -11,6 +11,13 @@ that config for 2,000 steps under a throwaway run name, then computes
              to the window after it, whose row is marked eval or ckpt, so it drops out.
     steps  = floor(120 x 3600 x R_true / 1024)   (1024 is the batch size)
 
+A calibration that did not measure one uninterrupted, unshared run is refused, and --write then writes
+nothing (the reason goes to calibration.json): when any counted interval took more than 3x the median
+counted interval's seconds per step (the GPU was shared or the run stalled), or when a user pause or
+resume, or a restart of the trainer, falls inside the counted span (two trainer processes' rows, told
+apart by their session stamp, or a supervisor.json event). The same intervals, from the first row on and
+leaving out any that spans a restart, give a run's training hours (PR-6 reports them).
+
 and with --write puts that steps value into the config's [train] table, and nothing else. Every other
 number that depends on steps follows from it when the run starts: the 5/25/30/50/100% check steps
 (blink.train.vaa.check_steps), so the 30% preview's --from-step; the WSD cooldown start; and the 21 film
@@ -21,8 +28,9 @@ frames (blink.train.film.frame_plan). The command prints them. The calibration r
 import dataclasses
 import math
 import re
+import statistics
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +44,21 @@ SKIP_STEPS = 500  # PR-5: the first 500 steps (compile, warm-up of clocks and ca
 CALIBRATION_STEPS = 2000
 TRAIN_PHASE = "train"
 PREFIX = "calib"
+SLOW_FACTOR = 3.0  # a counted interval over 3x the median seconds per step refuses the calibration
+SESSION = "session"  # blink.train.loop: the trainer process's stamp on each of its metrics rows
+# supervisor.json events (blink.train.supervise) that stop or restart the trainer, by refusal kind
+STOP_EVENTS = {
+    **dict.fromkeys(("user_pause", "user_pause_exit", "user_pause_kill", "user_resume"), "pause"),
+    **dict.fromkeys(("start", "crash", "rollback"), "restart"),
+}
+
+
+class Refused(ValueError):
+    """A calibration that must not be used; `kind` is "slow interval", "restart" or "pause"."""
+
+    def __init__(self, kind: str, detail: str) -> None:
+        super().__init__(detail)
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -55,9 +78,27 @@ def _stamp(row: dict[str, Any]) -> float:
     return float(stamp)
 
 
-def true_rate(rows: Sequence[dict[str, Any]], batch_size: int, skip_steps: int = SKIP_STEPS) -> TrueRate:
-    """R_true over metrics.jsonl rows in file order, exactly as PR-5 defines it."""
-    samples, seconds, counted = 0, 0.0, []
+@dataclass(frozen=True)
+class Interval:
+    earlier: int  # the earlier row's step
+    later: int
+    seconds: float  # between the two rows' time stamps
+    restarted: bool  # two trainer processes wrote the rows: a pause, a crash restart or a relaunch between
+
+    @property
+    def steps(self) -> int:
+        return self.later - self.earlier
+
+
+def _restarted(earlier: dict[str, Any], later: dict[str, Any]) -> bool:
+    """Rows of one trainer process share its session stamp; rows from before the stamp existed have none."""
+    return earlier.get(SESSION) != later.get(SESSION)
+
+
+def train_intervals(rows: Sequence[dict[str, Any]], skip_steps: int = 0) -> list[Interval]:
+    """Consecutive metrics rows (file order) whose later row has phase "train" and whose earlier row is at
+    step `skip_steps` or later: PR-5's intervals, timed by the rows' stamps."""
+    out = []
     for earlier, later in zip(rows, rows[1:], strict=False):
         if int(earlier["step"]) < skip_steps or later.get("phase") != TRAIN_PHASE:
             continue
@@ -67,11 +108,67 @@ def true_rate(rows: Sequence[dict[str, Any]], batch_size: int, skip_steps: int =
                 f"metrics rows at steps {earlier['step']} and {later['step']} do not move forward in steps "
                 "and time: the log is not one run's rows in order"
             )
-        samples, seconds = samples + steps * batch_size, seconds + elapsed
-        counted.append((int(earlier["step"]), int(later["step"])))
+        out.append(Interval(int(earlier["step"]), int(later["step"]), elapsed, _restarted(earlier, later)))
+    return out
+
+
+def training_seconds(rows: Sequence[dict[str, Any]]) -> float:
+    """A run's training seconds: its train-phase intervals from the first row on, leaving out any whose
+    rows two trainer processes wrote (the time a pause, crash or relaunch took is not training)."""
+    return sum(i.seconds for i in train_intervals(rows) if not i.restarted)
+
+
+def _refuse_restarts(rows: Sequence[dict[str, Any]], first: int, last: int, events: Iterable[dict]) -> None:
+    inside = [row for row in rows if first <= int(row["step"]) <= last]
+    for earlier, later in zip(inside, inside[1:], strict=False):
+        if _restarted(earlier, later):
+            raise Refused(
+                "restart",
+                f"the metrics rows at steps {int(earlier['step']):,} and {int(later['step']):,} come from "
+                "two trainer processes (a user pause, a crash restart or a relaunch between them): R_true "
+                "is measured on one uninterrupted run",
+            )
+    opened, closed = _stamp(inside[0]), _stamp(inside[-1])
+    for event in events:
+        at, name = event.get("time"), event.get("event")
+        if name in STOP_EVENTS and isinstance(at, int | float) and opened < at <= closed:
+            raise Refused(
+                STOP_EVENTS[name],
+                f"supervisor.json records {name} at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(at))},"
+                f" inside the counted span (steps {first:,}-{last:,}): R_true is measured on one "
+                "uninterrupted run",
+            )
+
+
+def _refuse_slow(counted: Sequence[Interval]) -> None:
+    per_step = [i.seconds / i.steps for i in counted]
+    median = statistics.median(per_step)
+    for interval, seconds in zip(counted, per_step, strict=True):
+        if seconds > SLOW_FACTOR * median:
+            raise Refused(
+                "slow interval",
+                f"steps {interval.earlier:,}-{interval.later:,} took {seconds:.4f} s a step, over "
+                f"{SLOW_FACTOR:g}x the median {median:.4f} s of the counted intervals (the GPU was shared or "
+                "the run stalled): calibrate again on an idle GPU",
+            )
+
+
+def true_rate(
+    rows: Sequence[dict[str, Any]],
+    batch_size: int,
+    skip_steps: int = SKIP_STEPS,
+    events: Iterable[dict[str, Any]] = (),
+) -> TrueRate:
+    """R_true over metrics.jsonl rows in file order, exactly as PR-5 defines it; Refused when the run was
+    interrupted or shared inside the counted span (`events`: its supervisor.json events, if supervised)."""
+    counted = train_intervals(rows, skip_steps)
     if not counted:
         raise ValueError(f"no train-phase interval after step {skip_steps}: calibrate for more steps")
-    return TrueRate(samples / seconds, samples, seconds, len(counted), counted[0][0], counted[-1][1])
+    _refuse_restarts(rows, counted[0].earlier, counted[-1].later, events)
+    _refuse_slow(counted)
+    samples = sum(i.steps for i in counted) * batch_size
+    seconds = sum(i.seconds for i in counted)
+    return TrueRate(samples / seconds, samples, seconds, len(counted), counted[0].earlier, counted[-1].later)
 
 
 def flagship_steps(samples_per_s: float, batch_size: int, hours: float = T_LONG_HOURS) -> int:
