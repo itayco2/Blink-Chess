@@ -392,10 +392,16 @@ def _repo_config(given: str | None, default: str) -> Path:
 
 def _plan_rate(args: argparse.Namespace, size: str, mode: str) -> float:
     """--rate, or bench.json's best row for `size` measured in the compile mode the runs train in."""
-    from blink.train.bench import best_rates
-
     if args.rate:
         return args.rate
+    return _row_rate(args, size, mode)
+
+
+def _row_rate(args: argparse.Namespace, size: str, mode: str) -> float:
+    """bench.json's best row for `size` in `mode`. An arm with its own row (a10's s-muon) is always
+    planned from it: --rate pins only the plan size, never an arm that costs more per step."""
+    from blink.train.bench import best_rates
+
     bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
     best = best_rates(bench, compile=mode).get(size)
     if best is None:
@@ -416,7 +422,7 @@ def cmd_sweep_ablations(args: argparse.Namespace) -> int:
         rate = _plan_rate(args, plan.size, compile_mode(read_tables(plan.recipe)))
         # only the arms this launch plans afresh: not one the slip rule cuts, nor one already recorded
         fresh = sweep.fresh_rate_arms(plan, out, args.slip)
-        arm_rates = sweep.own_bench_rates(plan, lambda size, mode: _plan_rate(args, size, mode), fresh)
+        arm_rates = sweep.own_bench_rates(plan, lambda size, mode: _row_rate(args, size, mode), fresh)
         if args.dry_run:
             for line in sweep.preview(plan, out, rate, arm_rates, args.slip):
                 _say(line)

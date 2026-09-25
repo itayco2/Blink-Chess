@@ -349,3 +349,16 @@ def test_rescore_lists_what_it_scored_and_what_it_could_not(tmp_path, monkeypatc
 
     judged = sweep.rescore_ablations(plan, out, scorer, **QUIET)
     assert judged["scored"] == ["a01", "a03"] and judged["not_scored"] == {"a02": "abl-a02 has no checkpoint"}
+
+
+def test_rate_pins_only_the_plan_size_and_an_arm_keeps_its_own_bench_row(tmp_path, monkeypatch, capsys):
+    """--rate is D's calibrated rate; a10 (Muon) must still be planned at its own s-muon row, or it
+    trains D's steps whatever Muon costs per step (the 2026-09-25 gap script passed --rate)."""
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path / "home"))
+    plan = _muon_plan(tmp_path)
+    bench = _bench(tmp_path / "bench.json", {"s": 1000.0, "s-muon": 500.0})
+    argv = ["sweep", "ablations", "--plan", str(plan), "--bench", str(bench), "--rate", "2000", "--dry-run"]
+    assert cli.main(argv) == 0
+    lines = {line.split(":")[0]: line for line in capsys.readouterr().out.splitlines()}
+    assert "steps 72;" in lines["abl-a01"]  # 0.01 h x 3600 x 2000 / 1000
+    assert "steps 18;" in lines["abl-a10"]  # its own row: 0.01 h x 3600 x 500 / 1000
