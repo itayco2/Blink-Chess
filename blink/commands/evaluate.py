@@ -87,14 +87,15 @@ def _fast_refused(prefix: str, args: argparse.Namespace) -> bool:
 
 def _weights_line(model: str) -> str | None:
     """Which checkpoint a run selector scores (the run's latest when the scoring starts), so a check of a
-    run that is still training can name the step it scored (blink.eval.strength reads this line)."""
+    run that is still training can name the step it scored (blink.eval.strength reads this line). Without
+    torch (a stand-in evaluator on the torch-free leg) there is no checkpoint to name."""
     if not model.startswith("run:"):
         return None
-    from blink.model.loading import resolve_selector
-
     try:
+        from blink.model.loading import resolve_selector
+
         path, which = resolve_selector(model)
-    except (FileNotFoundError, ValueError):
+    except (ImportError, FileNotFoundError, ValueError):
         return None
     return f"weights {path} ({which})"
 
