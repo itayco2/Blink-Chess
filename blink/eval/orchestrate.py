@@ -20,8 +20,9 @@ checks that no move ran long.
 A `games` override makes every match that long (and every SPRT cap), for smoke runs.
 
 SF19 labels (E2's win% regret and mate-preserving searches, E9's failures) run on ctx.sf_procs Stockfish
-processes, one thread each; `blink eval all` passes 5 (P8's CPU budget, blink.commands.evaluate). The
-blocks run one at a time, so no time-based block runs beside them.
+processes, one thread each; `blink eval all` passes 5 (P8's CPU budget, blink.commands.evaluate), and a
+block gets 3 at most while Blink trains (blink.eval.sfbudget). The blocks run one at a time, so no
+time-based block runs beside them.
 
 Blink plays every block after E2b with the epsilon E2b chose (results/epsilon.json), in process and under
 fastchess alike (blink-uci gets it as --epsilon); a block refuses to start if that file changed mid-run.
@@ -60,6 +61,7 @@ from blink.eval.publish import (
     public_audit,
     write_pgn_list,
 )
+from blink.eval.sfbudget import budgeted, training_processes
 from blink.play import fastmode
 
 BLOCK_ORDER = ("E0", "E1", "E2", "E2b", "E3", "E4", "E4b", "E5", "E6", "E7", "E8", "E9")
@@ -442,8 +444,10 @@ def run_blocks(
     runs_root: Path | None = None,
     log: Callable[[str], None] = print,
     load: Callable[[], float] = cpu_load,
+    processes: Callable[[], list[list[str]]] = training_processes,
 ) -> dict:
-    """Run the chosen blocks in the plan's order; returns every block's report and its forfeit table."""
+    """Run the chosen blocks in the plan's order; returns every block's report and its forfeit table.
+    `processes` lists the live Blink processes' arguments, for each block's Stockfish budget."""
     ids = [b for b in BLOCK_ORDER if only is None or b in only]
     unknown = sorted(set(only or ()) - set(BLOCK_ORDER))
     if unknown:
@@ -460,7 +464,7 @@ def run_blocks(
         epsilon = guard_epsilon(block_id, ctx.results_dir, state.get("epsilon"))
         guard_weights(block_id, ctx.model, pinned)
         log(f"{block_id}: {BLOCKS[block_id].title}")
-        report = runners[block_id](ctx, state)
+        report = runners[block_id](budgeted(ctx, log, processes), state)
         pgns = [Path(p) for p in report.get("pgns", [])]
         forfeits = forfeit_table(pgns)
         audits = audit_block(pgns, forfeits)

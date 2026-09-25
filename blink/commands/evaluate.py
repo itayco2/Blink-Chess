@@ -9,8 +9,10 @@ CPU budget of the SF19 labels (plan P8): `eval all` searches E2's win% regret an
 and E9's failure labels on P8_SF_PROCS = 5 Stockfish processes, one thread each. P8 runs on an idle machine
 (the i7-8700 has 6 cores: 5 for Stockfish, 1 for the harness); the blocks run one at a time, so no timed
 block runs beside the labels, and the pool has exited before the next block's CPU check. `eval block` and
-`eval static` keep 1 unless told. While a training run is live, side jobs get 3 processes at most (plan
-P7), and `eval endgames` follows PR-4 (EVAL.md section 5): at most 4 before P7 and 3 during it.
+`eval static` keep 1 unless told. While a blink train, supervise or sweep process is live, `eval all`,
+`eval block` and `eval static` label on 3 processes at most whatever they were given (plan P7;
+blink.eval.sfbudget), and `eval endgames` follows PR-4 (EVAL.md section 5): at most 4
+before P7 and 3 during it.
 """
 
 import argparse
@@ -20,7 +22,19 @@ import time
 from pathlib import Path
 
 from blink import paths
-from blink.eval import books, endgames, fastchess, match, nosearch, puzzles, rating, sflabel, signcheck, sprt
+from blink.eval import (
+    books,
+    endgames,
+    fastchess,
+    match,
+    nosearch,
+    puzzles,
+    rating,
+    sfbudget,
+    sflabel,
+    signcheck,
+    sprt,
+)
 from blink.play import factory, fastmode, rules
 from blink.play.agents import Agent
 from blink.reference import registry
@@ -549,7 +563,8 @@ def _cmd_static(args: argparse.Namespace) -> int:
     agents = match.blink_agents(args.model, args.device, epsilon=epsilon, **ctx.play_mode)
     inputs = orchestrate.static_inputs(ctx, label, epsilon)
     started = time.perf_counter()
-    with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=args.sf_procs) as labeler:
+    procs = sfbudget.sf_procs_now(args.sf_procs)
+    with sflabel.SfLabeler(args.sf_nodes, exe=fastchess.stockfish_exe(), procs=procs) as labeler:
         e2 = static.run_e2(
             agents["policy"].evaluator, agents, inputs, limits, None if args.no_sf else labeler
         )
