@@ -13,6 +13,16 @@ Every `interval_s` (60 s) the supervisor reads the run's own files and applies, 
   never move the EMA, so a sustained divergence cannot drag its own baseline up).
 - crash: a child that exits non-zero for any other reason is resumed up to 3 times, 60 s apart.
 
+A user pause (blink.train.userpause: BLINK_HOME/PAUSE, the Pause Blink button) is none of these. The
+trainer checkpoints its step and exits with EXIT_USER_PAUSE, which counts as no crash and waits no
+backoff. From the moment the supervisor sees the flag (or that exit) until it goes, no stop rule is
+evaluated, the wall-clock deadline stops counting (it is extended by exactly the paused time), and the
+heartbeat and supervisor.json say "paused: user"; a child still running `pause_kill_s` after the flag
+appeared is ended, keeping its checkpoints. Once the flag is gone the child restarts with --resume, a
+child that never stopped gets a fresh startup grace, and the throughput window restarts. A flag up when
+supervision starts holds the first child the same way. A failed VAA check still ends supervision with
+"paused: P7-VAA" even when the child exits for a user pause: removing the flag never lifts that gate.
+
 A stop terminates the child's whole process tree and writes 'stopped: <rule>, <number>' into
 heartbeat.json (state "stopped" or "paused", so `blink status` exits non-zero) and a STATUS-style
 record into supervisor.json. Before each child starts, metrics.jsonl and evals.jsonl are cut back to
@@ -39,8 +49,10 @@ import psutil
 from blink import heartbeat
 from blink.train.atomic import write_text_atomic
 from blink.train.preview import preview_name
+from blink.train.userpause import PAUSED_USER
 
 EXIT_FINISHED, EXIT_STOPPED, EXIT_REFUSED, EXIT_PAUSED = 0, 1, 2, 3
+EXIT_USER_PAUSE = 75  # the trainer let go of the GPU for BLINK_HOME/PAUSE (sysexits' EX_TEMPFAIL)
 # the train flags that branch a new run from another run's checkpoint (blink.commands.train)
 BRANCH_FLAGS = ("--from-step", "--preview-cooldown", "--preview-steps", "--preview-name")
 RULES = ("nan", "vaa", "heartbeat", "throughput", "clip", "loss", "crash")
@@ -76,6 +88,8 @@ class SuperviseConfig:
     max_rollbacks: int = 1
     terminate_timeout_s: float = 30.0
     disabled: tuple[str, ...] = ()
+    pause_poll_s: float = 5.0  # a user pause looks for the flag (and beats the heartbeat) this often
+    pause_kill_s: float = 240.0  # a child still running this long after the flag appeared is ended
 
     def __post_init__(self) -> None:
         unknown = sorted(set(self.disabled) - set(RULES))
@@ -415,19 +429,38 @@ class _Child:
 
 
 class Supervisor:
-    """Live supervision state. Mutable by nature: it owns a child process and counts its restarts."""
+    """Live supervision state. Mutable by nature: it owns a child process and counts its restarts.
 
-    def __init__(self, cfg: SuperviseConfig, run_dir: Path, argv: Sequence[str], log: Log, launch=None):
+    `pause_flag` is BLINK_HOME/PAUSE (None: no user pause). `clock`, `sleep` and `spawn` stand for
+    time.time, time.sleep and subprocess.Popen, which tests replace with fakes."""
+
+    def __init__(
+        self,
+        cfg: SuperviseConfig,
+        run_dir: Path,
+        argv: Sequence[str],
+        log: Log,
+        launch=None,
+        pause_flag: Path | None = None,
+        clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
+        spawn: Callable[..., Any] = subprocess.Popen,
+    ):
         self.cfg, self.run_dir, self.argv, self.log = cfg, Path(run_dir), list(argv), log
         self.launch_command = launch
+        self.pause_flag = None if pause_flag is None else Path(pause_flag)
+        self.clock, self.sleep, self.spawn = clock, sleep, spawn
         self.lr_scale = lr_scale_of(argv)
         self.restarts = self.rollbacks = 0
-        self.started = time.time()
-        self.child: _Child | None = None
+        self.started = clock()
+        self.child: _Child | None = None  # None while a user pause holds the child back
         self.observed: dict[Any, float] = {}
         self.baseline_nan: frozenset[int] = frozenset()
         self.baseline_vaa: frozenset[int] = frozenset()
         self.events: list[dict[str, Any]] = []
+        self.paused_s = 0.0  # seconds paused by the user so far, which the deadline does not count
+        self.pause_since: float | None = None  # when the current user pause began
+        self.rules_since = -math.inf  # throughput rows from before the last user pause do not count
 
     def _path(self, name: str) -> Path:
         return self.run_dir / name
@@ -438,26 +471,54 @@ class Supervisor:
             self.log(f"supervise: {status}")
             return Outcome("refused", status, EXIT_REFUSED)
         self._event("job", result=bind_children_to_this_process())
-        self._start(resume="--resume" in self.argv)
-        next_check = time.time() + self.cfg.interval_s
+        self._restart(resume="--resume" in self.argv)
+        next_check = self.clock() + self.cfg.interval_s
         try:
             while True:
-                code = self.child.proc.poll()
-                outcome = self._on_exit(code) if code is not None else None
-                if code is None:
-                    now = time.time()
-                    self._track_progress()
-                    if deadline_s is not None and now - self.started >= deadline_s:
-                        outcome = self._finish(
-                            "stopped", Verdict("wall_clock", f"{now - self.started:.0f} s")
-                        )
-                    elif now >= next_check:
-                        outcome, next_check = self._check(now), now + self.cfg.interval_s
+                outcome, next_check = self._step(next_check, deadline_s)
                 if outcome is not None:
                     return outcome
-                time.sleep(self.cfg.poll_s)
+                self.sleep(self.cfg.pause_poll_s if self.child is None else self.cfg.poll_s)
         except KeyboardInterrupt:
             return self._finish("stopped", Verdict("supervisor", "interrupted"))
+
+    def _step(self, next_check: float, deadline_s: float | None) -> tuple[Outcome | None, float]:
+        """One look: (how supervision ended, or None; when the stop rules are next evaluated)."""
+        now = self.clock()
+        if self.child is None:
+            self._wait_or_resume(now)
+            return None, next_check
+        code = self.child.proc.poll()
+        if code is not None:
+            return self._on_exit(code), next_check
+        if self._flagged():
+            return self._pausing(now), next_check
+        if self.pause_since is not None:
+            self._pause_ends(now)
+        self._track_progress()
+        if deadline_s is not None and now - self.started - self.paused_s >= deadline_s:
+            return self._finish("stopped", self._wall_clock(now)), next_check
+        if now >= next_check:
+            return self._check(now), now + self.cfg.interval_s
+        return None, next_check
+
+    def _wall_clock(self, now: float) -> Verdict:
+        if not self.paused_s:
+            return Verdict("wall_clock", f"{now - self.started:.0f} s")
+        counted = now - self.started - self.paused_s
+        return Verdict(
+            "wall_clock", f"{counted:.0f} s, not counting {self.paused_s:.0f} s paused by the user"
+        )
+
+    def _restart(self, resume: bool) -> None:
+        """Start the child, unless the user has paused: then it starts once the flag is gone."""
+        if not self._flagged():
+            self._start(resume)
+            return
+        self.child = None
+        if self.pause_since is None:
+            self._pause_begins(self.clock())
+        self._beat_paused()
 
     def _start(self, resume: bool) -> None:
         steps = checkpoint_steps(self.run_dir)
@@ -468,10 +529,69 @@ class Supervisor:
         self.baseline_nan = nan_steps(read_jsonl(self._path("metrics.jsonl")))
         self.baseline_vaa = vaa_steps(read_jsonl(self._path("evals.jsonl")))
         argv = restart_argv(self.argv, resume, self.lr_scale)
-        proc = subprocess.Popen(argv, env={**os.environ, "PYTHONUTF8": "1"})
-        self.child = _Child(proc, argv, time.time())
+        proc = self.spawn(argv, env={**os.environ, "PYTHONUTF8": "1"})
+        self.child = _Child(proc, argv, self.clock())
         self._event("start", pid=proc.pid, resume=resume, from_step=cut, lr_scale=self.lr_scale)
         self._write_record("running", "running")
+
+    # ------------------------------------------------------------ the user pause (BLINK_HOME/PAUSE)
+
+    def _flagged(self) -> bool:
+        return self.pause_flag is not None and self.pause_flag.exists()
+
+    def _pause_begins(self, now: float) -> None:
+        self.pause_since = now
+        self._event("user_pause", flag=str(self.pause_flag))
+        self._write_record(PAUSED_USER, PAUSED_USER)
+
+    def _pausing(self, now: float) -> Outcome | None:
+        """The flag is up while the child still runs (checkpointing, or short of its next step): no stop
+        rule is evaluated. A child still running pause_kill_s after the flag appeared is ended, which
+        keeps its checkpoints, so the GPU is free for the Pause button's wait whatever the child does."""
+        if self.pause_since is None:
+            self._pause_begins(now)
+        if now - self.pause_since < self.cfg.pause_kill_s:
+            return None
+        self._event("user_pause_kill", pid=self.child.proc.pid, after_s=round(now - self.pause_since))
+        self._end_child()
+        return self._on_exit(EXIT_USER_PAUSE)
+
+    def _user_paused(self) -> None:
+        """The child let go of the GPU for the flag: no crash, no backoff; it restarts once the flag goes."""
+        if self.pause_since is None:  # the child saw the flag before this supervisor looked
+            self._pause_begins(self.clock())
+        steps = checkpoint_steps(self.run_dir)
+        self._event("user_pause_exit", code=EXIT_USER_PAUSE, checkpoint=steps[-1] if steps else None)
+        self.child = None
+        self._beat_paused()
+
+    def _wait_or_resume(self, now: float) -> None:
+        if self._flagged():
+            self._beat_paused()
+            return
+        self._pause_ends(now)
+        self._start(resume="--resume" in self.argv or bool(checkpoint_steps(self.run_dir)))
+
+    def _pause_ends(self, now: float) -> None:
+        paused = now - self.pause_since
+        self.paused_s += paused
+        self.pause_since, self.rules_since = None, now
+        if self.child is not None:  # a child that never stopped: its startup grace starts again
+            self.child.started = now
+        self._event("user_resume", paused_s=round(paused, 1), total_paused_s=round(self.paused_s, 1))
+        self._write_record("running", "running")
+
+    def _beat_paused(self) -> None:
+        """heartbeat.json says "paused: user" and stays fresh, so a watcher tells the pause from a stall."""
+        beat = heartbeat.read(self._path("heartbeat.json")) or {}
+        kept = {k: v for k, v in beat.items() if k not in ("stopped", "error", "time")}
+        payload = {
+            **kept,
+            "state": PAUSED_USER,
+            "supervisor_pid": os.getpid(),
+            "paused_since": self.pause_since,
+        }
+        heartbeat.beat_once(self._path("heartbeat.json"), payload)
 
     def _track_progress(self) -> None:
         """Note the child's newest heartbeat, its first step, and whether it has moved on since.
@@ -490,13 +610,15 @@ class Supervisor:
             self.child.progressed = True
 
     def _timed(self, rows: list[dict], now: float) -> list[dict]:
-        """Each row with '_t': its own 'time' if it has one, else when the supervisor first saw it."""
+        """Each row with '_t': its own 'time' if it has one, else when the supervisor first saw it.
+        Rows from before the last user pause ended are left out: a slow window must not span a pause."""
         out = []
         for row in rows:
             t = row.get("time")
             if not isinstance(t, int | float):
                 t = self.observed.setdefault(row.get("step"), now)
-            out.append({**row, "_t": float(t)})
+            if t >= self.rules_since:
+                out.append({**row, "_t": float(t)})
         return out
 
     def _check(self, now: float) -> Outcome | None:
@@ -533,6 +655,8 @@ class Supervisor:
         if code == 0:
             self._event("exit", code=0)
             return self._finish("finished", None)
+        if code == EXIT_USER_PAUSE:
+            return self._user_paused()
         return self._crash(code)
 
     def _beat_says_nan(self) -> bool:
@@ -548,7 +672,7 @@ class Supervisor:
         self.lr_scale *= self.cfg.nan_lr_scale
         self._event("rollback", step=step, lr_scale=self.lr_scale)
         self._end_child()
-        self._start(resume=bool(checkpoint_steps(self.run_dir)))
+        self._restart(resume=bool(checkpoint_steps(self.run_dir)))
         return None
 
     def _crash(self, code: int) -> Outcome | None:
@@ -556,8 +680,8 @@ class Supervisor:
             return self._finish("stopped", Verdict("crash", f"exit {code} after {self.restarts} restarts"))
         self.restarts += 1
         self._event("crash", code=code, restart=self.restarts, backoff_s=self.cfg.backoff_s)
-        time.sleep(self.cfg.backoff_s)
-        self._start(resume=bool(checkpoint_steps(self.run_dir)))
+        self.sleep(self.cfg.backoff_s)
+        self._restart(resume=bool(checkpoint_steps(self.run_dir)))
         return None
 
     def _end_child(self) -> None:
@@ -582,7 +706,7 @@ class Supervisor:
         return Outcome(state, status, code)
 
     def _event(self, name: str, **fields: Any) -> None:
-        self.events.append({"time": time.time(), "event": name, **fields})
+        self.events.append({"time": self.clock(), "event": name, **fields})
         details = ", ".join(f"{k} {v}" for k, v in fields.items())
         self.log(f"supervise {self.run_dir.name}: {name}{': ' + details if details else ''}")
 
@@ -605,7 +729,10 @@ class Supervisor:
             "disabled": list(self.cfg.disabled),
             "config": asdict(self.cfg),
             "started": self.started,
-            "updated": time.time(),
+            "updated": self.clock(),
+            "pause_flag": None if self.pause_flag is None else str(self.pause_flag),
+            "user_paused_s": self.paused_s,
+            "user_pause_since": self.pause_since,
             "last_metrics": rows[-1] if rows else None,
             "last_eval": evals[-1] if evals else None,
             "events": self.events[-MAX_EVENTS:],
@@ -623,10 +750,12 @@ def supervise(
     log: Log = print,
     deadline_s: float | None = None,
     launch_command: str | None = None,
+    pause_flag: Path | None = None,
 ) -> Outcome:
-    """Run argv under supervision until it finishes or a stop rule fires."""
+    """Run argv under supervision until it finishes or a stop rule fires; a user pause (pause_flag,
+    BLINK_HOME/PAUSE from the CLI) only suspends it."""
     Path(run_dir).mkdir(parents=True, exist_ok=True)
-    return Supervisor(cfg, Path(run_dir), argv, log, launch_command).run(deadline_s)
+    return Supervisor(cfg, Path(run_dir), argv, log, launch_command, pause_flag).run(deadline_s)
 
 
 def read_record(run_dir: Path) -> dict[str, Any] | None:
@@ -637,5 +766,6 @@ def read_record(run_dir: Path) -> dict[str, Any] | None:
 
 
 def status_exit_code(record: dict[str, Any] | None) -> int:
-    """0 while the supervised run is running or has finished; 1 once any stop rule has fired."""
-    return 0 if record is not None and record.get("state") in ("running", "finished") else 1
+    """0 while the supervised run is running, paused by the user or finished; 1 once any stop rule
+    has fired (the P7-VAA pause included)."""
+    return 0 if record is not None and record.get("state") in ("running", "finished", PAUSED_USER) else 1

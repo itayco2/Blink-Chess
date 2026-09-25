@@ -3,6 +3,7 @@
 
 blink ops launch --name NAME -- <blink args>    a fully detached job (Win32_Process.Create), prints its PID
 blink ops ps                                    Blink processes and launched jobs, with their heartbeats
+blink ops install-pause-buttons [--to DIR]      Pause Blink.cmd and Resume Blink.cmd onto the Desktop
 blink supervise --run NAME -- train ...         the trainer as a child, every P7 stop rule enforced
 blink bench throughput|loader|play              measured rates into bench.json (plan P4)
 blink bench parity                              a fast play mode's moves against fp32's, on val roots
@@ -58,16 +59,37 @@ def cmd_launch(args: argparse.Namespace) -> int:
 
 def cmd_ps(args: argparse.Namespace) -> int:
     from blink.ops import launch
+    from blink.train import userpause
 
     rows = launch.blink_processes()
     records = launch.launch_records()
+    paused = userpause.describe(userpause.flag_path())
     if args.json:
-        _say(json.dumps({"processes": rows, "launched": records}, indent=2))
+        _say(json.dumps({"processes": rows, "launched": records, "user_pause": paused}, indent=2))
         return 0
+    if paused:
+        _say(paused)
     _say(launch.format_ps(rows))
     for record in records[: args.recent]:
         state = "alive" if record["alive"] else "gone"
         _say(f"launched {record['name']}: pid {record['pid']} {state}, heartbeat {record['beat']}")
+    return 0
+
+
+def cmd_install_pause_buttons(args: argparse.Namespace) -> int:
+    from blink.ops import buttons
+
+    target = Path(args.to) if args.to else buttons.default_target()
+    names = " and ".join(buttons.BUTTONS)
+    if args.dry_run:
+        _say(f"would copy {names} from {buttons.BUTTONS_DIR} to {target}")
+        return 0
+    try:
+        buttons.install(target)
+    except OSError as exc:
+        print(f"blink ops install-pause-buttons: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    _say(f"copied {names} to {target}")
     return 0
 
 
@@ -138,7 +160,7 @@ def _supervise_config(args: argparse.Namespace):
 
 
 def cmd_supervise(args: argparse.Namespace) -> int:
-    from blink.train import status, supervise
+    from blink.train import status, supervise, userpause
 
     try:
         run = supervise.run_of(_rest(args.train_args), args.run)
@@ -162,6 +184,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
         log=_say,
         deadline_s=deadline,
         launch_command=" ".join(sys.argv),
+        pause_flag=userpause.flag_path(),
     )
     _say(f"supervise {run}: {outcome.status}")
     return outcome.exit_code
@@ -179,6 +202,12 @@ def _register_ops(sub: argparse._SubParsersAction) -> None:
     ps.add_argument("--json", action="store_true")
     ps.add_argument("--recent", type=int, default=5, help="how many launch records to show")
     ps.set_defaults(func=cmd_ps)
+    buttons = actions.add_parser(
+        "install-pause-buttons", help="copy Pause Blink.cmd and Resume Blink.cmd onto the Desktop"
+    )
+    buttons.add_argument("--to", help="the folder to copy them into (default: the user's Desktop)")
+    buttons.add_argument("--dry-run", action="store_true", help="say where they would go and stop")
+    buttons.set_defaults(func=cmd_install_pause_buttons)
 
 
 def _register_supervise(sub: argparse._SubParsersAction) -> None:

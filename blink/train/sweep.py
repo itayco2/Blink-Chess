@@ -23,7 +23,9 @@ The adopted set must be settled before a15 trains, since a15's VAA vouches only 
 with: before a15 starts the sweep scores a01-a03 post hoc for any metric a finished arm holds and they
 lack, and holds a15 if that fails; a15 stopped partway resumes with the arms it started with; and the
 recipe stays D when the adopted set no longer matches the arms a15 recorded. Only the sweep writes
-ablations.json; `blink sweep rescore` writes posthoc.json files only.
+ablations.json; `blink sweep rescore` writes posthoc.json files only. A user pause (BLINK_HOME/PAUSE,
+blink.train.userpause) holds an arm not yet started before it is planned, and pauses a running arm
+inside its supervisor, so the arm stays "running" and continues once the flag is gone.
 
 The size sweep (plan P6) is blink.train.size_sweep; N* is blink.train.nstar.
 """
@@ -40,7 +42,7 @@ from typing import Any
 
 from blink import paths
 from blink.model.config import compile_mode, config_from_dict, read_tables
-from blink.train import posthoc
+from blink.train import posthoc, userpause
 from blink.train.atomic import write_text_atomic
 from blink.train.nstar import TOLERANCE
 from blink.train.supervise import Outcome, checkpoint_steps, read_jsonl
@@ -602,7 +604,8 @@ def run_ablations(
     `rate` is the plan size's samples/s (plan_rate pins it); `arm_rates` (by arm name) replaces it for
     arms with their own, and finished arms' recorded rates replace those. `scorer(run)` (a child
     `blink eval arm-metrics` in the CLI) scores seed arms post hoc before a15 is planned, when a
-    finished arm is judged on a metric they predate; without one, a15 is held instead.
+    finished arm is judged on a metric they predate; without one, a15 is held instead. While the user
+    pause flag BLINK_HOME/PAUSE is up, no arm is planned, scored or started.
     """
     state = _load_state(out)
     pinned = plan_rate(plan, state, rate)
@@ -620,9 +623,18 @@ def run_ablations(
             arms_state[name] = entry
             _save_state(out, {**state, "arms": arms_state})
 
+        _hold_while_paused(arm.name, log)
         entry, request = _plan_arm(plan, arm, pinned, own_rates, arms_state, slip, log, scorer)
         _execute(entry, request, runner, save, log)
     return _report(plan, out, state, arms_state)
+
+
+def _hold_while_paused(name: str, log: Log) -> None:
+    flag = userpause.flag_path()
+    if flag.exists():
+        log(f"{name}: waiting to start while {flag} is up (paused by the user)")
+        waited = userpause.wait_while_flagged(flag, userpause.POLL_S)
+        log(f"{name}: the user pause is over after {waited:,.0f} s")
 
 
 def _to_plan(arm: Arm, arms_state: Mapping[str, Mapping]) -> bool:
@@ -742,6 +754,8 @@ def supervised_runner(log: Log = print) -> Runner:
             supervise.train_argv(args + (["--resume"] if request.resume else []), request.run)
         )
         run_dir = paths.home() / "runs" / request.run
-        return supervise.supervise(cfg, run_dir, argv, log=log, deadline_s=request.deadline_s)
+        return supervise.supervise(
+            cfg, run_dir, argv, log=log, deadline_s=request.deadline_s, pause_flag=userpause.flag_path()
+        )
 
     return run
