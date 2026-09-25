@@ -97,6 +97,7 @@ from p7_machine import (  # noqa: F401 - the tests and p7_finish read these from
     read_json_or_empty,
     read_rows,
     release_lock,
+    run_processes,
     run_state,
     set_train_string,
     train_literal,
@@ -119,6 +120,7 @@ PLAN_STEPS = ("batch", "long_steps", "rung_steps", "rung_cooldown", "rung_start"
               "preview_step")  # the plan's numbers a rerun must keep  # fmt: skip
 MAX_CALIBRATIONS = 20  # calibrations a row of user pauses may cost before the driver gives up
 VERIFY_S = 600.0  # unpaused seconds the relaunched flagship has to train past the rung start
+PROCESS_GRACE_S = 60.0  # after the launch, a runs/long with no process at all has lost its supervisor
 VERIFY_POLL_S = 10.0
 ENDED = ("finished", "stopped", "paused")  # supervisor.json states after which nothing trains
 
@@ -585,7 +587,9 @@ def trains_past(beat: dict[str, Any], start: int) -> bool:
 
 def verify_resumed(s: Settings, host, plan: Plan, launched_at: float) -> str:
     """Done only once runs/long trains again: its heartbeat running (or paused by the user) past the rung
-    start, within VERIFY_S seconds that were not paused by the user."""
+    start, within VERIFY_S seconds that were not paused by the user. Paused means a heartbeat or
+    supervisor.json since the launch says so, never the flag alone; and PROCESS_GRACE_S after the
+    launch, a runs/long that no process serves fails at once (its supervisor died at startup)."""
     status(s, "running", "verify", f"waiting for runs/{s.run} to train past step {plan.rung_start:,}")
     counted, last = 0.0, host.clock()
     logs = f"runs/{s.run}/supervisor.json and logs/{s.launch_name}.err"
@@ -597,7 +601,10 @@ def verify_resumed(s: Settings, host, plan: Plan, launched_at: float) -> str:
         if record.get("state") in ENDED:
             raise StepFailed("verify", f"runs/{s.run}'s supervisor is {record.get('status')}: see {logs}")
         now = host.clock()
-        counted += 0.0 if user_paused(s.home, beat, record) else now - last
+        if now - launched_at >= PROCESS_GRACE_S and not any(run_processes(host, s.run)):
+            why = f"no process serves runs/{s.run} {now - launched_at:.0f} s after the launch"
+            raise StepFailed("verify", f"{why}: its supervisor died at startup; see {logs}")
+        counted += 0.0 if user_paused(beat, record) else now - last
         last = now
         if counted >= VERIFY_S:
             said = f"supervisor {record.get('status') or 'silent since the launch'}"

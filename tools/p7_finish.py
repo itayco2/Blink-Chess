@@ -64,6 +64,7 @@ from p7_machine import (
     read_json_or_empty,
     read_rows,
     release_lock,
+    run_processes,
     run_state,
     served_run,
     train_table,
@@ -188,17 +189,6 @@ def film_note(s: Settings, c: int) -> str:
 
 
 # ---------------------------------------------------------------- runs/long's own processes, and the others
-
-
-def run_processes(host, run: str) -> tuple[list[dict], list[dict]]:
-    """(trainers, supervisors) of `run` among the live processes; a dry run is neither."""
-    trainers, supervisors = [], []
-    for proc in host.processes():
-        args = blink_args(list(proc.get("cmdline") or []))
-        if "--dry-run" in args or served_run(args) != run:
-            continue
-        (trainers if args[0] == "train" else supervisors).append(proc)
-    return trainers, supervisors
 
 
 def own_tree(procs: list[dict], run: str) -> set[int]:

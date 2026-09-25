@@ -306,7 +306,9 @@ class FakeHost:
         self.options = {"calibrate": True, "busy": [], "n_star": "m", "branch_vaa": 0.585, "leg1": 0,
                         "branch": 0, "print_rate": True, "write_steps": None, "raise_in": None,
                         "command_lines": [], "calibrate_codes": [], "resumed": "running",
-                        "resumed_step": None, "on_sleep": None, "on_run": None, **options}  # fmt: skip
+                        "resumed_step": None, "on_sleep": None, "on_run": None, "processes": [],
+                        "supervisor_gone": False, **options}  # fmt: skip
+        self.launched: list[str] | None = None  # the relaunched supervisor's blink arguments
         self.log: list[tuple] = []  # every call and event, in order
         self.envs: list[tuple[str, dict]] = []  # (step, the variables the driver added for it)
         self.now = 1_800_000_000.0  # the fake clock: sleeps advance it
@@ -336,6 +338,15 @@ class FakeHost:
     def command_lines(self) -> list[str]:
         self.log.append(("ps",))
         return [*self.options["busy"], *self.options["command_lines"]]
+
+    def processes(self) -> list[dict]:
+        """The relaunched flagship's supervisor once launched (unless it died at startup), and any other."""
+        procs = list(self.options["processes"])
+        if self.launched is not None and not self.options["supervisor_gone"]:
+            procs.append(
+                {"pid": 4243, "ppid": 4242, "cmdline": ["python.exe", "-m", "blink.cli", *self.launched]}
+            )
+        return procs
 
     def stop_endgame_screen(self) -> None:
         self.log.append(("stop-screen",))
@@ -395,7 +406,10 @@ class FakeHost:
     def _launch(self, args):
         """What the relaunch leaves behind: its supervisor's first record and the trainer's beat, past
         the rung start unless the test says the flagship is paused by the user or stopped."""
+        self.launched = args[args.index("--") + 1 :]
         run, resumed = self.s.runs / "long", self.options["resumed"]
+        if resumed is None:  # its supervisor wrote nothing (it died at startup, or hangs)
+            return 0, "launched p7-long: pid 4242 (cmd.exe), python [4243]\n  logs ...\n"
         step = self.options["resumed_step"] or PR2["start"] + (150 if resumed == "running" else 0)
         beat = {"state": resumed, "step": step, "time": self.now + 30}
         (run / "heartbeat.json").write_text(json.dumps(beat), encoding="utf-8")

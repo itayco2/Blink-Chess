@@ -4,7 +4,8 @@ processes, the user pause flag and the single-instance lock.
 Like the tools, it imports nothing from the repo (only the stdlib and psutil), so code changes cannot
 reach a detached driver mid-run; where it mirrors a blink rule, the docstring names the twin and the
 tests hold the two to each other. Every wait here counts only the time Blink was not paused by the user:
-a heartbeat or supervisor.json state "paused: user" (blink.train.userpause.PAUSED_USER) is alive.
+a heartbeat or supervisor.json state "paused: user" (blink.train.userpause.PAUSED_USER), written since
+the thing waited for started, is alive.
 """
 
 import json
@@ -174,6 +175,17 @@ def served_run(args: list[str]) -> str | None:
     return parent
 
 
+def run_processes(host, run: str) -> tuple[list[dict], list[dict]]:
+    """(trainers, supervisors) of `run` among the live processes; a dry run is neither."""
+    trainers, supervisors = [], []
+    for proc in host.processes():
+        args = blink_args(list(proc.get("cmdline") or []))
+        if "--dry-run" in args or served_run(args) != run:
+            continue
+        (trainers if args[0] == "train" else supervisors).append(proc)
+    return trainers, supervisors
+
+
 def gpu_work(args: list[str]) -> bool:
     """Whether blink arguments train, bench or start training runs (a dry run does none of these)."""
     return "--dry-run" not in args and any(tuple(args[: len(c)]) == c for c in GPU_WORK)
@@ -193,9 +205,11 @@ def run_state(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     )
 
 
-def user_paused(home: Path, *records: dict[str, Any]) -> bool:
-    """The flag is up, or a heartbeat or supervisor.json says "paused: user": Blink is alive, only paused."""
-    return flag_path(home).exists() or any(record.get("state") == PAUSED_USER for record in records)
+def user_paused(*records: dict[str, Any]) -> bool:
+    """A heartbeat or supervisor.json says "paused: user": Blink is alive, only paused. The flag alone
+    is not enough: a process that died at startup writes nothing and would look paused for the whole
+    pause."""
+    return any(record.get("state") == PAUSED_USER for record in records)
 
 
 def wait_while_flagged(home: Path, host, on_wait) -> float:

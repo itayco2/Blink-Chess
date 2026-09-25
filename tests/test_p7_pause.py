@@ -156,6 +156,44 @@ def test_a_user_pause_during_the_verification_is_alive_and_never_counted(tmp_pat
     assert f"running at step {PR2['start'] + 40:,}" in _status(s)["detail"]
 
 
+def _flag_at_launch(host, step):
+    if step == "launch":  # Itay pauses right after the relaunch, and keeps the flag up
+        _flag(host.s).write_text("paused", encoding="utf-8")
+
+
+def _give_up_after(seconds: float):
+    """An on_sleep hook that ends a driver still waiting long after it should have failed."""
+    start = []
+
+    def hook(host):
+        start.append(host.now) if not start else None
+        if host.now - start[0] > seconds:
+            raise RuntimeError("the driver is still waiting")
+
+    return hook
+
+
+def test_a_silent_relaunch_fails_after_ten_minutes_even_while_the_flag_is_up(tmp_path):
+    """The flag alone is not a pause: only a heartbeat or supervisor.json written since the launch that
+    says "paused: user" is, so a supervisor that wrote nothing cannot hold the driver (and its lock,
+    which p7_finish needs) for the whole pause."""
+    s = _settings(tmp_path)
+    host = FakeHost(s, resumed=None, on_run=_flag_at_launch, on_sleep=_give_up_after(3 * driver.VERIFY_S))
+    assert driver.drive(s, host) == driver.EXIT_FAILED
+    status = _status(s)
+    assert status["step"] == "verify" and "in 10 minutes" in status["detail"]
+
+
+def test_a_relaunch_whose_supervisor_died_at_startup_fails_at_once_after_the_grace(tmp_path):
+    s = _settings(tmp_path)
+    host = FakeHost(s, resumed=None, supervisor_gone=True, on_run=_flag_at_launch,
+                    on_sleep=_give_up_after(3 * driver.VERIFY_S))  # fmt: skip
+    assert driver.drive(s, host) == driver.EXIT_FAILED
+    assert "no process serves runs/long" in _status(s)["detail"]
+    waited = sum(entry[1] for entry in host.log if entry[0] == "sleep")
+    assert driver.PROCESS_GRACE_S <= waited < driver.VERIFY_S
+
+
 def test_a_relaunched_supervisor_that_stopped_fails_the_driver_at_once(tmp_path):
     s = _settings(tmp_path)
     host = FakeHost(s, resumed="stopped")
