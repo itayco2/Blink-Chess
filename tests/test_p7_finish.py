@@ -3,7 +3,8 @@
 When Itay says the level is good enough, the run is re-planned so its last 20% cools down from the
 current step: a branch runs/long-final of exactly ceil(c/4) cooldown steps from runs/long's checkpoint c.
 runs/long is never touched, its own supervisor is ended only while it holds no trainer (paused by the
-user, or already gone), and nothing runs while runs/long trains. A fake machine answers here.
+user, or already gone), and nothing runs while runs/long trains or while any other Blink run could take
+the GPU beside the branch. A fake machine answers here.
 """
 
 import json
@@ -129,9 +130,7 @@ def test_the_branch_s_lr_schedule_is_the_recipe_s_1_sqrt_cooldown_from_exactly_c
 
 def test_finish_branches_the_final_cooldown_from_the_step_the_pause_left(tmp_path, capsys):
     s = _settings(tmp_path)
-    machine = FakeMachine(
-        s, [_supervisor(41), _supervisor(42, ppid=41), {"pid": 9, "ppid": 1, "cmdline": SIZE_M}]
-    )
+    machine = FakeMachine(s, [_supervisor(41), _supervisor(42, ppid=41)])
     assert p7_finish.finish(s, machine) == p7_finish.EXIT_DONE
     assert machine.killed == [41, 42]  # the venv launcher's tree: its python child goes with it
     step, args = machine.runs[0]
@@ -260,6 +259,64 @@ def test_the_command_line_defaults_and_the_dry_run_flag():
     )
     assert s.data == Path(r"D:\blink") / "data" / "v1" and s.launch_name == "p7-long-final"
     assert sys.modules["p7_finish"] is p7_finish
+
+
+PREVIEW = [*PYTHON, "supervise", "--", "train", "--run", "long", "--data", "D:/blink/data/v1",
+           "--preview-cooldown", "3h", "--from-step", "331758"]  # fmt: skip
+OTHERS = {
+    "a paused long-preview supervisor": PREVIEW,
+    "a size-m branch supervisor": SIZE_M,
+    "a sweep": [*PYTHON, "sweep", "ablations", "--config", "configs/sweep.toml"],
+    "a calibration": [*PYTHON, "train", "calibrate", "--config", "configs/long.toml"],
+    "a throughput bench": [*PYTHON, "bench", "throughput", "--size", "m"],
+}
+
+
+@pytest.mark.parametrize("other", sorted(OTHERS))
+def test_finish_refuses_while_another_blink_run_could_take_the_gpu(tmp_path, capsys, other):
+    """Anything else that trains or starts training, paused or not, would train beside long-final once
+    Resume Blink removes the flag: nothing is stopped and nothing launches while one is there."""
+    s = _settings(tmp_path)
+    machine = FakeMachine(s, [_supervisor(41), {"pid": 55, "ppid": 1, "cmdline": OTHERS[other]}])
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "pid 55" in err and machine.killed == [] and machine.runs == []
+    assert not (s.home / "eval" / "p7_finish.json").exists()
+
+
+def test_a_dry_run_or_a_read_only_blink_command_beside_runs_long_does_not_refuse(tmp_path):
+    s = _settings(tmp_path)
+    harmless = [[*PYTHON, "sweep", "ablations", "--dry-run"], [*PYTHON, "eval", "strength", "--run", "long"],
+                [*PYTHON, "status", "--live"], [*PYTHON, "ops", "ps"]]  # fmt: skip
+    procs = [_supervisor(41), *({"pid": 60 + i, "ppid": 1, "cmdline": c} for i, c in enumerate(harmless))]
+    machine = FakeMachine(s, procs)
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_DONE and machine.killed == [41]
+
+
+def test_a_run_that_starts_after_the_stop_blocks_the_launch(tmp_path, capsys):
+    """Looked at again just before the launch: runs/long's supervisor is gone, and nothing launches."""
+    s = _settings(tmp_path)
+
+    class Crowded(FakeMachine):
+        def kill_tree(self, pid):
+            super().kill_tree(pid)
+            self.procs.append({"pid": 70, "ppid": 1, "cmdline": PREVIEW})
+
+    machine = Crowded(s, [_supervisor(41)])
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_FAILED
+    err = capsys.readouterr().err
+    assert "pid 70 (blink supervise, runs/long-preview)" in err and "nothing was launched" in err
+    assert machine.runs == [] and not (s.home / "eval" / "p7_finish.json").exists()
+
+
+def test_the_gpu_work_is_every_command_blink_ops_counts_and_every_sweep_action():
+    from blink.ops.launch import GPU_COMMANDS, gpu_command
+
+    for command in GPU_COMMANDS:
+        assert p7_finish.gpu_work([*command, "--run", "x"]) and gpu_command([*command, "--run", "x"])
+    assert p7_finish.gpu_work(["sweep", "sizes", "--resume"]) and p7_finish.gpu_work(["sweep", "choose"])
+    assert not p7_finish.gpu_work(["sweep", "ablations", "--dry-run"]) and not p7_finish.gpu_work(["eval"])
+    assert p7_finish.blink_args([r"C:\venv\Scripts\blink.exe", "sweep", "sizes"]) == ["sweep", "sizes"]
 
 
 class Stubborn(FakeMachine):

@@ -136,6 +136,49 @@ def set_train_string(path: Path, key: str, value: str) -> None:
     write_atomic(path, new)
 
 
+# ---------------------------------------------------------------- blink command lines
+
+BRANCH_FLAGS = ("--from-step", "--preview-cooldown", "--preview-steps", "--preview-name")
+# blink.ops.launch.GPU_COMMANDS (what trains, benches or starts training runs), with every sweep action,
+# as the P6 v2 driver's preflight counts them (a rescore scores on the GPU too)
+GPU_WORK = (("train",), ("supervise",), ("sweep",), ("bench", "throughput"), ("bench", "play"))
+
+
+def blink_args(cmdline: list[str]) -> list[str]:
+    """What follows `-m blink.cli` (or blink.exe) in a command line (blink.ops.launch.blink_args)."""
+    for i, arg in enumerate(cmdline):
+        if re.split(r"[\\/]", arg)[-1].lower() in ("blink.exe", "blink"):
+            return list(cmdline[i + 1 :])
+        if arg == "-m" and cmdline[i + 1 : i + 2] == ["blink.cli"]:
+            return list(cmdline[i + 2 :])
+    return []
+
+
+def flag_value(args: list[str], flag: str) -> str | None:
+    found = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == flag]
+    found += [arg.split("=", 1)[1] for arg in args if arg.startswith(flag + "=")]
+    return found[0] if found else None
+
+
+def served_run(args: list[str]) -> str | None:
+    """The run a blink train or supervise command writes (blink.train.supervise.run_of): a branch
+    writes its --preview-name (else <--run>-preview), anything else its --run."""
+    if args[:1] == ["supervise"]:
+        split = args.index("--") if "--" in args else len(args)
+        return flag_value(args[:split], "--run") or served_run(args[split + 1 :])
+    if args[:1] != ["train"]:
+        return None
+    parent = flag_value(args, "--run")
+    if any(flag_value(args, flag) is not None for flag in BRANCH_FLAGS):
+        return flag_value(args, "--preview-name") or (f"{parent}-preview" if parent else None)
+    return parent
+
+
+def gpu_work(args: list[str]) -> bool:
+    """Whether blink arguments train, bench or start training runs (a dry run does none of these)."""
+    return "--dry-run" not in args and any(tuple(args[: len(c)]) == c for c in GPU_WORK)
+
+
 # ---------------------------------------------------------------- the user pause
 
 

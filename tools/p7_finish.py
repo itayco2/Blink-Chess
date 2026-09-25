@@ -13,8 +13,11 @@ steps, so the 1-sqrt cooldown is the last 20% of c + ceil(c/4) steps and starts 
         --config configs/long.toml --data DATA --from-step c --preview-steps ceil(c/4)
         --preview-name long-final
 
-runs/long is never touched: its checkpoints and logs stay as they are. So that its own supervisor cannot
-resume it beside the branch:
+runs/long is never touched: its checkpoints and logs stay as they are. So that nothing but the branch
+trains once Resume Blink removes the flag:
+- nothing happens while any other Blink process could take the GPU, paused or not: a train, supervise,
+  sweep or benchmark serving another run (a long-preview branch, a sweep arm, a calibration); it is
+  looked for again just before the launch;
 - nothing happens while runs/long trains (a trainer process for it is alive, or its heartbeat says
   running and is fresh): pause it with Pause Blink first;
 - runs/long's supervisor is ended only while it holds no trainer and cannot start one: paused by the user
@@ -30,7 +33,6 @@ P6 v2 driver. Stdlib only (with psutil), like the driver.
 
 import argparse
 import json
-import re
 import sys
 import time
 from dataclasses import dataclass
@@ -43,17 +45,19 @@ from p7_machine import (
     LockHeld,
     StepFailed,
     acquire_lock,
+    blink_args,
     checkpoint_steps,
     flag_path,
+    gpu_work,
     read_rows,
     release_lock,
     run_state,
+    served_run,
     train_table,
     write_atomic,
 )
 
 EXIT_DONE, EXIT_FAILED, EXIT_REFUSED = 0, 1, 2
-BRANCH_FLAGS = ("--from-step", "--preview-cooldown", "--preview-steps", "--preview-name")
 LIVE_S = 120.0  # a heartbeat this fresh that says "running" means the run trains
 VERIFY_S, VERIFY_POLL_S = 120.0, 5.0  # the branch's supervisor must have written its first record by then
 
@@ -139,37 +143,7 @@ def plan_finish(s: Settings) -> dict[str, Any]:
             "args": args, "command": "python -m blink.cli " + " ".join(args)}  # fmt: skip
 
 
-# ---------------------------------------------------------------- runs/long's own processes
-
-
-def blink_args(cmdline: list[str]) -> list[str]:
-    """What follows `-m blink.cli` (or blink.exe) in a command line (blink.ops.launch.blink_args)."""
-    for i, arg in enumerate(cmdline):
-        if re.split(r"[\\/]", arg)[-1].lower() in ("blink.exe", "blink"):
-            return list(cmdline[i + 1 :])
-        if arg == "-m" and cmdline[i + 1 : i + 2] == ["blink.cli"]:
-            return list(cmdline[i + 2 :])
-    return []
-
-
-def flag_value(args: list[str], flag: str) -> str | None:
-    found = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg == flag]
-    found += [arg.split("=", 1)[1] for arg in args if arg.startswith(flag + "=")]
-    return found[0] if found else None
-
-
-def served_run(args: list[str]) -> str | None:
-    """The run a blink train or supervise command writes (blink.train.supervise.run_of): a branch
-    writes its --preview-name (else <--run>-preview), anything else its --run."""
-    if args[:1] == ["supervise"]:
-        split = args.index("--") if "--" in args else len(args)
-        return flag_value(args[:split], "--run") or served_run(args[split + 1 :])
-    if args[:1] != ["train"]:
-        return None
-    parent = flag_value(args, "--run")
-    if any(flag_value(args, flag) is not None for flag in BRANCH_FLAGS):
-        return flag_value(args, "--preview-name") or (f"{parent}-preview" if parent else None)
-    return parent
+# ---------------------------------------------------------------- runs/long's own processes, and the others
 
 
 def run_processes(host, run: str) -> tuple[list[dict], list[dict]]:
@@ -181,6 +155,38 @@ def run_processes(host, run: str) -> tuple[list[dict], list[dict]]:
             continue
         (trainers if args[0] == "train" else supervisors).append(proc)
     return trainers, supervisors
+
+
+def own_tree(procs: list[dict], run: str) -> set[int]:
+    """The pids that serve `run` (its trainers and supervisors, whatever their parents) and their
+    descendants."""
+    own = {proc["pid"] for proc in procs if served_run(blink_args(list(proc.get("cmdline") or []))) == run}
+    while grown := {proc["pid"] for proc in procs if proc.get("ppid") in own} - own:
+        own |= grown
+    return own
+
+
+def other_gpu_work(s: Settings, host) -> list[str]:
+    """Every other Blink process that trains, benches or starts training runs (p7_machine.GPU_WORK), paused
+    or not: once Resume Blink removes the flag it would train beside long-final. runs/long's own tree and
+    dry runs are not counted."""
+    procs = host.processes()
+    own, found = own_tree(procs, s.run), []
+    for proc in procs:
+        args = blink_args(list(proc.get("cmdline") or []))
+        if proc["pid"] in own or not gpu_work(args):
+            continue
+        run, command = served_run(args), " ".join(arg for arg in args[:2] if not arg.startswith("-"))
+        found.append(f"pid {proc['pid']} (blink {command}{f', runs/{run}' if run else ''})")
+    return found
+
+
+def refuse_other_gpu_work(s: Settings, host, step: str, after: str = "") -> None:
+    """StepFailed while anything but runs/long could take the GPU: the finish puts one run on it."""
+    others = other_gpu_work(s, host)
+    if others:
+        what = f"{', '.join(others)}: another Blink run could take the GPU beside runs/{s.branch}"
+        raise StepFailed(step, f"{what}{after}; end it or let it finish, then run p7_finish again")
 
 
 def stoppable(s: Settings, host) -> list[int]:
@@ -262,6 +268,7 @@ def stop_supervisor(s: Settings, host) -> list[int]:
 def finish(s: Settings, host) -> int:
     try:
         plan = plan_finish(s)
+        refuse_other_gpu_work(s, host, "finish")
         pids = stoppable(s, host)
     except StepFailed as exc:
         print(f"p7_finish: refused: {exc.detail}", file=sys.stderr)
@@ -272,6 +279,8 @@ def finish(s: Settings, host) -> int:
         return EXIT_DONE
     try:
         pids = stop_supervisor(s, host)
+        stopped = f" (runs/{s.run}'s supervisor {pids} was stopped)" if pids else ""
+        refuse_other_gpu_work(s, host, "launch", f"{stopped}: nothing was launched")
     except StepFailed as exc:
         print(f"p7_finish: {'refused' if exc.step == 'finish' else 'failed'}: {exc.detail}", file=sys.stderr)
         return EXIT_REFUSED if exc.step == "finish" else EXIT_FAILED
