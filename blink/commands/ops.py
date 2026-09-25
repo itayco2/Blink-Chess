@@ -194,12 +194,15 @@ def _supervise_config(args: argparse.Namespace):
 
 
 def cmd_supervise(args: argparse.Namespace) -> int:
-    from blink.train import status, supervise, userpause
+    from blink.train import finished, status, supervise, userpause
 
     try:
         run = supervise.run_of(_rest(args.train_args), args.run)
         if not status.valid_run_name(run):
             raise ValueError(f"bad run name {run!r} (letters, digits, _ - . only)")
+        closed = finished.refusal(paths.home() / "runs" / run)  # PR-6's finish closed it
+        if closed:
+            raise ValueError(closed)
         cfg, throughput = _supervise_config(args)
         argv = supervise.child_argv(supervise.train_argv(_rest(args.train_args), run))
     except (FileNotFoundError, ValueError) as exc:

@@ -31,7 +31,7 @@ from pathlib import Path
 from blink import paths
 from blink.commands import train_data
 from blink.model.config import TrainConfig, config_from_dict, load_config
-from blink.train import status, userpause
+from blink.train import finished, status, userpause
 
 EXIT_REFUSED = 2
 CommandError = train_data.CommandError
@@ -91,6 +91,9 @@ def _check_flags(args: argparse.Namespace) -> None:
     _check_branch_flags(args)
     if not _is_branch(args) and args.config is None:
         raise CommandError("--config is required (a preview takes its config from the checkpoint)")
+    closed = finished.refusal(paths.home() / "runs" / (_branch_name(args) if _is_branch(args) else args.run))
+    if closed:
+        raise CommandError(closed)
 
 
 def _branch_point(args: argparse.Namespace, record: dict, name: str) -> Path:
