@@ -55,6 +55,20 @@ def test_the_endgame_screen_stop_reads_its_output_the_same_way(tmp_path, monkeyp
     assert fake.calls[0][1]["errors"] == "backslashreplace"
 
 
+def test_only_a_command_run_for_a_resumer_carries_the_resumer_variable(tmp_path, monkeypatch):
+    """The driver's calibration gets BLINK_PAUSE_RESUMER=1; nothing else does, even when the driver's own
+    environment has it (a supervisor sets its own for its trainer)."""
+    fake = Recorded("")
+    monkeypatch.setattr(p7_machine.subprocess, "run", fake)
+    monkeypatch.setenv(p7_machine.RESUMER_ENV, "1")
+    host = _host(tmp_path)
+    host.run("calibrate", ["train", "calibrate"], env={p7_machine.RESUMER_ENV: "1"})
+    host.run("leg1", ["supervise", "--", "train"])
+    calibrate, leg1 = (kwargs["env"] for _, kwargs in fake.calls)
+    assert calibrate[p7_machine.RESUMER_ENV] == "1" and p7_machine.RESUMER_ENV not in leg1
+    assert calibrate["BLINK_HOME"] == leg1["BLINK_HOME"] == str(tmp_path)
+
+
 # ---------------------------------------------------------------- the lock
 
 

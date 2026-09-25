@@ -22,6 +22,7 @@ import psutil
 PAUSE_FLAG = "PAUSE"  # blink.train.userpause.FLAG_NAME: BLINK_HOME/PAUSE, the Pause Blink button's flag
 PAUSED_USER = "paused: user"  # blink.train.userpause.PAUSED_USER
 EXIT_USER_PAUSE = 75  # blink.train.supervise.EXIT_USER_PAUSE: `blink train (calibrate)` let go for the flag
+RESUMER_ENV = "BLINK_PAUSE_RESUMER"  # blink.train.userpause.RESUMER_ENV: "1" lets a trainer stop mid-run
 PAUSE_POLL_S = 30.0  # how often a paused tool looks for the flag again
 CHECKPOINT = re.compile(r"^ckpt_(\d+)\.pt$")
 KEEPER = "keep_training_priority.ps1"
@@ -235,12 +236,15 @@ class Host:
         self.repo, self.python, self.home, self.logs = Path(repo), Path(python), Path(home), Path(logs)
         self.env = {**os.environ, "BLINK_HOME": str(home), "PYTHONUTF8": "1"}
 
-    def run(self, step: str, blink_args: list[str]) -> tuple[int, str]:
-        """`python -m blink.cli ARGS` from the repo; stdout and stderr go to logs/p7v2-<step>.out|err."""
+    def run(self, step: str, blink_args: list[str], env: dict[str, str] | None = None) -> tuple[int, str]:
+        """`python -m blink.cli ARGS` from the repo, with `env` added to its environment; stdout and
+        stderr go to logs/p7v2-<step>.out|err. An inherited RESUMER_ENV is dropped: only a command whose
+        caller reruns it after a user pause (the calibration) is told so."""
         out_path, err_path = self.logs / f"p7v2-{step}.out", self.logs / f"p7v2-{step}.err"
         argv = [str(self.python), "-m", "blink.cli", *blink_args]
+        child_env = {**{k: v for k, v in self.env.items() if k != RESUMER_ENV}, **(env or {})}
         with open(out_path, "w", encoding="utf-8") as out, open(err_path, "w", encoding="utf-8") as err:
-            code = subprocess.run(argv, cwd=self.repo, env=self.env, stdout=out, stderr=err).returncode
+            code = subprocess.run(argv, cwd=self.repo, env=child_env, stdout=out, stderr=err).returncode
         return code, out_path.read_text(encoding="utf-8", errors="replace")
 
     def powershell(self, query: str) -> list[str]:

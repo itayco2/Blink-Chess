@@ -308,6 +308,7 @@ class FakeHost:
                         "command_lines": [], "calibrate_codes": [], "resumed": "running",
                         "resumed_step": None, "on_sleep": None, "on_run": None, **options}  # fmt: skip
         self.log: list[tuple] = []  # every call and event, in order
+        self.envs: list[tuple[str, dict]] = []  # (step, the variables the driver added for it)
         self.now = 1_800_000_000.0  # the fake clock: sleeps advance it
 
     def clock(self) -> float:
@@ -322,8 +323,9 @@ class FakeHost:
     def reference(self) -> str:
         return driver.train_table(self.s.config_path)["vaa_reference"]
 
-    def run(self, step: str, args: list[str]) -> tuple[int, str]:
+    def run(self, step: str, args: list[str], env: dict | None = None) -> tuple[int, str]:
         self.log.append(("run", step, list(args), self.reference()))
+        self.envs.append((step, dict(env or {})))
         if self.options["raise_in"] == step:
             raise OSError(f"disk gone in {step}")
         answer = getattr(self, "_" + step.replace("-", "_"))(args)

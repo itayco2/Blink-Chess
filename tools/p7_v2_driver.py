@@ -25,9 +25,11 @@ counted toward a timeout. The supervised steps wait out a pause inside `blink su
 1. calibrate (PR-5): the endgame screen is stopped (PR-4: never during a calibration), then `blink
    train calibrate --config configs/long.toml --steps 2000 --write` measures R_true and writes
    long.toml's steps = floor(120 x 3600 x R_true / 1024). The driver reads R_true from its output
-   and checks those steps; it fails clearly when the command is missing. A user pause inside the
-   calibration (it exits 75, or its calibration.json or metrics rows show a pause or restart) is never
-   used: the driver waits for Resume and calibrates again as a fresh run.
+   and checks those steps; it fails clearly when the command is missing. The calibration runs with
+   BLINK_PAUSE_RESUMER=1 (this driver reruns a paused one), so Pause Blink stops it at its next step and
+   frees the GPU. A user pause inside the calibration (it exits 75, or its calibration.json or metrics
+   rows show a pause or restart) is never used: the driver waits for Resume and calibrates again as a
+   fresh run.
 2. plan: size-m is PR-2's literal 59,126-step M run (adopted 2026-09-25: "branched from the flagship at
    step 47,301"), cooling down over round(0.2 x 59,126) = 11,825 steps from 47,301
    (blink.train.schedule), whatever R_true is. 6 h at R_true, floor(6 x 3600 x R_true / 1024) steps
@@ -82,6 +84,7 @@ from p7_machine import (  # noqa: F401 - the tests and p7_finish read these from
     EXIT_USER_PAUSE,
     KEEPER,
     PAUSED_USER,
+    RESUMER_ENV,
     Host,
     LockHeld,
     StepFailed,
@@ -444,7 +447,7 @@ def run_calibration(s: Settings, host) -> tuple[float, float]:
     for attempt in range(1, MAX_CALIBRATIONS + 1):
         begin(s, host, "calibrate", f"attempt {attempt}" if attempt > 1 else "")
         host.stop_endgame_screen()  # PR-4: the screen never runs during a calibration
-        code, out = host.run("calibrate", args)
+        code, out = host.run("calibrate", args, env={RESUMER_ENV: "1"})  # this loop reruns a paused one
         if calibration_paused(s, code, out):
             why = "a user pause landed inside the calibration, which is never used: a fresh one runs"
             status(s, PAUSED_USER, "calibrate", f"{why} once Blink is resumed")

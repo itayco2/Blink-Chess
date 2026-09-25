@@ -34,6 +34,7 @@ def test_the_constants_are_blink_s_own():
 
     assert p7_machine.PAUSED_USER == userpause.PAUSED_USER and p7_machine.PAUSE_FLAG == userpause.FLAG_NAME
     assert p7_machine.EXIT_USER_PAUSE == supervise.EXIT_USER_PAUSE
+    assert p7_machine.RESUMER_ENV == userpause.RESUMER_ENV
 
 
 def test_nothing_starts_while_the_pause_flag_is_up(tmp_path):
@@ -75,6 +76,17 @@ def test_a_calibration_paused_by_the_user_is_never_used_and_a_fresh_one_runs(tmp
     assert all(status["step"] == "calibrate" and status["state"] == "paused: user" for status in seen)
     assert "never used" in seen[0]["detail"] or "Resume Blink" in seen[0]["detail"]
     assert driver.load_state(s)["rate"] == pytest.approx(2621.3)
+
+
+def test_the_driver_tells_only_its_calibration_that_it_reruns_one_the_user_paused(tmp_path):
+    """`blink train calibrate` stops for the Pause button (freeing the GPU) only when its caller says it
+    reruns a paused calibration (userpause.RESUMER_ENV); run by hand it trains on through the flag."""
+    s = _settings(tmp_path)
+    host = FakeHost(s, calibrate_codes=[75, 0])
+    assert driver.drive(s, host) == driver.EXIT_DONE
+    envs = dict(host.envs)
+    assert [env for step, env in host.envs if step == "calibrate"] == [{p7_machine.RESUMER_ENV: "1"}] * 2
+    assert all(env == {} for step, env in envs.items() if step != "calibrate")
 
 
 class RowsHost(FakeHost):
