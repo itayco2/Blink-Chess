@@ -213,16 +213,19 @@ def stoppable(s: Settings, host) -> list[int]:
 
 def describe(s: Settings, plan: dict[str, Any], pids: list[int]) -> list[str]:
     c, k = plan["at_step"], plan["cooldown_steps"]
-    stop = "would stop" if s.dry_run else "stops"
+    stop = f"  runs/{s.run} has no supervisor left to stop"
+    if pids:
+        verb = "would stop" if s.dry_run else "stops"
+        stop = (
+            f"  {verb} runs/{s.run}'s supervisor (pid {', '.join(map(str, pids))}): paused by the user, it "
+        )
+        stop += "holds no trainer"
     lines = [
         f"PR-6 finish of runs/{s.run}: the final cooldown branches at step {c:,} as runs/{s.branch}",
         f"  {k:,} cooldown steps (ceil(c/4)): the 1-sqrt cooldown is the last 20% of {c + k:,} steps",
         f"  runs/{s.run} has {plan['training_hours']:.1f} training hours up to step {c:,}; {s.config}'s "
         f"upper bound is {plan['upper_bound_steps']:,} steps",
-        f"  {stop} runs/{s.run}'s supervisor (pid {', '.join(map(str, pids))}): paused by the user, it holds "
-        "no trainer"
-        if pids
-        else f"  runs/{s.run} has no supervisor left to stop",
+        stop,
         f"  {plan['command']}",
     ]
     if flag_path(s.home).exists():
@@ -243,6 +246,19 @@ def branch_started(s: Settings, host, launched_at: float) -> bool:
         host.sleep(VERIFY_POLL_S)
 
 
+def stop_supervisor(s: Settings, host) -> list[int]:
+    """End runs/long's supervisor, looked at again just before (Itay may have resumed since the first
+    look); StepFailed when anything of runs/long is still there afterwards, so nothing launches."""
+    pids = stoppable(s, host)
+    for pid in pids:
+        host.kill_tree(pid)
+    left = [proc["pid"] for group in run_processes(host, s.run) for proc in group]
+    if left:
+        raise StepFailed("stop", f"runs/{s.run}'s processes {left} are still there after the stop: nothing "
+                                 "was launched")  # fmt: skip
+    return pids
+
+
 def finish(s: Settings, host) -> int:
     try:
         plan = plan_finish(s)
@@ -254,8 +270,11 @@ def finish(s: Settings, host) -> int:
         print(line)
     if s.dry_run:
         return EXIT_DONE
-    for pid in pids:
-        host.kill_tree(pid)
+    try:
+        pids = stop_supervisor(s, host)
+    except StepFailed as exc:
+        print(f"p7_finish: {'refused' if exc.step == 'finish' else 'failed'}: {exc.detail}", file=sys.stderr)
+        return EXIT_REFUSED if exc.step == "finish" else EXIT_FAILED
     record = {"rule": "PR-6 (EVAL.md section 5): the final 20% 1-sqrt cooldown from the current step",
               "run": s.run, "branch": s.branch, **{k: v for k, v in plan.items() if k != "args"},
               "stopped_supervisor": pids, "time": time.strftime("%Y-%m-%dT%H:%M:%S"),

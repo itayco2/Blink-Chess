@@ -45,7 +45,11 @@ class FakeMachine:
         return [p for p in self.procs if p["pid"] not in self.killed]
 
     def kill_tree(self, pid):
-        self.killed.append(pid)
+        """The process and every descendant, as psutil ends them."""
+        doomed = {pid}
+        while grown := {p["pid"] for p in self.procs if p.get("ppid") in doomed} - doomed:
+            doomed |= grown
+        self.killed.extend(sorted(doomed - set(self.killed)))
 
     def run(self, step, args):
         self.runs.append((step, list(args)))
@@ -129,7 +133,7 @@ def test_finish_branches_the_final_cooldown_from_the_step_the_pause_left(tmp_pat
         s, [_supervisor(41), _supervisor(42, ppid=41), {"pid": 9, "ppid": 1, "cmdline": SIZE_M}]
     )
     assert p7_finish.finish(s, machine) == p7_finish.EXIT_DONE
-    assert machine.killed == [41]  # the venv launcher's tree: its python child goes with it
+    assert machine.killed == [41, 42]  # the venv launcher's tree: its python child goes with it
     step, args = machine.runs[0]
     branch = ["train", "--run", "long", "--config", "configs/long.toml", "--data", str(s.data), "--from-step",
               str(C), "--preview-steps", str(K), "--preview-name", "long-final"]  # fmt: skip
@@ -256,3 +260,35 @@ def test_the_command_line_defaults_and_the_dry_run_flag():
     )
     assert s.data == Path(r"D:\blink") / "data" / "v1" and s.launch_name == "p7-long-final"
     assert sys.modules["p7_finish"] is p7_finish
+
+
+class Stubborn(FakeMachine):
+    """A supervisor that outlives kill_tree (or one that another process restarted at once)."""
+
+    def kill_tree(self, pid):
+        self.killed.append(-pid)
+
+
+def test_nothing_launches_while_runs_long_s_supervisor_is_still_there_after_the_stop(tmp_path, capsys):
+    s = _settings(tmp_path)
+    machine = Stubborn(s, [_supervisor(41)])
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_FAILED
+    assert machine.runs == [] and "still" in capsys.readouterr().err
+
+
+def test_the_stop_is_checked_again_just_before_it_happens(tmp_path, capsys):
+    """Itay resumes between the look and the stop: the supervisor starts a trainer, so nothing is killed."""
+    s = _settings(tmp_path)
+
+    class Resumed(FakeMachine):
+        def processes(self):
+            if self.looks:
+                (self.s.home / "PAUSE").unlink(missing_ok=True)
+                self.procs.append({"pid": 50, "ppid": 41, "cmdline": TRAINER})
+            self.looks += 1
+            return super().processes()
+
+    machine = Resumed(s, [_supervisor(41)])
+    machine.looks = 0
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_REFUSED
+    assert machine.killed == [] and machine.runs == [] and "is training" in capsys.readouterr().err
