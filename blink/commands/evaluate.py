@@ -306,16 +306,34 @@ def _screen_fallback(args: argparse.Namespace, screen, confirm) -> tuple[endgame
 
 def _endgames_refusal(source: str, out: Path) -> str | None:
     """Why this screen may not write into `out`: endgames.epd never replaces the fallback's sets, and the
-    fallback writes only where endgames.epd's declaration is recorded (or where nothing is yet)."""
-    branch = endgames.recorded_branch(out)
-    if source == "epd" and branch == "fallback":
+    fallback writes only where endgames.epd's declaration is recorded, which its endgames.json then keeps."""
+    if source == "epd" and endgames.recorded_branch(out) == "fallback":
         return f"{out} holds the fallback source's sets (PR-4); screen endgames.epd into another --out"
-    if source == "fallback" and endgames.has_summary(out) and branch not in ("epd-declared", "fallback"):
+    if source == "fallback" and endgames.declaration_record(out) is None:
         return (
-            f"{out}/endgames.json records no PR-4 declaration: the fallback source is used only after "
-            "endgames.epd is declared unable to supply 700, and only with Itay's OK"
+            f"{out}/endgames.json records no PR-4 declaration by endgames.epd: the fallback source is used "
+            "only after endgames.epd, screened into this --out, is declared unable to supply 700, and only "
+            "with Itay's OK"
         )
     return None
+
+
+def _harness(start: dict) -> dict:
+    """The harness commit read before the first search (the code that screened), and whether HEAD moved
+    before the sets were written (main merged into the checkout mid-screen); None outside a checkout."""
+    from blink.eval import endgame_sources
+
+    end = endgame_sources.harness_commit()
+    moved = None if start["commit"] is None or end["commit"] is None else end["commit"] != start["commit"]
+    return {**start, "head_changed_during_run": moved}
+
+
+def _print_branch(summary: dict) -> None:
+    declared = (summary.get("declared_by") or {}).get("declaration")
+    if declared:
+        print(f"branch {summary['branch']}; follows endgames.epd's declaration: {declared}")
+    else:
+        print(f"branch {summary['branch']}; declaration: {summary['declaration'] or 'none'}")
 
 
 def _cmd_endgames(args: argparse.Namespace) -> int:
@@ -327,6 +345,8 @@ def _cmd_endgames(args: argparse.Namespace) -> int:
         return _fail("blink eval endgames", ValueError(refusal))
     if args.source == "epd" and _missing(args.epd or endgames.epd_path(), "endgame file"):
         return 2
+    harness = endgame_sources.harness_commit()  # before any search: the commit whose code screens
+    carried = {"declared_by": endgames.declaration_record(out)} if args.source == "fallback" else {}
     exe = fastchess.stockfish_exe()
     started = time.perf_counter()
     run = _screen_epd if args.source == "epd" else _screen_fallback
@@ -340,7 +360,7 @@ def _cmd_endgames(args: argparse.Namespace) -> int:
             return _fail("blink eval endgames", exc)
         searched = screen.searched + confirm.searched
         dropped = screen.cache.dropped + confirm.cache.dropped
-    summary = endgames.write_sets(result, out, {**record, "harness": endgame_sources.harness_commit()})
+    summary = endgames.write_sets(result, out, {**record, **carried, "harness": _harness(harness)})
     seconds = time.perf_counter() - started
     print(
         f"screened {result.screened:,} positions: {result.passed_screen} at +5.00 after "
@@ -348,7 +368,7 @@ def _cmd_endgames(args: argparse.Namespace) -> int:
         f"dev {summary['dev']}, final {summary['final']} (sharing {summary['overlap_positions']}); "
         f"{result.repeats_skipped} repeated positions skipped; {searched} new searches in {seconds:.0f} s"
     )
-    print(f"branch {summary['branch']}; declaration: {summary['declaration'] or 'none'}")
+    _print_branch(summary)
     if dropped:
         print(f"{dropped} cache lines cut short by a kill were skipped (their labels were searched again)")
     for game in result.kept:
@@ -616,8 +636,8 @@ def _register_sets(ev_sub: argparse._SubParsersAction) -> None:
         choices=("epd", "fallback"),
         default="epd",
         help="epd: endgames.epd (the plan's set). fallback: PR-4's source from the v1 pack (EVAL.md "
-        "section 5), only after endgames.epd is declared unable to supply 700, with Itay's OK given before "
-        "any conversion game",
+        "section 5), only after endgames.epd, screened into the same --out, is declared unable to supply "
+        "700, with Itay's OK given before any conversion game",
     )
     eg.add_argument("--epd", type=Path, default=None, help="default BLINK_HOME/books/endgames.epd")
     eg.add_argument(

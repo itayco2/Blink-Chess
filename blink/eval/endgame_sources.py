@@ -36,6 +36,7 @@ MAX_MAJORS_AND_MINORS = 6  # lichess's Divider: an endgame has at most 6 queens,
 LICHESS_CP = 500  # the prefilter: at least +5.00 for either side
 FALLBACK_SPLITS = {"dev": "val", "final": "test_grouped"}
 MANIFEST = "manifest.json"
+_GIT = ("git", "--no-optional-locks")
 _MAJOR_AND_MINOR_CODES = np.array(
     [
         *(base + piece - 1 for base in (encode.OWN, encode.OPP) for piece in range(chess.KNIGHT, chess.KING)),
@@ -54,12 +55,14 @@ def _sha256(path: Path) -> str:
 
 def harness_commit(repo: Path | None = None) -> dict:
     """The git commit the harness runs from, and whether tracked files differ from it (None when the
-    package is not in a git checkout)."""
+    package is not in a git checkout). `blink eval endgames` reads it before its first search. Git runs
+    without optional locks: the index is not refreshed, so no index.lock collides with a merge or commit
+    in the same checkout."""
     repo = repo or Path(__file__).resolve().parents[2]
     try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True)
+        head = subprocess.run([*_GIT, "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True)
         status = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo, capture_output=True, text=True
+            [*_GIT, "status", "--porcelain", "--untracked-files=no"], cwd=repo, capture_output=True, text=True
         )
     except OSError:
         return {"commit": None, "dirty": None}

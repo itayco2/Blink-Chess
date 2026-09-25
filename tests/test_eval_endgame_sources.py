@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 
 import chess
 import numpy as np
@@ -121,6 +122,20 @@ def test_the_harness_commit_is_this_checkout_s_head():
     assert len(found["commit"]) == 40 and isinstance(found["dirty"], bool)
 
 
+def test_the_harness_commit_reads_git_without_taking_the_index_lock(monkeypatch):
+    """A plain `git status` may write index.lock and collide with a merge or commit in the same checkout."""
+    commands = []
+
+    def run(argv, **kwargs):
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="c" * 40 + "\n", stderr="")
+
+    monkeypatch.setattr(endgame_sources.subprocess, "run", run)
+    assert endgame_sources.harness_commit()["commit"] == "c" * 40
+    assert any("status" in argv for argv in commands)
+    assert all(argv[:2] == ["git", "--no-optional-locks"] for argv in commands)
+
+
 # ------------------------------------------------------------------------------ `blink eval endgames`
 
 
@@ -152,12 +167,26 @@ def summary_of(out):
     return json.loads((out / "endgames.json").read_text(encoding="utf-8"))
 
 
+def declare(out, tmp_path, monkeypatch):
+    """endgames.epd screened into `out` and declared unable to supply 700 at its look at line 1 (labellers
+    faked by the caller): the record the fallback must find there before it runs."""
+    epd = tmp_path / "declared.epd"
+    epd.write_text(f"{ROOK_WHITE}\n{QUEEN}\n", encoding="utf-8")
+    with monkeypatch.context() as patch:
+        patch.setattr(endgame_looks, "FIRST_LOOKS", (1,))
+        assert cli.main(endgames_args(out, "--epd", str(epd))) == 0
+    declared = summary_of(out)
+    assert declared["branch"] == "epd-declared"
+    return declared
+
+
 def test_the_fallback_runs_only_by_its_flag_and_records_both_sources(pack, tmp_path, monkeypatch, capsys):
     folder, val, test_grouped, _ = pack
     fake_labelers(monkeypatch, tmp_path)
     monkeypatch.setattr(endgames, "DEV_COUNT", 2)
     monkeypatch.setattr(endgames, "WANT", 4)
     out = tmp_path / "out"
+    declare(out, tmp_path, monkeypatch)
     assert cli.main(endgames_args(out, "--source", "fallback", "--data", str(folder))) == 0
     printed = capsys.readouterr().out
     assert "Itay's OK" in printed
@@ -174,6 +203,55 @@ def test_the_fallback_runs_only_by_its_flag_and_records_both_sources(pack, tmp_p
     )
     tg_digest = hashlib.sha256((folder / "test_grouped_roots.bin").read_bytes()).hexdigest()
     assert final["source"]["sha256"] == tg_digest and len(summary["harness"]["commit"]) == 40
+    assert summary["harness"]["head_changed_during_run"] is False
+
+
+def test_the_fallback_keeps_the_declaration_it_follows_in_endgames_json(pack, tmp_path, monkeypatch, capsys):
+    """The fallback's sets replace endgames.epd's in the folder E2b and E8 read, but the looks, sha256,
+    declaration and harness commit that justified the switch stay in its endgames.json, even on a re-run."""
+    folder, *_ = pack
+    fake_labelers(monkeypatch, tmp_path)
+    out = tmp_path / "out"
+    declared = declare(out, tmp_path, monkeypatch)
+    args = endgames_args(out, "--source", "fallback", "--data", str(folder))
+    assert cli.main(args) == 0
+    summary = summary_of(out)
+    assert summary["branch"] == "fallback" and summary["declared_by"] == declared
+    (screen,) = summary["declared_by"]["screens"]
+    epd_digest = hashlib.sha256((tmp_path / "declared.epd").read_bytes()).hexdigest()
+    assert (screen["source"]["kind"], screen["source"]["sha256"]) == ("endgames.epd", epd_digest)
+    assert [look["line"] for look in screen["looks"]] == [1]
+    assert summary["declared_by"]["declaration"].startswith("line 1: 1 kept of 1 screened")
+    assert len(summary["declared_by"]["harness"]["commit"]) == 40
+    assert "follows endgames.epd's declaration: line 1: 1 kept" in capsys.readouterr().out
+    assert cli.main(args) == 0  # a re-run carries endgames.epd's record forward, not the first fallback's
+    assert summary_of(out)["declared_by"] == declared
+
+
+@pytest.mark.parametrize(
+    ("heads", "changed"),
+    [(("a" * 40, "a" * 40), False), (("a" * 40, "b" * 40), True), ((None, None), None)],
+    ids=["unchanged", "merged-mid-run", "no-checkout"],
+)
+def test_the_harness_commit_is_read_before_the_first_search(tmp_path, monkeypatch, heads, changed):
+    """The screen runs for hours from a checkout that main is merged into: endgames.json records the commit
+    read before the first search, and whether HEAD moved before the sets were written."""
+    epd = tmp_path / "e.epd"
+    epd.write_text(f"{ROOK_WHITE}\n{QUEEN}\n", encoding="utf-8")
+    events = []
+    fake_labelers(monkeypatch, tmp_path, calls=events)
+    reads = iter(heads)
+
+    def harness_commit(repo=None):
+        events.append("harness")
+        return {"commit": next(reads), "dirty": False}
+
+    monkeypatch.setattr(endgame_sources, "harness_commit", harness_commit)
+    out = tmp_path / "out"
+    assert cli.main(endgames_args(out, "--epd", str(epd))) == 0
+    assert events[0] == events[-1] == "harness" and events.count("harness") == 2 and len(events) > 2
+    expected = {"commit": heads[0], "dirty": False, "head_changed_during_run": changed}
+    assert summary_of(out)["harness"] == expected
 
 
 def test_without_the_flag_the_screen_reads_endgames_epd_and_records_its_looks(tmp_path, monkeypatch):
@@ -216,17 +294,25 @@ def test_endgames_epd_never_replaces_the_fallbacks_sets(pack, tmp_path, monkeypa
     assert "fallback" in capsys.readouterr().err and summary_of(out) == {"branch": "fallback"}
 
 
-@pytest.mark.parametrize(("recorded", "code"), [("epd", 2), ("epd-declared", 0), (None, 0)])
-def test_the_fallback_needs_endgames_epds_declaration_in_the_folder(
-    pack, tmp_path, monkeypatch, recorded, code
+@pytest.mark.parametrize(
+    "recorded",
+    [None, {"branch": "epd"}, {"branch": "epd-declared"}, {"branch": "fallback"}],
+    ids=["nothing", "epd", "declared-without-its-record", "fallback-without-declared_by"],
+)
+def test_the_fallback_needs_endgames_epds_declaration_recorded_in_the_folder(
+    pack, tmp_path, monkeypatch, capsys, recorded
 ):
     folder, *_ = pack
     fake_labelers(monkeypatch, tmp_path)
     out = tmp_path / "out"
     out.mkdir()
     if recorded is not None:
-        (out / "endgames.json").write_text(json.dumps({"branch": recorded}), encoding="utf-8")
-    assert cli.main(endgames_args(out, "--source", "fallback", "--data", str(folder))) == code
+        (out / "endgames.json").write_text(json.dumps(recorded), encoding="utf-8")
+    assert cli.main(endgames_args(out, "--source", "fallback", "--data", str(folder))) == 2
+    assert "no PR-4 declaration" in capsys.readouterr().err
+    assert sorted(p.name for p in out.iterdir()) == (["endgames.json"] if recorded else [])
+    if recorded is not None:
+        assert summary_of(out) == recorded
 
 
 def test_a_killed_screen_restarts_from_its_cache_and_ends_with_the_same_sets(tmp_path, monkeypatch):

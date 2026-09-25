@@ -17,7 +17,9 @@ PR-4 (EVAL.md section 5) adds looks at lines 1,000, 5,000 and 20,000, then every
 when endgames.epd is declared unable to supply 700 (blink.eval.endgame_looks). endgames.json then also
 records each source and its sha256, the harness commit, the counts at each look, any declaration and the
 branch: "epd" (screening endgames.epd), "epd-declared" (the declaration was made) or "fallback" (PR-4's
-fallback source, blink.eval.endgame_sources: only after the declaration and with Itay's OK).
+fallback source, blink.eval.endgame_sources: only after the declaration and with Itay's OK). The fallback
+writes only where the declaration is recorded, and its endgames.json keeps that epd-declared summary as
+`declared_by`: the looks that justified the switch outlive the sets they replace.
 """
 
 import json
@@ -265,14 +267,36 @@ def screen_record(set_name: str, source: dict, result: ScreenResult, limit: int 
     }
 
 
+def _summary(folder: Path) -> dict | None:
+    path = folder / "endgames.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
 def recorded_branch(folder: Path) -> str | None:
     """The branch the folder's endgames.json records (None without one, or from before branches)."""
-    path = folder / "endgames.json"
-    return json.loads(path.read_text(encoding="utf-8")).get("branch") if path.is_file() else None
+    return (_summary(folder) or {}).get("branch")
 
 
-def has_summary(folder: Path) -> bool:
-    return (folder / "endgames.json").is_file()
+def _declares(summary: object) -> bool:
+    """An epd-declared summary with its declaration and a hashed endgames.epd screen behind it."""
+    if (
+        not isinstance(summary, dict)
+        or summary.get("branch") != "epd-declared"
+        or not summary.get("declaration")
+    ):
+        return False
+    sources = [screen.get("source") or {} for screen in summary.get("screens") or []]
+    return any(source.get("kind") == EPD_NAME and source.get("sha256") for source in sources)
+
+
+def declaration_record(folder: Path) -> dict | None:
+    """endgames.epd's PR-4 declaration as the folder's endgames.json records it: the epd-declared summary
+    itself, or the one a fallback summary carries as `declared_by` (None when neither is there). The
+    fallback carries it forward, so its looks, sha256, declaration and harness commit outlive the sets."""
+    summary = _summary(folder)
+    if summary is not None and summary.get("branch") == "fallback":
+        summary = summary.get("declared_by")
+    return summary if _declares(summary) else None
 
 
 def write_sets(result: ScreenResult, folder: Path, record: dict | None = None) -> dict:
