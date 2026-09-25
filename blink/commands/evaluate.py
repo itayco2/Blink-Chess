@@ -376,6 +376,8 @@ def _run_guarded(prefix: str, action) -> int:
         orchestrate.TrainingLive,
         orchestrate.MachineBusy,
         orchestrate.EpsilonChanged,
+        orchestrate.WeightsChanged,
+        orchestrate.PlayModeChanged,
         FileNotFoundError,
         ValueError,
     ) as exc:

@@ -32,7 +32,8 @@ uncompiled by default: in process (load_evaluator) and under fastchess (blink-uc
 The mode's tag ends every Blink engine name (Blink-value-ship-bf16-compile), so games in two modes are
 never rated as one player; every block report records the mode, and results.json's shipped record says
 which one the rated games used (the Lichess bot must play it). The default mode adds nothing to a name.
-E1's film frames are static training snapshots and stay fp32.
+E1's film frames are static training snapshots and stay fp32. A block run alone into an --out folder whose
+reports were played in another mode is refused before anything runs (E9 would find no Blink in E5's games).
 """
 
 import datetime
@@ -71,6 +72,8 @@ SMOKE_ORDO_TIMEOUT_S = 120
 CPU_SAMPLE_S = 3.0
 # The blocks after E2b whose Blink plays with the epsilon E2b chose (in process or under fastchess).
 EPSILON_BLOCKS = frozenset({"E3", "E4", "E4b", "E5", "E6", "E7", "E8"})
+# The blocks with no Blink player in the fast mode: E0 (DM-9M and SF only) and E1 (film frames, fp32).
+MODE_FREE_BLOCKS = frozenset({"E0", "E1"})
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,10 @@ class EpsilonChanged(RuntimeError):
 
 class WeightsChanged(RuntimeError):
     """The model's weights file changed after earlier blocks of this run played it."""
+
+
+class PlayModeChanged(RuntimeError):
+    """A report in the --out folder was played in another fast mode than this run plays."""
 
 
 @dataclass(frozen=True)
@@ -288,6 +295,21 @@ def guard_epsilon(block_id: str, results_dir: Path, played: float | None) -> flo
     return now
 
 
+def guard_play_mode(ctx: EvalContext, block_id: str, report: dict) -> dict:
+    """`report`, read from <out>/<block>.json, refused when it was played in another fast mode than `ctx`:
+    its Blink games carry that mode's names. A report without the fields predates the modes (fp32)."""
+    played = {
+        "precision": report.get("precision", fastmode.DEFAULT_PRECISION),
+        "compile": bool(report.get("compile")),
+    }
+    if block_id in MODE_FREE_BLOCKS or played == ctx.play_mode:
+        return report
+    raise PlayModeChanged(
+        f"{block_id}: {Path(ctx.out_dir) / f'{block_id}.json'} was played {fastmode.describe(**played)}, but "
+        f"this run plays {fastmode.describe(**ctx.play_mode)}: pass the mode it recorded, or another --out"
+    )
+
+
 def guard_weights(block_id: str, selector: str, pinned: str | None) -> None:
     """Refuse the block when the weights file no longer hashes to the sha pinned at the run's start: one
     Blink name must be one weights file across the multi-day run (say ship/blink.pt was replaced)."""
@@ -422,6 +444,8 @@ def run_blocks(
     unknown = sorted(set(only or ()) - set(BLOCK_ORDER))
     if unknown:
         raise ValueError(f"unknown blocks {unknown}; the blocks are {', '.join(BLOCK_ORDER)}")
+    for block_id in (b for b in BLOCK_ORDER if b not in ids):  # one --out folder, one fast mode
+        earlier_report(ctx, {}, block_id)
     protocol = check_protocol(ctx.protocol)
     log(game_table(ids, ctx.games))
     pinned = weights_sha(ctx.model)
@@ -464,11 +488,13 @@ def _now() -> str:
 
 def earlier_report(ctx: EvalContext, state: dict, block_id: str) -> dict:
     """A block's report from this run, or from <out>/<block>.json when an earlier run wrote it into the
-    same --out folder (a block run alone); {} when neither exists."""
+    same --out folder (a block run alone), refused when played in another fast mode; {} when neither."""
     if state.get(block_id):
         return state[block_id]
     path = Path(ctx.out_dir) / f"{block_id}.json"
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if not path.is_file():
+        return {}
+    return guard_play_mode(ctx, block_id, json.loads(path.read_text(encoding="utf-8")))
 
 
 def shipped_mode(ctx: EvalContext, state: dict) -> str:

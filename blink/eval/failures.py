@@ -177,18 +177,22 @@ def run_failures(
     """Up to `max_failures` failures, taking the files' games in turn, with class counts. `player` is
     Blink's exact name when `exact`, else a case-insensitive part of it.
 
-    `max_examined` caps the games looked at (a smoke run's bound on Stockfish searches)."""
+    `max_examined` caps the games looked at (a smoke run's bound on Stockfish searches). `blink_games`
+    counts the examined games `player` played in."""
     found: list[Failure] = []
-    examined = 0
+    examined = blink_games = 0
     for path, number, game in in_turn(pgns):
         if len(found) >= max_failures or (max_examined is not None and examined >= max_examined):
             break
         examined += 1
+        if blink_side(game, player, exact) is not None:
+            blink_games += 1
         failure = examine(game, number, path.name, player, labeler, exact)
         if failure is not None:
             found.append(failure)
     return {
         "examined_games": examined,
+        "blink_games": blink_games,
         "failures": [asdict(f) for f in found],
         "classes": dict(Counter(f.failure_class for f in found).most_common()),
         "positions_searched": labeler.searched,
@@ -226,5 +230,10 @@ def e9_block(ctx, state: dict) -> dict:
     with SfLabeler(1_000_000, exe=fastchess.stockfish_exe(), procs=ctx.sf_procs) as labeler:
         result = run_failures(
             pgns, labeler, player=player, max_failures=cap, max_examined=ctx.positions, exact=True
+        )
+    if result["examined_games"] and not result["blink_games"]:  # never "no failures" for games not looked at
+        raise ValueError(
+            f"E9: none of the {result['examined_games']} games examined in E5's anchor PGNs has {player} "
+            "as a side: E5 played another model or fast mode into this --out folder"
         )
     return {**result, "player": player, "source_pgns": [str(p) for p in pgns], "games": 0, "pgns": []}

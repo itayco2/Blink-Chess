@@ -229,3 +229,64 @@ def test_puzzles_refuse_bf16_off_cuda(tmp_path, monkeypatch, capsys):
     argv = ["eval", "puzzles", "--model", "ship", "--device", "cpu", "--precision", "bf16"]
     assert cli.main(argv) == 2
     assert "CUDA only" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------------------ one --out folder, one mode
+# A block run alone reads earlier blocks' reports from the same --out folder. Their games are filed under
+# the names of the mode they were played in, so a report of another fast mode is refused, never read as
+# "no Blink here" (E9 would count 0 failures). A report without the fields predates the modes: fp32.
+
+
+def write_report(out_dir, block, report):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{block}.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_e9_alone_refuses_an_e5_played_in_another_fast_mode_and_names_both(tmp_path, monkeypatch):
+    seen = fake_e9(monkeypatch)
+    e5, _ = e5_report(tmp_path)
+    context = e9_context(tmp_path)  # fp32 uncompiled
+    write_report(context.out_dir, "E5", {**e5, "precision": "fp32", "compile": True})
+    with pytest.raises(orchestrate.PlayModeChanged, match="played fp32 compiled.*run plays fp32:"):
+        failures.e9_block(context, {})
+    assert seen == {}  # nothing was labelled
+    failures.e9_block(e9_context(tmp_path, compile=True), {})
+    assert seen["player"] == "Blink-value-ship-compile"
+
+
+def test_e9_refuses_anchor_games_its_player_never_played_rather_than_find_no_failure(tmp_path, monkeypatch):
+    from test_eval_failures import SHUFFLE, game_pgn, labeler
+
+    from blink.eval import sflabel
+
+    stub = labeler(tmp_path)
+    monkeypatch.setattr(sflabel, "SfLabeler", lambda *args, **kwargs: stub)
+    e5, pgns = e5_report(tmp_path)
+    for path in pgns.values():  # E5's games, filed under the compiled engine's name
+        path.write_text(game_pgn(SHUFFLE, white="Blink-value-ship-compile") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="none of the 2 games.*Blink-value-ship as a side"):
+        failures.e9_block(e9_context(tmp_path), {"E5": e5})
+    found = failures.e9_block(e9_context(tmp_path, compile=True), {"E5": e5})
+    assert found["blink_games"] == 2 and len(found["failures"]) == 2
+
+
+def test_a_run_into_an_out_folder_of_another_fast_mode_refuses_before_any_block(tmp_path):
+    calls = []
+    context = eval_ctx(tmp_path)  # fp32 uncompiled
+    write_report(context.out_dir, "E0", {"precision": "bf16", "compile": True})  # no Blink in E0: any mode
+    write_report(context.out_dir, "E5", {"precision": "bf16", "compile": True})
+    with pytest.raises(orchestrate.PlayModeChanged, match="E5.json was played bf16 compiled"):
+        orchestrate.run_blocks(context, recorder(calls), only=["E9"], runs_root=tmp_path, load=IDLE)
+    assert calls == []
+    orchestrate.run_blocks(
+        context, recorder(calls), only=["E5", "E9"], runs_root=tmp_path, log=lambda s: None, load=IDLE
+    )
+    assert calls == ["E5", "E9"]  # a block run again replaces its report
+
+
+def test_blink_eval_block_says_in_one_line_that_the_folder_holds_another_mode(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BLINK_HOME", str(tmp_path))
+    write_report(tmp_path / "o", "E5", {"final": {}})  # written before the fast modes: fp32 uncompiled
+    argv = ["eval", "block", "E9", "--model", "random", "--device", "cpu", "--out", str(tmp_path / "o")]
+    assert cli.main([*argv, "--mode", "value", "--compile"]) == 2
+    assert "E5.json was played fp32, but this run plays fp32 compiled" in capsys.readouterr().err
