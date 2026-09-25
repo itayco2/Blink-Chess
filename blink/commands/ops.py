@@ -574,6 +574,8 @@ def cmd_sweep_choose(args: argparse.Namespace) -> int:
         _say(
             f"  {size}: {'eligible' if entry['eligible'] else 'out'} ({entry['reason']}), VAA {entry['vaa']}"
         )
+        if entry.get("p99_note"):
+            _say(f"    p99 (reported, not gating): {entry['p99_note']}")
     _say(f"N* = {choice['n_star']} ({choice['reason']})")
     return 0 if choice["n_star"] else 1
 

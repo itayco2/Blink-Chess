@@ -1,11 +1,12 @@
 """Choosing N* after the size sweep (plan P6), by the pre-registered precedence: epoch floor
 (>= 1,658 samples/s, one epoch of training roots in T_long = 96 h) > best 6 h VAA > default M (a best
 VAA within 2 sigma of M's means M; if M fails the floor, the largest passing size). A size must also
-fit the VRAM budget at micro-batch >= 256 and keep value-mode p99 <= 100 ms at L+1 rows.
+fit the VRAM budget at micro-batch >= 256.
 
-The p99 is read only from bench play rows timed in the one play mode the rules name (p99_precision,
-p99_compile; blink.play.fastmode), so a size is judged at the mode Blink will actually play in. The
-defaults, fp32 uncompiled, are the plan's play runtime.
+Latency never changes N* (EVAL.md PR-3): the value-mode p99 at L+1 rows is reported beside each size,
+with a note when it is over p99_ms_max or not measured. The p99 is read only from bench play rows timed
+in the one play mode the rules name (p99_precision, p99_compile; blink.play.fastmode). The defaults,
+fp32 uncompiled, are the plan's play runtime.
 """
 
 import dataclasses
@@ -29,10 +30,10 @@ class ChooseRules:
     train_roots: int = 401_000_000
     root_frac: float = 0.7  # batches mix 70% roots and 30% children
     default: str = "m"
-    p99_ms_max: float = 100.0
+    p99_ms_max: float = 100.0  # reported against, never gating (PR-3)
     p99_rows: int = 219
     p99_concurrency: tuple[int, ...] = (5, 2)
-    p99_precision: str = fastmode.DEFAULT_PRECISION  # the play mode the p99 is judged in
+    p99_precision: str = fastmode.DEFAULT_PRECISION  # the play mode the p99 is read in
     p99_compile: bool = False
     sigma_factor: float = 2.0
 
@@ -76,13 +77,33 @@ def p99_of(bench: Mapping[str, Any], size: str, rules: ChooseRules) -> dict[str,
     return {str(c): found.get(c) for c in rules.p99_concurrency}
 
 
+def p99_note(p99: Mapping[str, float | None], rules: ChooseRules) -> str | None:
+    """Why the p99 misses the bar (not measured in the rules' mode, or over it), or None. Reported only:
+    latency decides the play mode and the match concurrency, never N* (PR-3)."""
+    mode = fastmode.describe(*rules.play_mode)
+    missing = [c for c, v in p99.items() if v is None]
+    over = {c: v for c, v in p99.items() if v is not None and v > rules.p99_ms_max}
+    if missing:
+        return f"value-mode p99 not measured at concurrency {missing} in {mode}"
+    if over:
+        return f"value-mode p99 over {rules.p99_ms_max:.0f} ms in {mode}: {over}"
+    return None
+
+
 def _order(size: str, best: Mapping[str, Mapping]) -> tuple:
     known = SIZE_ORDER.index(size) if size in SIZE_ORDER else len(SIZE_ORDER)
     return known, best.get(size, {}).get("parameters") or 0, size
 
 
-def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: ChooseRules) -> dict[str, Any]:
-    entry: dict[str, Any] = {"vaa": vaa, "p99_ms": dict(p99), "eligible": False, "failed": None}
+def _constraints(row: Mapping | None, vaa: float | None, p99: Mapping, rules: ChooseRules) -> dict[str, Any]:
+    """A size judged on VRAM and the epoch floor, with its p99 reported beside them."""
+    entry: dict[str, Any] = {
+        "vaa": vaa,
+        "p99_ms": dict(p99),
+        "p99_note": p99_note(p99, rules),
+        "eligible": False,
+        "failed": None,
+    }
     if row is None:
         return {**entry, "failed": "vram", "reason": "no measured micro-batch >= 256 fits the VRAM budget"}
     rate = row["samples_per_s"]
@@ -94,18 +115,17 @@ def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: Ch
     if rate < rules.epoch_floor:
         why = f"fails the epoch floor: {rate:,.0f} < {rules.epoch_floor:,.0f} samples/s"
         return {**entry, "failed": "floor", "reason": why}
-    missing = [c for c, v in p99.items() if v is None]
-    over = {c: v for c, v in p99.items() if v is not None and v > rules.p99_ms_max}
-    mode = fastmode.describe(*rules.play_mode)
-    if missing:
-        why = f"value-mode p99 not measured at concurrency {missing} in {mode}"
-        return {**entry, "failed": "p99", "reason": why}
-    if over:
-        why = f"value-mode p99 over {rules.p99_ms_max:.0f} ms in {mode}: {over}"
-        return {**entry, "failed": "p99", "reason": why}
+    return {**entry, "eligible": True, "reason": "passes the epoch floor and VRAM"}
+
+
+def _eligibility(row: Mapping | None, vaa: float | None, p99: Mapping, rules: ChooseRules) -> dict[str, Any]:
+    """The vaa rule's judgement: the constraints, then a 6 h VAA to rank by."""
+    entry = _constraints(row, vaa, p99, rules)
+    if not entry["eligible"]:
+        return entry
     if vaa is None:
-        return {**entry, "failed": "vaa", "reason": "no 6 h VAA"}
-    return {**entry, "eligible": True, "reason": "passes every constraint"}
+        return {**entry, "eligible": False, "failed": "vaa", "reason": "no 6 h VAA"}
+    return {**entry, "reason": "passes every constraint"}
 
 
 def choose(

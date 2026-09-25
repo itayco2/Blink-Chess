@@ -174,17 +174,20 @@ def test_choose_judges_every_size_at_the_configured_play_mode():
     play += _rows("s", 12.0, "bf16", True) + _rows("m", 31.0, "bf16", True) + _rows("m12", 45.0, "bf16", True)
     sizes = {"s": {"vaa": 0.50}, "m": {"vaa": 0.54}, "m12": {"vaa": 0.58}}
     today = nstar.choose(_bench(play), sizes, 0.005, nstar.ChooseRules())
-    assert today["n_star"] == "s" and "in fp32" in today["sizes"]["m"]["reason"]
+    # PR-3: the p99 is reported in the configured mode and never changes N*
+    assert today["n_star"] == "m12" and "in fp32" in today["sizes"]["m"]["p99_note"]
+    assert today["sizes"]["m12"]["p99_ms"] == {"5": 140.0, "2": 140.0}
     fast = nstar.choose(_bench(play), sizes, 0.005, FAST)
     assert fast["n_star"] == "m12" and fast["rules"]["p99_precision"] == "bf16"
     assert fast["sizes"]["m12"]["p99_ms"] == {"5": 45.0, "2": 45.0}
+    assert fast["sizes"]["m12"]["p99_note"] is None
 
 
-def test_the_reason_names_the_mode_that_was_not_measured():
+def test_the_p99_note_names_the_mode_that_was_not_measured():
     choice = nstar.choose(_bench(_rows("m", 40.0)), {"m": {"vaa": 0.5}}, 0.005, FAST)
-    assert (
-        "not measured" in choice["sizes"]["m"]["reason"] and "bf16 compiled" in choice["sizes"]["m"]["reason"]
-    )
+    note = choice["sizes"]["m"]["p99_note"]
+    assert "not measured" in note and "bf16 compiled" in note
+    assert choice["n_star"] == "m"
 
 
 def test_the_rules_default_to_todays_mode_and_the_repo_config_keeps_it():
