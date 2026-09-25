@@ -1,7 +1,8 @@
 """Run status from the files a run writes (torch-free: the dashboard and `blink status` use it).
 
 A run is LIVE when its heartbeat says "running" and is at most 30 s old. `exit_code` is 0 for a live
-healthy run or a finished one, and 1 for a stale, crashed or NaN run.
+healthy run, a finished one, or one paused by the user (blink.train.userpause) whose supervisor still
+beats its heartbeat, and 1 for a stale, crashed or NaN run.
 
 `speed_check` is the P4 speed WARN (a sysmem spill): train-phase samples/s more than 30% below the
 median of the last 10 train rows that were not slow, for 5 minutes of wall time. It warns and never
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from blink import heartbeat
+from blink.train.userpause import FLAG_NAME, PAUSED_USER
 
 LIVE_WITHIN_S = 30
 RUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -98,10 +100,16 @@ def _has_nan(record: dict[str, Any] | None) -> bool:
     return any(isinstance(v, float) and not math.isfinite(v) for v in record.values())
 
 
+def _user_paused(report: RunStatus) -> bool:
+    """Paused by the user with a fresh heartbeat: its supervisor waits for the flag, nothing stalled."""
+    age = report.heartbeat_age_s
+    return report.state == PAUSED_USER and age is not None and age <= LIVE_WITHIN_S
+
+
 def exit_code(report: RunStatus) -> int:
     if _has_nan(report.last_metrics):
         return 1
-    return 0 if report.live or report.state == "finished" else 1
+    return 0 if report.live or report.state == "finished" or _user_paused(report) else 1
 
 
 def format_status(report: RunStatus) -> str:
@@ -110,6 +118,8 @@ def format_status(report: RunStatus) -> str:
         "no heartbeat" if report.heartbeat_age_s is None else f"heartbeat {report.heartbeat_age_s:.0f} s ago"
     )
     lines = [f"{report.name}: {badge}, step {report.step}/{report.steps}, {age}"]
+    if report.state == PAUSED_USER:
+        lines.append(f"  paused by the user: Resume Blink (deleting BLINK_HOME/{FLAG_NAME}) lets it continue")
     if report.last_metrics:
         m = report.last_metrics
         lines.append(

@@ -63,7 +63,7 @@ def _check_flags(args: argparse.Namespace) -> None:
 def _train(args: argparse.Namespace, cfg: TrainConfig, config: Path) -> Path:
     """The calibration run: the real trainer, stopped at --steps. Returns its run directory."""
     from blink.commands.train import pick_device
-    from blink.train import calibrate, loop
+    from blink.train import calibrate, loop, userpause
 
     run = args.run or calibrate.throwaway_name(config)
     steps = args.steps or calibrate.CALIBRATION_STEPS
@@ -80,6 +80,9 @@ def _train(args: argparse.Namespace, cfg: TrainConfig, config: Path) -> Path:
         data=plan.description,
         games10k=plan.games10k,
         mateset=plan.mateset,
+        # waits to start while BLINK_HOME/PAUSE is up and never pauses mid-run (no pause_exits): nothing
+        # resumes a calibration, and R_true must never cover a pause (PR-5)
+        pause_flag=userpause.flag_path(),
     )
     loop.train(trained, spec, plan.source, plan.val, probe=plan.probe)
     return run_dir

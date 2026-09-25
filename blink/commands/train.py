@@ -16,8 +16,11 @@ A v1 pack directory holds train_r*.bin roots, train_c*.bin children, val_roots.b
 and manifest.json (with the rebalancing weights), plus mateset.npz, which the checks score with
 games10k (BLINK_HOME/data/games10k.npy unless --games10k names another); the P1 skeleton layout
 (train_000.bin, val.bin) still works for roots-only configs. `blink status --run NAME` prints the
-run's state and exits 1 when the run is stale, crashed or has a NaN loss. Torch is imported only
-when a command runs, so `blink --help` stays fast and works on the torch-free CI leg.
+run's state and exits 1 when the run is stale, crashed or has a NaN loss. `blink train` honours the
+user pause flag BLINK_HOME/PAUSE (blink.train.userpause): it waits to start while the flag is up, and
+under `blink supervise` (which resumes it) a flag that goes up mid-run checkpoints the step and exits
+with supervise.EXIT_USER_PAUSE (75); run any other way it trains on. Torch is imported only when a
+command runs, so `blink --help` stays fast and works on the torch-free CI leg.
 """
 
 import argparse
@@ -27,7 +30,7 @@ from pathlib import Path
 from blink import paths
 from blink.commands import train_data
 from blink.model.config import TrainConfig, config_from_dict, load_config
-from blink.train import status
+from blink.train import status, userpause
 
 EXIT_REFUSED = 2
 CommandError = train_data.CommandError
@@ -193,6 +196,8 @@ def _spec(args: argparse.Namespace, plan: train_data.DataPlan, branch_from: Path
         preview=is_preview,
         games10k=plan.games10k,
         mateset=plan.mateset,
+        pause_flag=userpause.flag_path(),
+        pause_exits=userpause.resumer_present(),
     )
 
 
@@ -213,6 +218,13 @@ def cmd_train(args: argparse.Namespace) -> int:
     except (CommandError, WorldMismatch, loop.RunExists, FileNotFoundError, ValueError) as exc:
         print(f"blink train: {exc}", file=sys.stderr)
         return EXIT_REFUSED
+    if result.paused:
+        from blink.train.supervise import EXIT_USER_PAUSE
+
+        print(
+            f"{spec.run_dir.name}: {userpause.PAUSED_USER} at step {result.step} ({result.checkpoint.name})"
+        )
+        return EXIT_USER_PAUSE
     state = "finished" if result.step >= cfg.steps else "stopped"
     print(f"{spec.run_dir.name}: {state} at step {result.step} in {result.wall_s:.1f} s")
     return 0

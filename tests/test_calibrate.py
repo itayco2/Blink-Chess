@@ -232,3 +232,22 @@ def test_calibrate_runs_the_real_trainer_on_cuda(home, shards, tmp_path):
     assert cli.main([*argv, "--device", "cuda", "--run", "calib-cuda"]) == 0
     rows = _metrics(home / "runs" / "calib-cuda")
     assert rows[-1]["step"] == 600 and np.isfinite(calibrate.true_rate(rows, 16).samples_per_s)
+
+
+def test_calibrate_waits_for_a_user_pause_to_start_but_never_pauses_mid_run(
+    home, shards, tmp_path, monkeypatch
+):
+    """Nothing resumes a calibration, so it must not exit for BLINK_HOME/PAUSE: it only waits to start while
+    the flag is up (before any metrics row), and R_true never covers a pause."""
+    from blink.train import loop, userpause
+
+    seen = {}
+    monkeypatch.setattr(loop, "train", lambda cfg, spec, *a, **k: seen.update(spec=spec))
+    monkeypatch.setattr(
+        calibrate, "true_rate", lambda *a, **k: (_ for _ in ()).throw(ValueError("stop here"))
+    )
+    config = tmp_path / "long.toml"
+    config.write_text(TINY, encoding="utf-8")
+    argv = ["train", "calibrate", "--config", str(config), "--steps", "600", "--data", str(shards)]
+    cli.main([*argv, "--device", "cpu", "--run", "calib-p"])
+    assert seen["spec"].pause_flag == userpause.flag_path() and seen["spec"].pause_exits is False
