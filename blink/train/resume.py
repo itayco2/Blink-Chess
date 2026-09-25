@@ -6,7 +6,8 @@ which steps are kept for good.
 A resume keeps the checkpoint's LR scale unless it is given one, which replaces it (never multiplies):
 the supervisor repeats --lr-scale 0.5 on every restart after its NaN rollback, and that must stay 0.5.
 `restore` continues a run from its own latest checkpoint; `branch` starts a new run directory from
-another run's checkpoint (the preview cooldown) and leaves that run untouched.
+another run's checkpoint (the preview cooldown) and leaves that run untouched. A restored run keeps the
+checkpoint behind every check row its evals.jsonl holds, whatever its current plan's check steps are.
 """
 
 import json
@@ -115,14 +116,24 @@ def restore(run) -> None:
         changed = sorted(k for k, v in config_to_dict(run.cfg).items() if saved.get(k) != v)
         run.log(f"warning: config differs from the checkpoint in {changed}; resume will not be bitwise")
     _load_into(run, state)
-    run.kept = [int(s) for s in state.get("kept", [])]
     run.last_kept_wall = float(state.get("kept_wall", time.time()))
     run.last_checkpoint = path
     for name in ("metrics.jsonl", "evals.jsonl"):
         telemetry.truncate_after(run_dir / name, run.step)
     film.drop_after(run_dir, run.step)
     run.check_history = _history(run_dir / "evals.jsonl")
+    run.kept = kept_steps(state.get("kept", []), run.check_history)
     run.log(f"resumed from {path.name} at step {run.step}")
+
+
+def kept_steps(kept: list[int], check_history: list[dict[str, Any]]) -> list[int]:
+    """The steps kept for good from here on: the checkpoint's own plus every check row's step.
+
+    The trainer protects the check steps of its current plan only, so a resume whose plan moved (an
+    in-place re-plan of `steps`) or that has no valprobe (no check steps at all) would otherwise prune
+    the checkpoints behind the checks already recorded, the 30% one the preview branches from included.
+    """
+    return sorted({int(step) for step in kept} | {int(row["step"]) for row in check_history})
 
 
 def branch(run, source: Path) -> None:
