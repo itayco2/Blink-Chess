@@ -61,6 +61,97 @@ def test_without_an_executable_a_cache_miss_is_a_clear_error(tmp_path):
         sflabel.SfLabeler(500, cache_path=tmp_path / "c.jsonl").label(START)
 
 
+def test_a_cache_line_cut_short_by_a_kill_is_skipped_and_the_next_label_starts_a_new_line(tmp_path):
+    """taskkill /F can land in the middle of an append: the cut line is counted and searched again when
+    asked for, and every other label still resumes from the cache."""
+    path = tmp_path / "c.jsonl"
+    sflabel.SfLabeler(1000, cache_path=path, analyse=FakeStockfish()).label(START)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write('{"key": "' + START[:20])  # the kill
+    fake = FakeStockfish()
+    again = sflabel.SfLabeler(1000, cache_path=path, analyse=fake)
+    assert (len(again.cache), again.cache.dropped) == (1, 1)
+    assert again.label(START).cp == 30 and again.label(START, "e2e4").cp == -20
+    assert fake.calls == [(START, 1000, "e2e4")]
+    third = sflabel.SfLabeler(1000, cache_path=path, analyse=fake)
+    assert (len(third.cache), third.cache.dropped) == (2, 1) and third.label(START, "e2e4").cp == -20
+    assert len(fake.calls) == 1
+
+
+class InlinePool:
+    """multiprocessing's Pool, run in this process (so a test's fake worker is the one called)."""
+
+    def __init__(self, procs):
+        self.procs = procs
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def imap_unordered(self, func, tasks):
+        return map(func, tasks)
+
+
+class Killed(Exception):
+    pass
+
+
+def _forty_fens():
+    board, fens = chess.Board(), []
+    for first in list(board.legal_moves):
+        board.push(first)
+        fens.append(board.fen())
+        reply = next(iter(board.legal_moves))
+        board.push(reply)
+        fens.append(board.fen())
+        board.pop()
+        board.pop()
+    return fens
+
+
+def test_a_killed_parallel_label_many_resumes_without_searching_a_cached_label_again(tmp_path, monkeypatch):
+    """The screen's parallel path: the parent caches each finished chunk of searches, so a kill loses only
+    the chunks in flight, and a restart hands the workers only what is not cached."""
+    from types import SimpleNamespace
+
+    asked, kill_at = [], [2]
+
+    def worker(task):
+        exe, nodes, requests = task
+        if len(asked) + 1 == kill_at[0]:
+            raise Killed
+        asked.append([fen for fen, _ in requests])
+        return [
+            (sflabel.cache_key(f, m), {"cp": len(f), "mate": None, "depth": 1, "best": None})
+            for f, m in requests
+        ]
+
+    monkeypatch.setattr(sflabel, "_worker", worker)
+    monkeypatch.setattr(
+        sflabel, "mp", SimpleNamespace(get_context=lambda method: SimpleNamespace(Pool=InlinePool))
+    )
+    fens = _forty_fens()
+    requests = [(fen, None) for fen in fens]
+    exe = tmp_path / "stockfish.exe"  # never started: the fake worker answers
+    killed = sflabel.SfLabeler(1000, exe=exe, cache_path=tmp_path / "c.jsonl", procs=2)
+    with pytest.raises(Killed):
+        killed.label_many(requests)
+    first_chunk = asked[0]
+    assert len(first_chunk) == sflabel.CHUNK and len(sflabel.SfCache(tmp_path / "c.jsonl")) == sflabel.CHUNK
+    kill_at[0] = 0
+    restarted = sflabel.SfLabeler(1000, exe=exe, cache_path=tmp_path / "c.jsonl", procs=2)
+    labels = restarted.label_many(requests)
+    again = [fen for chunk in asked[1:] for fen in chunk]
+    assert (
+        sorted(again) == sorted(set(fens) - set(first_chunk))
+        and restarted.searched == len(fens) - sflabel.CHUNK
+    )
+    whole = sflabel.SfLabeler(1000, exe=exe, cache_path=tmp_path / "whole.jsonl", procs=2)
+    assert labels == whole.label_many(requests)
+
+
 SF = fastchess.stockfish_exe()
 
 

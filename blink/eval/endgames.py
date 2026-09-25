@@ -12,6 +12,14 @@ endgames.epd repeats some positions with other move counters (22 of them). A pos
 first time it appears (placement, side to move, castling and en passant; the counters ignored), so no
 position sits in both the dev set, which chooses epsilon, and the final set, which is published.
 endgames.json records the repeats skipped and the dev/final overlap, which E2b and E8 refuse unless 0.
+
+PR-4 (EVAL.md section 5) adds looks at lines 1,000, 5,000 and 20,000, then every 20,000: the screen stops
+when endgames.epd is declared unable to supply 700 (blink.eval.endgame_looks). endgames.json then also
+records each source and its sha256, the harness commit, the counts at each look, any declaration and the
+branch: "epd" (screening endgames.epd), "epd-declared" (the declaration was made) or "fallback" (PR-4's
+fallback source, blink.eval.endgame_sources: only after the declaration and with Itay's OK). The fallback
+writes only where the declaration is recorded, and its endgames.json keeps that epd-declared summary as
+`declared_by`: the looks that justified the switch outlive the sets they replace.
 """
 
 import json
@@ -23,6 +31,7 @@ from pathlib import Path
 import chess
 
 from blink import paths
+from blink.eval.endgame_looks import Look, LookPlan, LookTracker, describe
 from blink.eval.sflabel import SfLabel, SfLabeler
 
 SCREEN_NODES = 1_000_000
@@ -130,14 +139,25 @@ class ScreenResult:
     screened: int
     passed_screen: int  # positions at +5.00 at 1M nodes, each confirmed at 10M
     repeats_skipped: int = 0  # lines holding a position already seen (other move counters)
+    looks: tuple[Look, ...] = ()  # PR-4's looks, when the screen was given a plan
+    declaration: str | None = None  # why the source was declared unable to supply 700 (PR-4), if it was
+    dev_size: int | None = None  # how many of `kept` are the dev set (None: the first DEV_COUNT)
 
     @property
     def dev(self) -> tuple[Endgame, ...]:
-        return self.kept[:DEV_COUNT]
+        return self.kept[: self._dev_size]
 
     @property
     def final(self) -> tuple[Endgame, ...]:
-        return self.kept[DEV_COUNT:WANT]
+        return self.kept[self._dev_size : self._dev_size + WANT - DEV_COUNT]
+
+    @property
+    def _dev_size(self) -> int:
+        return DEV_COUNT if self.dev_size is None else self.dev_size
+
+    @property
+    def complete(self) -> bool:
+        return len(self.dev) == DEV_COUNT and len(self.final) == WANT - DEV_COUNT
 
 
 def _batches(positions: Iterator[tuple[int, str]], size: int) -> Iterator[list[tuple[int, str]]]:
@@ -151,39 +171,68 @@ def _batches(positions: Iterator[tuple[int, str]], size: int) -> Iterator[list[t
         yield batch
 
 
+def _labelled(
+    batch: list[tuple[int, str]], screen_labeler: SfLabeler, confirm_labeler: SfLabeler
+) -> Iterator[tuple[int, str, SfLabel, chess.Color | None, SfLabel | None]]:
+    """(line, fen, 1M-node label, the side at +5.00 or None, its 10M-node label or None) per position:
+    the batch's screens in one label_many call, then its confirms in another."""
+    firsts = screen_labeler.label_many([(fen, None) for _, fen in batch])
+    sides = [winner(label, chess.Board(fen).turn) for label, (_, fen) in zip(firsts, batch, strict=True)]
+    seconds = iter(
+        confirm_labeler.label_many(
+            [(fen, None) for (_, fen), side in zip(batch, sides, strict=True) if side is not None]
+        )
+    )
+    for (line, fen), first, side in zip(batch, firsts, sides, strict=True):
+        yield line, fen, first, side, None if side is None else next(seconds)
+
+
 def screen(
     positions: Iterator[tuple[int, str]],
     screen_labeler: SfLabeler,
     confirm_labeler: SfLabeler,
     want: int = WANT,
     progress: Callable[[int, int], None] | None = None,
+    looks: LookPlan | None = None,
+    on_look: Callable[[Look], None] | None = None,
 ) -> ScreenResult:
     """Screen positions in order until `want` are kept (or the positions run out), a batch at a time so
     the labelers can search on several processes; a position after the `want`-th keep is not counted,
-    and a repeat of a position already seen is skipped."""
+    and a repeat of a position already seen is skipped. With a look plan (PR-4, blink.eval.endgame_looks)
+    each look is taken as its line passes and handed to `on_look`, and a look that declares, or the file
+    ending short of 700 kept, stops the screen with the declaration."""
     kept: list[Endgame] = []
     repeats: list[int] = []
-    screened = passed = 0
+    screened = passed = last_line = 0
+    tracker = LookTracker(looks, on_look) if looks is not None else None
+
+    def result(declaration: str | None = None) -> ScreenResult:
+        taken = tuple(tracker.looks) if tracker else ()
+        return ScreenResult(tuple(kept), screened, passed, len(repeats), taken, declaration)
+
+    def look(line: int) -> str | None:
+        declaring = tracker.reach(line, screened, passed, len(kept)) if tracker else None
+        return describe(declaring) if declaring else None
+
     size = BATCH_PER_PROC * max(screen_labeler.procs, confirm_labeler.procs)
     for batch in _batches(first_sightings(positions, repeats), size):
-        firsts = screen_labeler.label_many([(fen, None) for _, fen in batch])
-        sides = [winner(label, chess.Board(fen).turn) for label, (_, fen) in zip(firsts, batch, strict=True)]
-        seconds = iter(
-            confirm_labeler.label_many(
-                [(fen, None) for (_, fen), side in zip(batch, sides, strict=True) if side is not None]
-            )
-        )
-        for (line, fen), first, side in zip(batch, firsts, sides, strict=True):
-            screened += 1
+        for line, fen, first, side, second in _labelled(batch, screen_labeler, confirm_labeler):
+            declaration = look(line - 1)
+            if declaration:
+                return result(declaration)
+            screened, last_line = screened + 1, line
             if side is not None:
                 passed += 1
-                found = _confirmed(line, fen, first, next(seconds), side)
+                found = _confirmed(line, fen, first, second, side)
                 kept += [found] if found is not None else []
             if progress is not None:
                 progress(screened, len(kept))
-            if len(kept) >= want:
-                return ScreenResult(tuple(kept), screened, passed, len(repeats))
-    return ScreenResult(tuple(kept), screened, passed, len(repeats))
+            declaration = look(line)
+            if declaration or len(kept) >= want:
+                return result(declaration)
+    last_line = max([last_line, *repeats])
+    declaration = look(last_line)
+    return result(declaration or (tracker.ended(last_line, len(kept)) if tracker else None))
 
 
 def _write(path: Path, text: str) -> None:
@@ -192,8 +241,67 @@ def _write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def write_sets(result: ScreenResult, folder: Path) -> dict:
-    """dev.jsonl and final.jsonl (one Endgame per line) and endgames.json with the counts."""
+def combine(dev: ScreenResult, final: ScreenResult) -> ScreenResult:
+    """The fallback's two screens as one result: dev's kept positions, then final's."""
+    return ScreenResult(
+        dev.kept + final.kept,
+        dev.screened + final.screened,
+        dev.passed_screen + final.passed_screen,
+        dev.repeats_skipped + final.repeats_skipped,
+        dev_size=len(dev.kept),
+    )
+
+
+def screen_record(set_name: str, source: dict, result: ScreenResult, limit: int | None) -> dict:
+    """One screen's entry in endgames.json: its source, its counts, its looks and any declaration."""
+    return {
+        "set": set_name,
+        "source": source,
+        "limit": limit,
+        "screened": result.screened,
+        "passed_screen": result.passed_screen,
+        "repeats_skipped": result.repeats_skipped,
+        "kept": len(result.kept),
+        "looks": [asdict(look) for look in result.looks],
+        "declaration": result.declaration,
+    }
+
+
+def _summary(folder: Path) -> dict | None:
+    path = folder / "endgames.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def recorded_branch(folder: Path) -> str | None:
+    """The branch the folder's endgames.json records (None without one, or from before branches)."""
+    return (_summary(folder) or {}).get("branch")
+
+
+def _declares(summary: object) -> bool:
+    """An epd-declared summary with its declaration and a hashed endgames.epd screen behind it."""
+    if (
+        not isinstance(summary, dict)
+        or summary.get("branch") != "epd-declared"
+        or not summary.get("declaration")
+    ):
+        return False
+    sources = [screen.get("source") or {} for screen in summary.get("screens") or []]
+    return any(source.get("kind") == EPD_NAME and source.get("sha256") for source in sources)
+
+
+def declaration_record(folder: Path) -> dict | None:
+    """endgames.epd's PR-4 declaration as the folder's endgames.json records it: the epd-declared summary
+    itself, or the one a fallback summary carries as `declared_by` (None when neither is there). The
+    fallback carries it forward, so its looks, sha256, declaration and harness commit outlive the sets."""
+    summary = _summary(folder)
+    if summary is not None and summary.get("branch") == "fallback":
+        summary = summary.get("declared_by")
+    return summary if _declares(summary) else None
+
+
+def write_sets(result: ScreenResult, folder: Path, record: dict | None = None) -> dict:
+    """dev.jsonl and final.jsonl (one Endgame per line) and endgames.json with the counts, the declaration
+    and `record` (the branch, the sources and the harness commit)."""
     folder.mkdir(parents=True, exist_ok=True)
     for name, rows in (("dev", result.dev), ("final", result.final)):
         _write(folder / f"{name}.jsonl", "".join(json.dumps(asdict(e)) + "\n" for e in rows))
@@ -208,7 +316,9 @@ def write_sets(result: ScreenResult, folder: Path) -> dict:
         "screen_nodes": SCREEN_NODES,
         "confirm_nodes": CONFIRM_NODES,
         "threshold_pawns": THRESHOLD_PAWNS,
-        "complete": len(result.kept) >= WANT,
+        "complete": result.complete,
+        "declaration": result.declaration,
+        **(record or {}),
     }
     _write(folder / "endgames.json", json.dumps(summary, indent=2))
     return summary

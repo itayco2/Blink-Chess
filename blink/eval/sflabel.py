@@ -57,17 +57,33 @@ def cache_key(fen: str, move: chess.Move | str | None) -> str:
 
 
 class SfCache:
-    """(fen, move) -> SfLabel for one node budget, read once, appended line by line."""
+    """(fen, move) -> SfLabel for one node budget, read once, appended line by line.
+
+    A kill (taskkill /F before a measurement) can cut the last append short: that line is skipped and
+    counted in `dropped` (its label is searched again when asked for), and the next append starts on a
+    new line, so every whole line still resumes."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._labels: dict[str, SfLabel] = {}
+        self.dropped = 0  # lines that are not a whole label (cut short by a kill)
+        self._open_line = False  # the file does not end with a newline
         if self.path.is_file():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
+            text = self.path.read_text(encoding="utf-8")
+            self._open_line = bool(text) and not text.endswith("\n")
+            for line in text.splitlines():
                 if line.strip():
-                    row = json.loads(line)
-                    key = row.pop("key")
-                    self._labels[key] = SfLabel(**row)
+                    self._read(line)
+
+    def _read(self, line: str) -> None:
+        try:
+            row = json.loads(line)
+            key = row.pop("key")
+            label = SfLabel(**row)
+        except (json.JSONDecodeError, AttributeError, KeyError, TypeError):
+            self.dropped += 1
+            return
+        self._labels[key] = label
 
     def __len__(self) -> int:
         return len(self._labels)
@@ -78,7 +94,8 @@ class SfCache:
     def put(self, key: str, label: SfLabel) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"key": key, **asdict(label)}) + "\n")
+            handle.write(("\n" if self._open_line else "") + json.dumps({"key": key, **asdict(label)}) + "\n")
+        self._open_line = False
         self._labels[key] = label
 
 
