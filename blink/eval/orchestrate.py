@@ -20,9 +20,8 @@ checks that no move ran long.
 A `games` override makes every match that long (and every SPRT cap), for smoke runs.
 
 SF19 labels (E2's win% regret and mate-preserving searches, E9's failures) run on ctx.sf_procs Stockfish
-processes, one thread each; `blink eval all` passes 5 (P8's CPU budget, blink.commands.evaluate), and a
-block gets 3 at most while Blink trains (blink.eval.sfbudget). The blocks run one at a time, so no
-time-based block runs beside them.
+processes, one thread each: 5 from `blink eval all` (P8's CPU budget), 3 at most while Blink trains
+(blink.eval.sfbudget). The blocks run one at a time, so no time-based block runs beside them.
 
 Blink plays every block after E2b with the epsilon E2b chose (results/epsilon.json), in process and under
 fastchess alike (blink-uci gets it as --epsilon); a block refuses to start if that file changed mid-run.
@@ -54,13 +53,7 @@ import chess.pgn
 import numpy as np
 
 from blink import paths
-from blink.eval.publish import (
-    FINAL_SLICE_LIST,
-    build_results,
-    final_slice_pgns,
-    public_audit,
-    write_pgn_list,
-)
+from blink.eval.publish import FINAL_SLICE_LIST, build_results, final_slice_pgns, public_audit, write_pgn_list
 from blink.eval.sfbudget import budgeted, training_processes
 from blink.play import fastmode
 
