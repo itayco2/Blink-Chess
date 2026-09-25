@@ -10,8 +10,10 @@ steps, so the 1-sqrt cooldown is the last 20% of c + ceil(c/4) steps and starts 
 (`blink train --preview-steps`, blink.train.preview.preview_config):
 
     blink ops launch --name p7-long-final -- supervise --bench-size m -- train --run long
-        --config configs/long.toml --data DATA --from-step c --preview-steps ceil(c/4)
-        --preview-name long-final
+        --data DATA --from-step c --preview-steps ceil(c/4) --preview-name long-final
+
+It names no --config: the branch trains with the config runs/long's checkpoint c holds (blink train
+refuses a --config that differs from it, so a later edit of long.toml would stop the branch).
 
 runs/long is never touched: its checkpoints and logs stay as they are. So that nothing but the branch
 trains once Resume Blink removes the flag:
@@ -25,8 +27,11 @@ trains once Resume Blink removes the flag:
   and one already gone (a stop rule, a reboot) needs nothing;
 - the cooldown must end inside configs/long.toml's steps, PR-5's 120 h upper bound (PR-6).
 The branch is supervised like any run: it waits while the flag is up and trains once Resume Blink removes
-it. The plan goes to <BLINK_HOME>/eval/p7_finish.json: c, the cooldown steps, the total, the training
-hours so far (from runs/long's metrics rows), the time, the command and the supervisor it stopped.
+it. The finish is done once the branch's trainer has written its config.json (blink train accepted the
+command) or, while the flag is up, once its supervisor waits paused by the user; a crash of the trainer,
+an ended supervisor, or neither within 10 minutes fails it. The plan goes to
+<BLINK_HOME>/eval/p7_finish.json: c, the cooldown steps, the total, the training hours so far (from
+runs/long's metrics rows), the time, the command, the supervisor it stopped and how the launch verified.
 `--dry-run` prints all of it and changes nothing. It takes logs/p7v2.lock, so it never runs beside the
 P6 v2 driver. Stdlib only (with psutil), like the driver.
 """
@@ -49,6 +54,7 @@ from p7_machine import (
     checkpoint_steps,
     flag_path,
     gpu_work,
+    read_json_or_empty,
     read_rows,
     release_lock,
     run_state,
@@ -59,7 +65,10 @@ from p7_machine import (
 
 EXIT_DONE, EXIT_FAILED, EXIT_REFUSED = 0, 1, 2
 LIVE_S = 120.0  # a heartbeat this fresh that says "running" means the run trains
-VERIFY_S, VERIFY_POLL_S = 120.0, 5.0  # the branch's supervisor must have written its first record by then
+# the branch's trainer must have written config.json by then (its supervisor, with the flag up, its first
+# record): building an M run from its parent checkpoint takes a minute or two
+VERIFY_S, VERIFY_POLL_S = 600.0, 5.0
+ENDED = ("finished", "stopped", "paused")  # supervisor.json states after which nothing trains
 
 
 @dataclass(frozen=True)
@@ -111,7 +120,7 @@ def training_hours(rows: list[dict[str, Any]], upto: int) -> float:
 
 def launch_args(s: Settings, c: int, k: int) -> list[str]:
     supervise = ["supervise", *(["--bench-size", s.bench_size] if s.bench_size else []), "--"]
-    train = ["train", "--run", s.run, "--config", s.config, "--data", str(s.data), "--from-step", str(c)]
+    train = ["train", "--run", s.run, "--data", str(s.data), "--from-step", str(c)]
     train += ["--preview-steps", str(k), "--preview-name", s.branch]
     return ["ops", "launch", "--name", s.launch_name, "--", *supervise, *train]
 
@@ -239,16 +248,53 @@ def describe(s: Settings, plan: dict[str, Any], pids: list[int]) -> list[str]:
     return lines
 
 
-def branch_started(s: Settings, host, launched_at: float) -> bool:
-    """The branch's supervisor wrote its first record (running, or paused by the user) since the launch."""
+def since(record: dict[str, Any], key: str, launched_at: float) -> bool:
+    return float(record.get(key) or 0) >= launched_at - 1
+
+
+def branch_state(s: Settings, launched_at: float) -> tuple[str | None, str | None]:
+    """(how the launched branch stands, why it failed), each None while it is not known yet.
+
+    The supervisor's first record says running before its child has parsed its arguments, so only the
+    trainer's own config.json (or its running heartbeat) since the launch shows `blink train` accepted
+    the branch. While the flag is up the supervisor starts no trainer: its "paused: user" record is all
+    there is. A crash of the trainer (blink train refusing the command exits 2) or an ended supervisor
+    fails the finish at once."""
+    run_dir = s.runs / s.branch
+    beat, record = run_state(run_dir)
+    config = read_json_or_empty(run_dir / "config.json")
+    if since(config, "created", launched_at) or (
+        beat.get("state") == "running" and since(beat, "time", launched_at)
+    ):
+        return f"runs/{s.branch}'s trainer has started", None
+    if not since(record, "started", launched_at):
+        return None, None
+    crashes = [event for event in record.get("events") or [] if event.get("event") == "crash"]
+    if crashes:
+        return None, f"its trainer exited {crashes[0].get('code')} (blink train refused it or crashed)"
+    if record.get("state") in ENDED:
+        return None, f"its supervisor is {record.get('status') or record.get('state')}"
+    if record.get("state") == PAUSED_USER and flag_path(s.home).exists():
+        return f"runs/{s.branch} waits for Resume Blink; its trainer starts then", None
+    return None, None
+
+
+def branch_started(s: Settings, host, launched_at: float) -> str:
+    """How the branch stands once it is known to train (or to wait for Resume); StepFailed when it
+    failed, or showed neither within VERIFY_S seconds."""
     deadline = host.clock() + VERIFY_S
+    logs = f"logs/{s.launch_name}.err and runs/{s.branch}/supervisor.json"
     while True:
-        _, record = run_state(s.runs / s.branch)
-        fresh = float(record.get("started") or 0) >= launched_at - 1
-        if fresh and record.get("state") in ("running", PAUSED_USER):
-            return True
+        state, failed = branch_state(s, launched_at)
+        if state is not None:
+            return state
+        if failed is not None:
+            raise StepFailed(
+                "verify", f"runs/{s.branch} was launched but does not train: {failed}; see {logs}"
+            )
         if host.clock() >= deadline:
-            return False
+            why = f"no config.json from its trainer in {VERIFY_S / 60:.0f} minutes"
+            raise StepFailed("verify", f"runs/{s.branch} was launched but does not train: {why}; see {logs}")
         host.sleep(VERIFY_POLL_S)
 
 
@@ -298,11 +344,16 @@ def finish(s: Settings, host) -> int:
         return EXIT_FAILED
     record["launched"] = next((line for line in out.splitlines() if line.startswith("launched")), "launched")
     write_atomic(out_path, json.dumps(record, indent=1) + "\n")
-    if not branch_started(s, host, launched_at):
-        print(f"p7_finish: runs/{s.branch}'s supervisor wrote no record: see logs/{s.launch_name}.err",
-              file=sys.stderr)  # fmt: skip
+    try:
+        state = branch_started(s, host, launched_at)
+    except StepFailed as exc:
+        record["verified"] = f"failed: {exc.detail}"
+        write_atomic(out_path, json.dumps(record, indent=1) + "\n")
+        print(f"p7_finish: failed: {exc.detail}", file=sys.stderr)
         return EXIT_FAILED
-    print(f"{record['launched']}; recorded in {out_path}")
+    record["verified"] = state
+    write_atomic(out_path, json.dumps(record, indent=1) + "\n")
+    print(f"{record['launched']}: {state}; recorded in {out_path}")
     return EXIT_DONE
 
 

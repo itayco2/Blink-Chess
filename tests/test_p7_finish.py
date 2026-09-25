@@ -38,9 +38,13 @@ SIZE_M = [*PYTHON, "supervise", "--", "train", "--run", "long", "--from-step", "
 
 
 class FakeMachine:
-    def __init__(self, s, processes=(), launch_code=0) -> None:
+    """`branch` is what the launched branch does once the flag is down: "trains" (its trainer writes
+    config.json), "silent" (its supervisor runs, its trainer writes nothing) or "refused" (blink train
+    exits 2 and the supervisor records the crash). While the flag is up its supervisor waits, paused."""
+
+    def __init__(self, s, processes=(), launch_code=0, branch="trains") -> None:
         self.s, self.procs, self.launch_code = s, [dict(p) for p in processes], launch_code
-        self.killed, self.runs, self.now = [], [], 1_800_000_000.0
+        self.killed, self.runs, self.now, self.branch = [], [], 1_800_000_000.0, branch
 
     def processes(self):
         return [p for p in self.procs if p["pid"] not in self.killed]
@@ -56,7 +60,14 @@ class FakeMachine:
         self.runs.append((step, list(args)))
         branch = self.s.runs / "long-final"
         branch.mkdir(parents=True, exist_ok=True)
-        record = {"state": "paused: user", "status": "paused: user", "started": self.now}
+        record = {"state": "running", "status": "running", "started": self.now, "events": []}
+        if (self.s.home / "PAUSE").exists():
+            record |= {"state": "paused: user", "status": "paused: user"}
+        elif self.branch == "trains":
+            config = {"run": "long-final", "created": self.now + 40, "config": {}}
+            (branch / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        elif self.branch == "refused":
+            record["events"] = [{"time": self.now + 20, "event": "crash", "code": 2, "restart": 1}]
         (branch / "supervisor.json").write_text(json.dumps(record), encoding="utf-8")
         return self.launch_code, "launched p7-long-final: pid 77 (cmd.exe), python [78]\n"
 
@@ -134,8 +145,9 @@ def test_finish_branches_the_final_cooldown_from_the_step_the_pause_left(tmp_pat
     assert p7_finish.finish(s, machine) == p7_finish.EXIT_DONE
     assert machine.killed == [41, 42]  # the venv launcher's tree: its python child goes with it
     step, args = machine.runs[0]
-    branch = ["train", "--run", "long", "--config", "configs/long.toml", "--data", str(s.data), "--from-step",
-              str(C), "--preview-steps", str(K), "--preview-name", "long-final"]  # fmt: skip
+    # no --config: the branch trains with the config runs/long's checkpoint holds
+    branch = ["train", "--run", "long", "--data", str(s.data), "--from-step", str(C), "--preview-steps",
+              str(K), "--preview-name", "long-final"]  # fmt: skip
     launch = ["ops", "launch", "--name", "p7-long-final", "--", "supervise", "--bench-size", "m", "--"]
     assert args == [*launch, *branch]
     record = _record(s)
@@ -146,6 +158,32 @@ def test_finish_branches_the_final_cooldown_from_the_step_the_pause_left(tmp_pat
     assert record["training_hours"] == pytest.approx((C // 1000 - 1) * 360.0 / 3600)
     assert record["run"] == "long" and record["branch"] == "long-final" and "time" in record
     assert "Resume Blink" in capsys.readouterr().out  # the branch waits for the flag like any run
+
+
+def test_with_the_flag_down_the_finish_is_done_once_long_final_s_trainer_has_written_its_config(tmp_path):
+    _home(tmp_path, supervisor_state="stopped", flag=False)
+    s = _settings(tmp_path)
+    assert p7_finish.finish(s, FakeMachine(s, [], branch="trains")) == p7_finish.EXIT_DONE
+
+
+def test_a_branch_whose_trainer_never_starts_is_a_failed_finish_not_a_launched_one(tmp_path, capsys):
+    """The supervisor's first record says running before its child parsed its arguments: with the flag
+    down only the trainer's config.json shows the branch was accepted."""
+    _home(tmp_path, supervisor_state="stopped", flag=False)
+    s = _settings(tmp_path)
+    machine = FakeMachine(s, [], branch="silent")
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_FAILED
+    err = capsys.readouterr().err
+    assert "long-final" in err and "config.json" in err and "recorded" not in err
+    assert machine.now - 1_800_000_000.0 >= p7_finish.VERIFY_S
+
+
+def test_a_branch_whose_train_command_is_refused_fails_at_its_first_crash(tmp_path, capsys):
+    _home(tmp_path, supervisor_state="stopped", flag=False)
+    s = _settings(tmp_path)
+    machine = FakeMachine(s, [], branch="refused")
+    assert p7_finish.finish(s, machine) == p7_finish.EXIT_FAILED
+    assert "exited 2" in capsys.readouterr().err and machine.now - 1_800_000_000.0 < 60
 
 
 def test_at_step_names_a_checkpoint_or_the_finish_refuses(tmp_path):
