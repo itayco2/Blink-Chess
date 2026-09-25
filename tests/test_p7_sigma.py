@@ -55,6 +55,21 @@ def test_a_value_rounded_to_its_printed_digits_is_accepted(tmp_path):
         driver.check_sigma(s)
 
 
+@pytest.mark.parametrize("literal", ["0", "0.0", "0.00", "0.002", "-0.0016023", "0.0016023e0"])
+def test_a_zero_negative_or_coarsely_printed_vaa_sigma_is_refused(tmp_path, literal):
+    """0 would fail the flagship's 25% and 50% checks on any noise dip (ema_vaa >= previous - 2 sigma), and
+    '0.002' is sigma_EMA only to one digit: the literal must be positive and printed to within 5% of it."""
+    s = _settings(tmp_path)
+    text = s.config_path.read_text(encoding="utf-8")
+    old = next(line for line in text.splitlines() if line.startswith("vaa_sigma ="))
+    s.config_path.write_text(text.replace(old, f"vaa_sigma = {literal}"), encoding="utf-8")
+    if literal == "0.0016023e0":  # the same value in another spelling, printed as precisely: accepted
+        assert driver.check_sigma(s)["long_toml"] == pytest.approx(SIGMA, abs=5e-8)
+        return
+    with pytest.raises(driver.StepFailed, match="not sigma_EMA"):
+        driver.check_sigma(s)
+
+
 def test_unfinished_seeds_refuse_the_check_rather_than_skip_it(tmp_path):
     s = _settings(tmp_path)
     path = s.home / "eval" / "ablations.json"

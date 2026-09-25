@@ -4,7 +4,7 @@ sigma_EMA is the sample standard deviation of the final (100% check) full-valpro
 seeds, a01-a03, whose runs ablations.json names. The guard pauses the flagship when size-m's final EMA
 VAA is more than 2 sigma_EMA below the seeds' mean; the flagship's own 25% and 50% checks read the same
 floor from long.toml's vaa_sigma, so the driver refuses to start unless that value is sigma_EMA to its
-printed precision. Stdlib only, like the driver.
+printed precision, a positive value printed to within 5% of sigma_EMA. Stdlib only, like the driver.
 """
 
 import json
@@ -16,6 +16,9 @@ from typing import Any
 from p7_machine import StepFailed, parse_number, read_json, read_rows, train_literal, write_atomic
 
 TOLERANCE = 1e-9  # float slack for a pre-registered comparison (blink.train.nstar)
+# vaa_sigma's literal must be printed to within this share of sigma_EMA: '0' or '0.002' agree with
+# 0.0016023 to their own printed digit, but 0 fails the 25%/50% checks on any noise dip
+PRECISION_SHARE = 0.05
 PAUSED_VAA = "paused: P7-VAA"  # blink.train.supervise's pause status: gate P7-VAA
 
 
@@ -49,8 +52,17 @@ def seed_rows(s) -> dict[str, dict[str, Any]]:
     return rows
 
 
+def agrees(value: float | None, eps: float, sigma: float) -> bool:
+    """A vaa_sigma literal (value, half its last printed digit) is sigma_EMA: positive, printed to within
+    PRECISION_SHARE of sigma_EMA, and equal to it at that precision."""
+    if value is None or value <= 0 or eps > PRECISION_SHARE * sigma:
+        return False
+    return abs(value - sigma) <= eps + TOLERANCE
+
+
 def check_sigma(s) -> dict[str, Any]:
-    """long.toml's vaa_sigma against the guard's sigma_EMA, to the literal's printed precision."""
+    """long.toml's vaa_sigma against the guard's sigma_EMA, to the literal's printed precision, which must
+    itself be fine enough (a positive value within PRECISION_SHARE of sigma_EMA)."""
     try:
         rows = seed_rows(s)
     except (OSError, ValueError, KeyError) as exc:
@@ -65,7 +77,7 @@ def check_sigma(s) -> dict[str, Any]:
         value, eps = None, 0.0
     record = {"long_toml": value, "literal": literal, "sigma_ema": sigma,
               "seeds": {arm: rows[arm]["ema_vaa"] for arm in s.arms}}  # fmt: skip
-    if value is None or abs(value - sigma) > eps + TOLERANCE:
+    if not agrees(value, eps, sigma):
         seeds = ", ".join(f"{arm} {rows[arm]['ema_vaa']}" for arm in s.arms)
         raise StepFailed(
             "preflight",
