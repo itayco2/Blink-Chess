@@ -19,6 +19,10 @@ Stockfish at `go nodes N` has no clock. Blink's compute never depends on time (N
 checks that no move ran long.
 A `games` override makes every match that long (and every SPRT cap), for smoke runs.
 
+SF19 labels (E2's win% regret and mate-preserving searches, E9's failures) run on ctx.sf_procs Stockfish
+processes, one thread each; `blink eval all` passes 5 (P8's CPU budget, blink.commands.evaluate). The
+blocks run one at a time, so no time-based block runs beside them.
+
 Blink plays every block after E2b with the epsilon E2b chose (results/epsilon.json), in process and under
 fastchess alike (blink-uci gets it as --epsilon); a block refuses to start if that file changed mid-run.
 
@@ -143,7 +147,7 @@ class EvalContext:
     side_models: tuple[str, ...] = ()  # 6 GPU-h sizes and s10m for E5's side rows
     data_dir: Path | None = None  # the pack with val/test roots, valprobe.npz and mateset.npz
     selfcheck_tc: str = SELFCHECK_TC  # E0: the slow side of SF's st=0.1 self-check
-    sf_procs: int = 1  # Stockfish processes for SF19 labels (E2 regret, E9)
+    sf_procs: int = 1  # Stockfish processes for SF19 labels (E2 regret and mate-preserving, E9); eval all: 5
     allow_busy_cpu: bool = False  # smoke runs only: start time-based blocks on a busy machine
     precision: str = fastmode.DEFAULT_PRECISION  # the fast play mode of every Blink player in the run
     compile: bool = False

@@ -4,6 +4,13 @@
 P8 (plan section 6): `eval books` writes the dev/final slices once; `eval endgames` screens the E8 set;
 `eval sprt` runs an in-process SPRT; `eval static` is E2 alone; `eval block <E?>` runs one block;
 `eval all --model ship --protocol EVAL.md` runs E0-E9 and writes results/results.json; `rate` fits Ordo.
+
+CPU budget of the SF19 labels (plan P8): `eval all` searches E2's win% regret and mate-preserving labels
+and E9's failure labels on P8_SF_PROCS = 5 Stockfish processes, one thread each. P8 runs on an idle machine
+(the i7-8700 has 6 cores: 5 for Stockfish, 1 for the harness); the blocks run one at a time, so no timed
+block runs beside the labels, and the pool has exited before the next block's CPU check. `eval block` and
+`eval static` keep 1 unless told. While a training run is live, side jobs get 3 processes at most (plan
+P7), and `eval endgames` follows PR-4 (EVAL.md section 5): at most 4 before P7 and 3 during it.
 """
 
 import argparse
@@ -19,6 +26,7 @@ from blink.play.agents import Agent
 from blink.reference import registry
 
 MODES_OR_BOTH = (*factory.MODES, "both")
+P8_SF_PROCS = 5  # `eval all`'s Stockfish processes for SF19 labels (the module docstring's CPU budget)
 
 
 def _set_label(name: str) -> str:
@@ -463,7 +471,7 @@ def _cmd_static(args: argparse.Namespace) -> int:
     return 0
 
 
-def _add_block_args(parser: argparse.ArgumentParser) -> None:
+def _add_block_args(parser: argparse.ArgumentParser, sf_procs: int = 1) -> None:
     parser.add_argument(
         "--model", required=True, help="the model under test: run:<name>[:ema] | ship | <path>"
     )
@@ -483,7 +491,13 @@ def _add_block_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--results", type=Path, default=Path("results"), help="where results.json goes")
     parser.add_argument("--protocol", type=Path, default=Path("EVAL.md"))
     parser.add_argument("--selfcheck-tc", default="120+1", help="E0: the slow side of SF's self-check")
-    parser.add_argument("--sf-procs", type=int, default=1, help="Stockfish processes for SF19 labels")
+    parser.add_argument(
+        "--sf-procs",
+        type=int,
+        default=sf_procs,
+        help=f"Stockfish processes (one thread each) for E2's and E9's SF19 labels (default {sf_procs}). "
+        f"eval all takes {P8_SF_PROCS}, P8's idle-machine budget; while training is live, 3 at most",
+    )
     parser.add_argument(
         "--allow-busy-cpu", action="store_true", help="smoke runs only: time-based blocks on a busy machine"
     )
@@ -570,7 +584,7 @@ def _register_blocks(ev_sub: argparse._SubParsersAction) -> None:
     blk.set_defaults(func=factory.friendly(_cmd_block))
 
     al = ev_sub.add_parser("all", help="every P8 block in the plan's order, then results/results.json")
-    _add_block_args(al)
+    _add_block_args(al, sf_procs=P8_SF_PROCS)
     al.add_argument("--only", default=None, help="comma-separated blocks, still run in the plan's order")
     al.add_argument("--dry-run", action="store_true", help="print the protocol check and the game table")
     al.set_defaults(func=factory.friendly(_cmd_all))

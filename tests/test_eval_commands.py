@@ -82,6 +82,27 @@ def test_eval_all_dry_run_prints_the_protocol_and_the_game_table(tmp_path, capsy
     assert '"frozen": false' in printed and "| E3 |" in printed and "live training runs: none" in printed
 
 
+def _context_of(command, monkeypatch, tmp_path, extra=()):
+    from blink.eval import orchestrate
+
+    seen = []
+    monkeypatch.setattr(orchestrate, "run_all", lambda ctx, only=None: seen.append(ctx) or {})
+    monkeypatch.setattr(orchestrate, "run_blocks", lambda ctx, runners, only=None: seen.append(ctx) or {})
+    protocol = tmp_path / "EVAL.md"
+    protocol.write_text("# EVAL\n", encoding="utf-8")
+    args = ["eval", *command, "--model", "ship", "--protocol", str(protocol), "--out", str(tmp_path / "o")]
+    assert cli.main([*args, *extra]) == 0
+    (ctx,) = seen
+    return ctx
+
+
+def test_eval_all_labels_with_5_stockfish_processes_unless_told_otherwise(tmp_path, monkeypatch):
+    """P8's E2 regret and mate-preserving labels and E9's labels run on 5 SF19 processes (plan P8)."""
+    assert _context_of(["all"], monkeypatch, tmp_path).sf_procs == 5
+    assert _context_of(["all"], monkeypatch, tmp_path, ["--sf-procs", "3"]).sf_procs == 3
+    assert _context_of(["block", "E9"], monkeypatch, tmp_path).sf_procs == 1  # a block alone: unchanged
+
+
 def test_a_block_that_needs_the_mode_says_so_in_one_line(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("BLINK_HOME", str(tmp_path))
     protocol = tmp_path / "EVAL.md"
