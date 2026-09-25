@@ -10,12 +10,15 @@ its first window starts at N, read from config.json "branched_from": the parent'
 billed once, to the parent. Runs trained on the CPU, folders without a metrics.jsonl and a branch whose
 checkpoint name gives no step are listed as skipped.
 
-Energy (GPU board only, never the whole PC). When every window carries gpu_power_w (the mean board
-power over that window, which the trainer logs from NVML's energy counter: blink.train.power), energy
-is the sum of seconds times watts. Otherwise the run's nvidia-smi log
-(runs/NAME/nvidia-smi.csv, `nvidia-smi --query-gpu=timestamp,power.draw --format=csv -l 10`) is
-integrated with the trapezoid rule, skipping gaps longer than 120 s. A run with neither has no kWh,
-and kwh_coverage says what share of the GPU-hours the published kWh covers.
+Energy (GPU board only, never the whole PC). A window that carries gpu_power_w (the mean board power
+over that window, which the trainer logs from NVML's energy counter: blink.train.power) contributes its
+seconds times watts. When every window has it, that is the run's energy. Otherwise an nvidia-smi log, if
+the run has one (runs/NAME/nvidia-smi.csv, `nvidia-smi --query-gpu=timestamp,power.draw --format=csv
+-l 10`; nothing writes it by default), is integrated with the trapezoid rule, skipping gaps longer than
+120 s. Failing that, the measured windows alone are summed ("metrics-partial"): one failed NVML read, a
+counter reset or a resume whose reader failed drops one window's reading, and a run of 120 GPU-hours
+cannot be re-measured. Each run records the GPU-hours its kWh covers (kwh_hours), and kwh_coverage says
+what share of the project's GPU-hours the published kWh covers, so the claim states it.
 """
 
 import csv
@@ -43,7 +46,8 @@ class RunCompute:
     steps: int
     gpu_hours: float
     kwh: float | None
-    kwh_source: str  # "metrics" | "nvidia-smi" | "none"
+    kwh_source: str  # "metrics" | "nvidia-smi" | "metrics-partial" | "none"
+    kwh_hours: float = 0.0  # the GPU-hours the kWh covers (all of them, part, or none)
 
 
 @dataclass(frozen=True)
@@ -141,15 +145,21 @@ def nvsmi_kwh(path: Path) -> float | None:
     return joules / JOULES_PER_KWH
 
 
-def _kwh(run_dir: Path, spans: list[tuple[float, float | None]]) -> tuple[float | None, str]:
-    if spans and all(watts is not None for _, watts in spans):
-        return sum(s * w for s, w in spans) / JOULES_PER_KWH, "metrics"
+def _kwh(run_dir: Path, spans: list[tuple[float, float | None]]) -> tuple[float | None, str, float]:
+    """(kWh, source, GPU-hours covered) for one run's windows."""
+    measured = [(s, w) for s, w in spans if w is not None]
+    hours = sum(s for s, _ in spans) / 3600
+    if spans and len(measured) == len(spans):
+        return sum(s * w for s, w in spans) / JOULES_PER_KWH, "metrics", hours
     log = run_dir / NVSMI_LOG
     if log.is_file():
         kwh = nvsmi_kwh(log)
         if kwh is not None:
-            return kwh, "nvidia-smi"
-    return None, "none"
+            return kwh, "nvidia-smi", hours
+    if measured:
+        covered = sum(s for s, _ in measured) / 3600
+        return sum(s * w for s, w in measured) / JOULES_PER_KWH, "metrics-partial", covered
+    return None, "none", 0.0
 
 
 def run_compute(run_dir: Path) -> RunCompute | Skipped:
@@ -173,8 +183,8 @@ def run_compute(run_dir: Path) -> RunCompute | Skipped:
     if not rows:
         return Skipped(run_dir.name, "metrics.jsonl has no complete rows")
     spans = windows(rows, int(batch_size), start)
-    kwh, source = _kwh(run_dir, spans)
-    return RunCompute(run_dir.name, rows[-1]["step"], sum(s for s, _ in spans) / 3600, kwh, source)
+    kwh, source, covered = _kwh(run_dir, spans)
+    return RunCompute(run_dir.name, rows[-1]["step"], sum(s for s, _ in spans) / 3600, kwh, source, covered)
 
 
 def _run_dirs(runs_root: Path, names: list[str] | None) -> list[Path]:
@@ -194,7 +204,7 @@ def project_compute(
         (counted if isinstance(result, RunCompute) else skipped).append(result)
     total = sum(r.gpu_hours for r in counted)
     powered = [r for r in counted if r.kwh is not None]
-    covered = sum(r.gpu_hours for r in powered)
+    covered = sum(r.kwh_hours for r in powered)
     flag = next((r for r in counted if r.run == flagship), None)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -203,6 +213,7 @@ def project_compute(
         "flagship": flagship,
         "flagship_gpu_hours": flag.gpu_hours if flag else None,
         "flagship_kwh": flag.kwh if flag else None,
+        "flagship_kwh_hours": flag.kwh_hours if flag and flag.kwh is not None else None,
         "total_gpu_hours": total,
         "gpu_board_kwh": sum(r.kwh for r in powered) if powered else None,
         "kwh_gpu_hours": covered,

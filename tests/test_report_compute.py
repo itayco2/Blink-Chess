@@ -66,11 +66,28 @@ def test_kwh_falls_back_to_the_nvidia_smi_log(tmp_path):
     assert result.kwh == pytest.approx((10 * 210 + 20 * 220) / 3.6e6)
 
 
-def test_a_partial_power_log_in_metrics_is_not_trusted(tmp_path):
-    rows = _rows()
-    rows[2] = {**rows[2], compute.POWER_FIELD: 210.0}
-    run = _run(tmp_path, "a", rows)
-    assert compute.run_compute(run).kwh is None
+def test_a_partial_power_log_counts_its_measured_windows_and_says_how_much_they_cover(tmp_path):
+    """One failed NVML read (or a counter reset, or a resume whose reader failed) drops one window's
+    gpu_power_w. The flagship cannot be re-measured, so its other windows still count, and the run and the
+    project say which share of the GPU-hours the kWh covers."""
+    rows = _rows(power=200.0)
+    rows[1] = {k: v for k, v in rows[1].items() if k != compute.POWER_FIELD}  # the 10 s window: no reading
+    run = _run(tmp_path, "long", rows)
+    result = compute.run_compute(run)
+    assert result.kwh_source == "metrics-partial"
+    assert result.kwh == pytest.approx((1 + 20) * 200.0 / 3.6e6)
+    assert result.kwh_hours == pytest.approx(21.0 / 3600) and result.gpu_hours == pytest.approx(31.0 / 3600)
+    report = compute.project_compute(tmp_path, flagship="long", now="t")
+    assert report["flagship_kwh"] == pytest.approx(result.kwh)
+    assert report["flagship_kwh_hours"] == pytest.approx(21.0 / 3600)
+    assert report["kwh_gpu_hours"] == pytest.approx(21.0 / 3600)
+    assert report["kwh_coverage"] == pytest.approx(21.0 / 31.0)
+
+
+def test_a_run_whose_every_window_is_measured_covers_all_its_hours(tmp_path):
+    result = compute.run_compute(_run(tmp_path, "a", _rows(power=200.0)))
+    assert result.kwh_hours == pytest.approx(result.gpu_hours)
+    assert compute.run_compute(_run(tmp_path, "b", _rows())).kwh_hours == 0.0
 
 
 def test_cpu_runs_and_folders_without_metrics_are_skipped_with_a_reason(tmp_path):
