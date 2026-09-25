@@ -1,22 +1,28 @@
-# P6 size sweep at equal GPU-hours, then N*. blink sweep sizes; blink sweep choose.
+# P6 v2 (EVAL.md PR-2, only with Itay's OK): N* = M by the research prior, overridden only by the epoch
+# floor and VRAM; no size runs at 6 h, so `blink sweep sizes` plans nothing. M's 6 h rung, PR-2's 59,126
+# steps, is a cooldown branched from the flagship at step 47,301 (tools/p7_v2_driver.py), and `blink
+# sweep choose` records the floor, VRAM and p99 facts without sweep.json. P6 v1 was sizes s, m, m12 (l
+# conditional) with rule "vaa" (best 6 h VAA, 2 sigma tie to M); nstar.py keeps that rule for the record.
 
 [sizes]
-sizes = ["s", "m", "m12"]
-conditional = ["l"]           # runs only if its measured rate passes the epoch floor
+sizes = []                    # v1: ["s", "m", "m12"]
+conditional = []              # v1: ["l"], run only above the epoch floor (L 1,598 < 1,658 samples/s)
 hours = 6.0
 recipe = "configs/recipe.toml"    # frozen at the end of P5 (arm-style overrides)
 data = "v1"
 disable = []
 
 [choose]
+rule = "prior"                # "prior": N* = default unless floor or VRAM (P6 v2); "vaa": best 6 h VAA (v1)
+candidates = ["s", "m", "m12", "l"]   # the sizes the prior rule reports and falls back to
 epoch_floor = 1658.0          # samples/s: 401M roots / 0.7 root share in T_long = 96 h
 t_long_hours = 96.0
 train_roots = 401000000
 root_frac = 0.7
 default = "m"
-p99_ms_max = 100.0
+p99_ms_max = 100.0            # reported against, never gating (EVAL.md PR-3): latency never changes N*
 p99_rows = 219
 p99_concurrency = [5, 2]      # fastchess plays 5 at once, the bot 2
-p99_precision = "fp32"        # the play mode p99 is judged in: fp32 | bf16 (bench play --precision)
+p99_precision = "fp32"        # the play mode p99 is read in: fp32 | bf16 (bench play --precision)
 p99_compile = false           # true: only bench play rows timed with --compile
 sigma_factor = 2.0

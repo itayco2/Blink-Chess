@@ -98,6 +98,8 @@ def _describe(record: dict[str, Any]) -> str:
         parts.append(f"mate kept {record['mate_preserving']:.3f} (ema {record['ema_mate_preserving']:.3f})")
     if "vaa_check_failed" in record:
         parts.append(f"CHECK {record['check']} FAILED: {record['check_failure']}")
+    elif "check_skipped" in record:  # e.g. no reference yet, or one without a stable phase (P6 v2)
+        parts.append(f"check {record['check']} skipped ({record['check_skipped']})")
     elif "check" in record:
         parts.append(f"check {record['check']} passed")
     parts.append(f"{record['eval_s']:.1f} s")

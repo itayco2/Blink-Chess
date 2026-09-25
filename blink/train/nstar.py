@@ -1,11 +1,19 @@
-"""Choosing N* after the size sweep (plan P6), by the pre-registered precedence: epoch floor
-(>= 1,658 samples/s, one epoch of training roots in T_long = 96 h) > best 6 h VAA > default M (a best
-VAA within 2 sigma of M's means M; if M fails the floor, the largest passing size). A size must also
-fit the VRAM budget at micro-batch >= 256 and keep value-mode p99 <= 100 ms at L+1 rows.
+"""Choosing N* (plan P6) by one of two pre-registered rules, named in configs/sweep.toml [choose] rule.
 
-The p99 is read only from bench play rows timed in the one play mode the rules name (p99_precision,
-p99_compile; blink.play.fastmode), so a size is judged at the mode Blink will actually play in. The
-defaults, fp32 uncompiled, are the plan's play runtime.
+"vaa" (P6 v1, kept for the record): epoch floor (>= 1,658 samples/s, one epoch of training roots in
+T_long = 96 h) > best 6 h VAA > default M (a best VAA within 2 sigma of M's means M; if M fails the
+floor, the largest passing size).
+
+"prior" (P6 v2, EVAL.md PR-2): N* = the default, M, by the research prior; only the epoch floor and VRAM
+override it. If M fails the floor, N* is the largest candidate size that passes; if M has no measured
+micro-batch >= 256 inside the VRAM budget, there is no N* and gate P6-N* is set (a measurement to redo,
+never a reason to shrink). No 6 h VAA takes part, and sweep.json may be absent.
+
+In both rules a size must fit the VRAM budget at micro-batch >= 256, and the epoch floor is read at the
+compile mode the long run trains in. Latency never changes N* (EVAL.md PR-3): the value-mode p99 at L+1
+rows is reported beside each size, with a note when it is over p99_ms_max or not measured. The p99 is
+read only from bench play rows timed in the one play mode the rules name (p99_precision, p99_compile;
+blink.play.fastmode). The defaults, fp32 uncompiled, are the plan's play runtime.
 """
 
 import dataclasses
@@ -19,24 +27,30 @@ from blink.play import fastmode
 from blink.train.bench import best_rates, play_mode
 
 SIZE_ORDER = ("t", "s", "m", "m12", "l")
+RULES = ("vaa", "prior")
 TOLERANCE = 1e-9  # float slack for every pre-registered comparison (the sweep's too)
+GATE = "P6-N*"
 
 
 @dataclass(frozen=True)
 class ChooseRules:
+    rule: str = "vaa"  # "vaa": best 6 h VAA (P6 v1); "prior": the default unless floor or VRAM (P6 v2)
+    candidates: tuple[str, ...] = ("s", "m", "m12", "l")  # the sizes the prior rule judges and falls back to
     epoch_floor: float = 1658.0  # samples/s: one epoch of training roots in T_long hours
     t_long_hours: float = 96.0
     train_roots: int = 401_000_000
     root_frac: float = 0.7  # batches mix 70% roots and 30% children
     default: str = "m"
-    p99_ms_max: float = 100.0
+    p99_ms_max: float = 100.0  # reported against, never gating (PR-3)
     p99_rows: int = 219
     p99_concurrency: tuple[int, ...] = (5, 2)
-    p99_precision: str = fastmode.DEFAULT_PRECISION  # the play mode the p99 is judged in
+    p99_precision: str = fastmode.DEFAULT_PRECISION  # the play mode the p99 is read in
     p99_compile: bool = False
     sigma_factor: float = 2.0
 
     def __post_init__(self) -> None:
+        if self.rule not in RULES:
+            raise ValueError(f"rule must be one of {RULES}, got {self.rule!r}")
         if self.p99_precision not in fastmode.PRECISIONS:
             raise ValueError(
                 f"p99_precision must be one of {fastmode.PRECISIONS}, got {self.p99_precision!r}"
@@ -76,15 +90,35 @@ def p99_of(bench: Mapping[str, Any], size: str, rules: ChooseRules) -> dict[str,
     return {str(c): found.get(c) for c in rules.p99_concurrency}
 
 
+def p99_note(p99: Mapping[str, float | None], rules: ChooseRules) -> str | None:
+    """Why the p99 misses the bar (not measured in the rules' mode, or over it), or None. Reported only:
+    latency decides the play mode and the match concurrency, never N* (PR-3)."""
+    mode = fastmode.describe(*rules.play_mode)
+    missing = [c for c, v in p99.items() if v is None]
+    over = {c: v for c, v in p99.items() if v is not None and v > rules.p99_ms_max}
+    if missing:
+        return f"value-mode p99 not measured at concurrency {missing} in {mode}"
+    if over:
+        return f"value-mode p99 over {rules.p99_ms_max:.0f} ms in {mode}: {over}"
+    return None
+
+
 def _order(size: str, best: Mapping[str, Mapping]) -> tuple:
     known = SIZE_ORDER.index(size) if size in SIZE_ORDER else len(SIZE_ORDER)
     return known, best.get(size, {}).get("parameters") or 0, size
 
 
-def _eligibility(
+def _constraints(
     row: Mapping | None, vaa: float | None, p99: Mapping, rules: ChooseRules, pin: int | None = None
 ) -> dict[str, Any]:
-    entry: dict[str, Any] = {"vaa": vaa, "p99_ms": dict(p99), "eligible": False, "failed": None}
+    """A size judged on VRAM and the epoch floor, with its p99 reported beside them."""
+    entry: dict[str, Any] = {
+        "vaa": vaa,
+        "p99_ms": dict(p99),
+        "p99_note": p99_note(p99, rules),
+        "eligible": False,
+        "failed": None,
+    }
     if row is None:
         measured = (
             "no measured micro-batch >= 256" if pin is None else f"no row at its pinned micro-batch {pin}"
@@ -99,34 +133,49 @@ def _eligibility(
     if rate < rules.epoch_floor:
         why = f"fails the epoch floor: {rate:,.0f} < {rules.epoch_floor:,.0f} samples/s"
         return {**entry, "failed": "floor", "reason": why}
-    missing = [c for c, v in p99.items() if v is None]
-    over = {c: v for c, v in p99.items() if v is not None and v > rules.p99_ms_max}
-    mode = fastmode.describe(*rules.play_mode)
-    if missing:
-        why = f"value-mode p99 not measured at concurrency {missing} in {mode}"
-        return {**entry, "failed": "p99", "reason": why}
-    if over:
-        why = f"value-mode p99 over {rules.p99_ms_max:.0f} ms in {mode}: {over}"
-        return {**entry, "failed": "p99", "reason": why}
+    return {**entry, "eligible": True, "reason": "passes the epoch floor and VRAM"}
+
+
+def _eligibility(
+    row: Mapping | None, vaa: float | None, p99: Mapping, rules: ChooseRules, pin: int | None = None
+) -> dict[str, Any]:
+    """The vaa rule's judgement: the constraints, then a 6 h VAA to rank by."""
+    entry = _constraints(row, vaa, p99, rules, pin)
+    if not entry["eligible"]:
+        return entry
     if vaa is None:
-        return {**entry, "failed": "vaa", "reason": "no 6 h VAA"}
-    return {**entry, "eligible": True, "reason": "passes every constraint"}
+        return {**entry, "eligible": False, "failed": "vaa", "reason": "no 6 h VAA"}
+    return {**entry, "reason": "passes every constraint"}
 
 
 def choose(
     bench: Mapping,
     sizes: Mapping[str, Mapping],
-    sigma: float,
+    sigma: float | None,
     rules: ChooseRules,
     compile: str | None = None,
     pins: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    """N* by the pre-registered precedence: epoch floor > best 6 h VAA > default M.
+    """N* by the rules' pre-registered rule (`rules.rule`).
 
     `compile` is the mode the long run will train in and `pins` the micro-batch each size's config
     pins (blink.train.size_sweep.size_micro_pin); the rates of those rows decide the epoch floor.
+    `sigma` (the a01-a03 noise floor) decides the vaa rule's 2 sigma tie; the prior rule only records it.
     """
-    pins = pins or {}
+    if rules.rule == "prior":
+        return _choose_prior(bench, sizes, sigma, rules, compile, pins or {})
+    return _choose_vaa(bench, sizes, sigma, rules, compile, pins or {})
+
+
+def _choose_vaa(
+    bench: Mapping,
+    sizes: Mapping[str, Mapping],
+    sigma: float,
+    rules: ChooseRules,
+    compile: str | None,
+    pins: Mapping[str, int],
+) -> dict[str, Any]:
+    """P6 v1: epoch floor > best 6 h VAA > default M."""
     best = best_rates(bench, compile=compile, pins=pins)
     ordered = sorted(sizes, key=lambda s: _order(s, best))
     entries = {
@@ -151,3 +200,33 @@ def choose(
     if top != rules.default and margin <= rules.sigma_factor * sigma + TOLERANCE:
         return {**result, "n_star": rules.default, "reason": f"{top} is within 2 sigma of M ({margin:+.4f})"}
     return {**result, "n_star": top, "reason": f"best 6 h VAA ({entries[top]['vaa']:.4f})"}
+
+
+def _choose_prior(
+    bench: Mapping,
+    sizes: Mapping[str, Mapping],
+    sigma: float | None,
+    rules: ChooseRules,
+    compile: str | None,
+    pins: Mapping[str, int],
+) -> dict[str, Any]:
+    """P6 v2 (PR-2): the default unless it fails the epoch floor (then the largest candidate that passes)
+    or VRAM (then no N*). A 6 h VAA, where sweep.json holds one, is reported and decides nothing."""
+    best = best_rates(bench, compile=compile, pins=pins)
+    names = sorted({*rules.candidates, *sizes, rules.default}, key=lambda s: _order(s, best))
+    entries = {
+        s: _constraints(best.get(s), sizes.get(s, {}).get("vaa"), p99_of(bench, s, rules), rules, pins.get(s))
+        for s in names
+    }
+    result = {"sigma": sigma, "rules": dataclasses.asdict(rules), "sizes": entries}
+    default = entries[rules.default]
+    if default["eligible"]:
+        why = f"P6 v2 prior: {rules.default} passes the epoch floor and VRAM"
+        return {**result, "n_star": rules.default, "reason": why}
+    passing = [s for s in names if entries[s]["eligible"]]
+    if default["failed"] == "floor" and passing:
+        why = f"{rules.default} fails the epoch floor: the largest size that passes"
+        return {**result, "n_star": passing[-1], "reason": why}
+    failed = {"vram": "VRAM", "floor": "the epoch floor"}[default["failed"]]
+    why = f"{rules.default} fails {failed} ({default['reason']}) and nothing replaces it: gate {GATE}"
+    return {**result, "n_star": None, "reason": why}

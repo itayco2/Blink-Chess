@@ -569,6 +569,14 @@ def _sigma(args: argparse.Namespace) -> float:
     return float(noise["vaa"]["sigma"])
 
 
+def _recorded_sigma(args: argparse.Namespace) -> tuple[float | None, str | None]:
+    """(sigma, None), or (None, why) when there is none: the prior rule only records sigma."""
+    try:
+        return _sigma(args), None
+    except (FileNotFoundError, ValueError) as exc:
+        return None, str(exc)
+
+
 def _size_pins(sizes, recipe: Path | None) -> dict[str, int]:
     """The micro-batch each size's repo config pins (M and M12: 256); a size without a config file
     under configs/ (or with "auto") is judged at its fastest row, as before."""
@@ -589,26 +597,35 @@ def cmd_sweep_choose(args: argparse.Namespace) -> int:
     from blink.train import nstar, sweep
 
     sweep_path = _home_eval("sweep.json", args.sweep)
+    no_sigma = None
     try:
         bench = _read_json(_home_eval("bench.json", args.bench), "bench.json")
-        state = _read_json(sweep_path, "sweep.json")
         config = _repo_config(args.config, "sweep.toml")
         rules = nstar.load_rules(config) if config.is_file() else nstar.ChooseRules()
+        prior = rules.rule == "prior"
+        # P6 v2 runs no size sweep, so sweep.json may not exist yet: the choice starts it
+        state = {} if prior and not sweep_path.is_file() else _read_json(sweep_path, "sweep.json")
         recipe = sweep.CONFIG_DIR / "recipe.toml"  # the long run trains in the recipe's compile mode
         mode = compile_mode(read_tables(recipe)) if recipe.is_file() else None
+        sigma, no_sigma = _recorded_sigma(args) if prior else (_sigma(args), None)
         sizes = state.get("sizes", {})
-        pins = _size_pins(sizes, recipe if recipe.is_file() else None)
-        choice = nstar.choose(bench, sizes, _sigma(args), rules, compile=mode, pins=pins)
+        # the prior judges its candidates too (sweep.json may be empty): each at its config's pinned row
+        judged = {*sizes, *rules.candidates, rules.default} if prior else set(sizes)
+        pins = _size_pins(sorted(judged), recipe if recipe.is_file() else None)
+        choice = nstar.choose(bench, sizes, sigma, rules, compile=mode, pins=pins)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"blink sweep choose: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     from blink.train.atomic import write_text_atomic
 
     write_text_atomic(sweep_path, json.dumps({**state, "choice": choice}, indent=2) + "\n")
+    _say(f"rule {rules.rule}" + (f"; sigma not recorded ({no_sigma})" if no_sigma else ""))
     for size, entry in choice["sizes"].items():
         _say(
             f"  {size}: {'eligible' if entry['eligible'] else 'out'} ({entry['reason']}), VAA {entry['vaa']}"
         )
+        if entry.get("p99_note"):
+            _say(f"    p99 (reported, not gating): {entry['p99_note']}")
     _say(f"N* = {choice['n_star']} ({choice['reason']})")
     return 0 if choice["n_star"] else 1
 
@@ -630,7 +647,9 @@ def _register_sweep(sub: argparse._SubParsersAction) -> None:
     sizes = actions.add_parser("sizes", help="S, M, M12 (and L above the epoch floor) at equal hours")
     sizes.add_argument("--sizes", help="default: the sizes and conditional sizes of configs/sweep.toml")
     sizes.add_argument("--hours", type=float)
-    choose = actions.add_parser("choose", help="N*: epoch floor > best 6 h VAA > default M")
+    choose = actions.add_parser(
+        "choose", help="N* by sweep.toml's rule: prior (M unless floor or VRAM) or vaa (best 6 h VAA)"
+    )
     choose.add_argument("--sweep", help="sweep.json (default BLINK_HOME/eval/sweep.json)")
     choose.add_argument(
         "--ablations", help="ablations.json, for sigma (default BLINK_HOME/eval/ablations.json)"

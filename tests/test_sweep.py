@@ -654,12 +654,6 @@ def test_choose_takes_the_largest_passing_size_when_m_fails_the_floor():
     assert choice["n_star"] == "s" and "M fails the epoch floor" in choice["reason"]
 
 
-def test_choose_drops_a_size_whose_value_mode_p99_is_over_100_ms():
-    rates = {"s": 9000.0, "m": 3000.0, "m12": 2200.0}
-    choice = _choose(rates, {"s": 0.50, "m": 0.54, "m12": 0.58}, p99={"s": 20.0, "m": 60.0, "m12": 130.0})
-    assert choice["n_star"] == "m" and "p99" in choice["sizes"]["m12"]["reason"]
-
-
 def test_the_epoch_floor_is_one_epoch_of_training_roots_in_96_hours():
     rules = nstar.ChooseRules()
     assert rules.epoch_floor == 1658.0
