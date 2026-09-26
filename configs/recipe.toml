@@ -1,5 +1,7 @@
-# Recipe D (plan P4): the training recipe every size config inherits with base = "recipe.toml".
-# Frozen at the end of P5 (configs/recipe.toml is the frozen copy); ablation arms override one key each.
+# Recipe D + a10 (plan P4, frozen at the end of P5 on 2026-09-26): the training recipe every size config
+# inherits with base = "recipe.toml". P5's verdict (eval/ablations.json): a10, Muon on the 2D hidden
+# weights, VAA 0.5615 >= D + 2 sigma 0.5585; a15 (D + a10) VAA 0.5645 >= D - 1 sigma, so the recipe is D + a10.
+# Ablation arms override one key each.
 # The model shape and the learning rate live in the size configs (s, m, m12, l).
 
 [model]
@@ -17,6 +19,8 @@ cooldown_frac = 0.2     # warmup-stable-decay, 1 - sqrt cooldown over the last 2
 weight_decay = 0.1      # matrices only
 beta1 = 0.9
 beta2 = 0.95
+optimizer = "muon"       # P5 a10, adopted: Muon on 2D hidden weights, AdamW on the rest
+muon_adjust_lr_fn = "match_rms_adamw"  # passed explicitly: torch's default is "original"
 clip_norm = "auto"      # 2 x p95 of the warmup grad norms; clip 1.0 clipped 98% of the skeleton's steps
 compile = "inductor"    # P4 A/B on M, 2 seeds: 1.55x samples/s and 4-5% lower loss at step 2k (PF68)
 ema_max = 0.9999        # decay_t = min(0.9999, (1 + t) / (10 + t))
