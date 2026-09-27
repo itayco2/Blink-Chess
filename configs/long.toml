@@ -20,7 +20,7 @@
 base = "m.toml"
 
 [train]
-steps = 661078          # replaced by `blink train calibrate --write` (661,078: 120 h at M's eager 1,567/s)
+steps = 1087511         # PR-5: floor(120 x 3600 x 2577.81 / 1024), run calib-long-20260926-101649, 2026-09-26
 eval_every = 4000       # PR-5: the EMA subset VAA every 4,000 steps (not 2,000); the checks, the preview,
                         # 30-minute checkpoints, metrics every 50 steps and every stop rule are unchanged
 film = true             # 21 frames under runs/long/film/
@@ -29,5 +29,5 @@ vaa_sigma = 0.0016023   # sigma_EMA (PR-2's guard): sample sd of a01-a03's 100% 
                         # valprobe (0.55115, 0.5529, 0.5497 in D:\blink runs/abl-a01..a03, 2026-09-25)
                         # = 0.0016023; tools/p7_v2_driver.py refuses to start unless they agree
 vaa_sigma_subset = 0.0  # the subset's measured 3-seed sigma; 0 = not measured, full rows only
-vaa_reference = ""      # the N* 6 h sweep run; empty skips the 5% rule (the row says so)
+vaa_reference = "size-m"      # the N* 6 h sweep run; empty skips the 5% rule (the row says so)
 keep_every_hours = 12.0 # keep the last 3 checkpoints plus one every 12 h (check steps are always kept)
