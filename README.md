@@ -13,19 +13,22 @@ positions.
 ## Results
 
 Google DeepMind's 10,000-puzzle benchmark from
-[Grandmaster-Level Chess Without Search](https://arxiv.org/abs/2402.04494) (Ruoss et al., 2024). Both
-models were measured here, on the same puzzles, with the same scorer: DeepMind's released 9M checkpoint
-was ported to PyTorch and re-measured rather than quoted from the paper.
+[Grandmaster-Level Chess Without Search](https://arxiv.org/abs/2402.04494) (Ruoss et al., 2024).
 
 | all 10,000 puzzles | solved | 95% interval |
 |---|---|---|
 | **Blink**, one look per move (value mode) | **89.8%** (8,981) | 89.2 to 90.4 |
 | Blink, one look (policy mode) | 83.8% (8,375) | 83.0 to 84.5 |
-| DeepMind 9M, EMA weights | 86.4% (8,638) | 85.7 to 87.0 |
-| DeepMind 9M, released weights | 86.2% (8,620) | 85.5 to 86.9 |
+| Google DeepMind 9M, as published (paper v2) | 88.9% | |
+| Google DeepMind 9M, released checkpoint, EMA weights | 86.4% (8,638) | 85.7 to 87.0 |
+| Google DeepMind 9M, released checkpoint, plain weights | 86.2% (8,620) | 85.5 to 86.9 |
 
-Head to head on the same puzzles, against DeepMind's better weights: Blink alone solves 698 of them and
-DeepMind 9M alone solves 355 (a paired z of 10.6).
+The paper reports 88.9% for its 9M model after 10M training steps (v1 of the paper reported 85.5%). The
+checkpoint Google DeepMind released is from step 6.4M (`checkpoint_step` in its `src/engines/constants.py`),
+so it was ported to PyTorch and measured here, on the same puzzles, with the same scorer as Blink.
+
+Head to head on the same puzzles, against the released checkpoint's better weights: Blink alone solves 698
+of them and Google DeepMind 9M alone solves 355 (a paired z of 10.6).
 
 By puzzle rating, value mode, all 10,000: 99.5% under 1000, 97.9% at 1000-1500, 90.8% at 1500-2000,
 67.9% at 2000-2500 and 30.6% above 2500.
@@ -37,7 +40,7 @@ two ways:
 
 - **One look (policy mode):** one pass through the network, straight to a move.
 - **One look per move (value mode):** the network scores the position after each legal move once, in one
-  batch, and plays the best. It never looks at the opponent's reply. DeepMind's action-value models play
+  batch, and plays the best. It never looks at the opponent's reply. Google DeepMind's action-value models play
   the same way.
 
 The exact rule, what counts as search and how every published game proves compliance, is in
@@ -50,7 +53,7 @@ The exact rule, what counts as search and how every published game proves compli
 | data | 409.7M Lichess positions; 403.5M train roots after a 636,245-position leakage blocklist, 0 leaks in the verify pass |
 | recipe | 8 experiments on a 5M-parameter model at 1.5 hours each (7 single changes, then the winners combined), judged against a 3-seed noise floor; only a change that beat the baseline by 2 standard deviations was kept. One did: the Muon optimizer |
 | size | the 22.5M model was checked on a 6-hour branch before the long run: 58.7% move agreement with Stockfish, against 55.1% for the small models |
-| flagship | 19.6 training hours on the RTX 3070, the last 5.3 of them a cooldown; I stopped it from the interim puzzle checks, once it was clearly past DeepMind's 9M model, by a rule written before the run (EVAL.md, PR-6) |
+| flagship | 19.6 training hours on the RTX 3070, the last 5.3 of them a cooldown; I stopped it from the interim puzzle checks, once it was clearly past Google DeepMind's released 9M checkpoint, by a rule written before the run (EVAL.md, PR-6) |
 
 The puzzle score during training, value mode, on the first 2,000 puzzles:
 
